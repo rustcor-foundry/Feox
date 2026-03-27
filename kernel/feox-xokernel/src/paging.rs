@@ -323,6 +323,79 @@ impl<'map, 'reservations> PageTableFrameAllocator
     }
 }
 
+/// Bootstrap page-table source that treats low physical memory as identity
+/// mapped in the current x86 bring-up path.
+///
+/// This is intentionally narrow and only exists to let the live bootstrap path
+/// exercise page-table mechanisms before a broader virtual-memory model exists.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BootstrapIdentityMappedPageTables;
+
+impl PageTableFrameSource for BootstrapIdentityMappedPageTables {
+    fn table(&self, frame: PhysicalFrame) -> Option<&[u64; PAGE_TABLE_ENTRY_COUNT]> {
+        identity_mapped_table(frame)
+    }
+}
+
+impl PageTableFrameMutSource for BootstrapIdentityMappedPageTables {
+    fn table_mut(&mut self, frame: PhysicalFrame) -> Option<&mut [u64; PAGE_TABLE_ENTRY_COUNT]> {
+        identity_mapped_table_mut(frame)
+    }
+}
+
+fn identity_mapped_table(frame: PhysicalFrame) -> Option<&'static [u64; PAGE_TABLE_ENTRY_COUNT]> {
+    #[cfg(target_os = "none")]
+    {
+        let address = frame.start_address().as_u64();
+        if address == 0 {
+            return None;
+        }
+
+        let table = unsafe {
+            // SAFETY: During the current x86 bootstrap lane, the loader hands
+            // off with low physical memory identity mapped. Page-table frames
+            // allocated and inspected here are below 4 GiB and are only used
+            // during early bring-up before a richer VM model exists.
+            &*(core::ptr::with_exposed_provenance::<[u64; PAGE_TABLE_ENTRY_COUNT]>(
+                address as usize,
+            ))
+        };
+        Some(table)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = frame;
+        None
+    }
+}
+
+fn identity_mapped_table_mut(
+    frame: PhysicalFrame,
+) -> Option<&'static mut [u64; PAGE_TABLE_ENTRY_COUNT]> {
+    #[cfg(target_os = "none")]
+    {
+        let address = frame.start_address().as_u64();
+        if address == 0 {
+            return None;
+        }
+
+        let table = unsafe {
+            // SAFETY: See `identity_mapped_table`. The mutable access stays
+            // confined to bootstrap-owned page-table frames in the single-core
+            // early bring-up path.
+            &mut *(core::ptr::with_exposed_provenance_mut::<[u64; PAGE_TABLE_ENTRY_COUNT]>(
+                address as usize,
+            ))
+        };
+        Some(table)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = frame;
+        None
+    }
+}
+
 fn read_entry(
     source: &impl PageTableFrameSource,
     table_frame: PhysicalFrame,

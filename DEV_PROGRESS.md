@@ -44,14 +44,33 @@ This document is the running development record for Feox.
 - fixed the x86 kernel image type so the loader now boots an `ET_EXEC` kernel instead of rejecting an `ET_DYN` artifact
 - fixed the x86 loader-to-kernel ABI handoff so the boot info pointer is passed in `rdi` as intended
 - added a QEMU debug-console path at port `0x402` for both loader and kernel so early boot traces are captured reliably on this host
+- fixed the live x86 bootstrap allocator path so the first usable frame is now a sane post-kernel address instead of `0x0`
+- added richer live bootstrap memory diagnostics, including region-kind and reservation-kind summaries in the QEMU boot trace
+- taught the live x86 bootstrap path to allocate and record one real `BootstrapPageTables` frame during bring-up
+- added a bootstrap identity-mapped page-table source for low bootstrap-owned frames without assuming the firmware-owned active root is directly accessible
+- taught the live x86 bootstrap path to build and retain a standalone transition page-table root, perform a real `map -> translate` step against it, and prove the result in the QEMU trace
+- extended the live x86 transition-root trace with concrete high-half entry and stack aliases so the first root-switch step has explicit target coordinates
+- completed the first real x86 CR3 handoff under QEMU by switching onto the retained transition root and logging success from inside the new address space
+- debugged the handoff boundary with raw debug-console markers and confirmed the original failure was a writable-stack issue in the transition root
+- moved the working CR3 handoff onto kernel-owned transition stack pages instead of the original boot stack, and verified the post-switch path still completes under QEMU
+- extended the post-switch path so it moves from the identity handoff stack onto the mapped high-half transition stack alias and still completes cleanly under QEMU
+- extended the post-switch path again so it now jumps into the mapped high-half code alias as well, giving Feox its first real higher-half code-and-stack execution slice under QEMU
+- added a kernel-owned transition data page and verified that code, stack, and data now all survive the higher-half post-switch path under QEMU
+- added a named bootstrap runtime layout so the higher-half window, stack window, data window, and handler delta are derived through one explicit model instead of scattered constants
+- added `runtime_context.rs` as the first shared retained runtime-state service, with a published higher-half runtime snapshot instead of boot-local-only transition state
+- retained the first per-core bootstrap context so the active core, root, stack, and entry survive the handoff as queryable runtime state
+- retained a short bootstrap event timeline so the major transition milestones are visible after the handoff
+- reworked breakpoint handling so higher-half exception validation returns through `iretq` instead of terminating the run immediately
+- extended the post-validation path into a tiny `runtime-active` service that reports retained runtime state and then idles cleanly
+- wired exception and panic reporting to include the retained runtime snapshot, core context, and event history
 - re-verified `cargo test`, `cargo kernel`, and `cargo loader` after the cleanup
 - updated `README.md` to expose the real build, validation, and bootstrap entrypoints
 - installed the missing Rust targets with `rustup target add x86_64-unknown-none x86_64-unknown-uefi`
 - re-verified `cargo loader` and `tools/stage-efi.ps1`
-- confirmed the current first-boot blocker on this workstation is still missing QEMU host tooling
+- completed the host setup on this workstation so `tools/check-host.ps1 -Architecture x86_64` and bounded QEMU boot captures now work end-to-end
 
 ## Next Focus
 
-- install or point the host at working QEMU and OVMF paths
-- run the first real UEFI boot attempt under QEMU
-- capture serial output and validate the loader-to-kernel handoff
+- grow the retained `runtime-active` slice into a broader long-lived runtime layout with clearer ownership boundaries
+- keep improving the serial/debug trace so paging and retained runtime changes are obvious under QEMU
+- add one more real retained runtime service on top of the shared runtime context while keeping the mechanism layer tight

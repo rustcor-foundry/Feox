@@ -11,7 +11,7 @@ mod selected {
     pub use super::x86_64::{
         cpu::{
             disable_interrupts, hlt_loop, read_cr3, read_rsp, switch_page_table_root_and_jump,
-            switch_stack_and_jump,
+            switch_stack_and_jump, trigger_breakpoint,
         },
         debugcon, gdt, idt, panic, serial,
     };
@@ -72,6 +72,11 @@ pub unsafe fn reload_descriptor_tables(gdt_base: u64, idt_base: u64, idt_handler
         selected::gdt::reload_with_base(gdt_base);
         selected::idt::relocate_and_reload(idt_base, idt_handler_delta);
     }
+}
+
+/// Raises a controlled software breakpoint through the active IDT.
+pub fn trigger_breakpoint() {
+    selected::trigger_breakpoint();
 }
 
 /// Writes preformatted early-boot output through the selected architecture console.

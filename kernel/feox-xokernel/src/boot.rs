@@ -8,11 +8,9 @@ use crate::bootabi::BootHandoff;
 use crate::memory;
 use crate::memory::MemoryRegionKind;
 use crate::paging;
+use crate::runtime_context::{BootstrapCoreContext, RuntimeSnapshot};
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
 
-const BOOTSTRAP_TRANSITION_VA: u64 = 0xFFFF_9000_0000_0000;
-const BOOTSTRAP_TRANSITION_STACK_VA: u64 = 0xFFFF_9000_0200_0000;
-const BOOTSTRAP_TRANSITION_DATA_VA: u64 = 0xFFFF_9000_0300_0000;
 const TRANSITION_STACK_PAGES: u64 = 4;
 
 static mut TRANSITION_ALIAS_STACK_TOP: u64 = 0;
@@ -21,16 +19,94 @@ static mut TRANSITION_DATA_ALIAS: u64 = 0;
 static mut TRANSITION_GDT_ALIAS: u64 = 0;
 static mut TRANSITION_IDT_ALIAS: u64 = 0;
 static mut TRANSITION_HANDLER_DELTA: u64 = 0;
+static mut TRANSITION_BOOTSTRAP_CORE_ID: u16 = 0;
 
 const TRANSITION_DATA_MAGIC: u64 = 0x4645_4F58_5452_4E31;
 
+#[repr(u64)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BootstrapRuntimeStage {
+    Prepared = 1,
+    IdentityActive = 2,
+    AliasActive = 3,
+    ExceptionValidated = 4,
+    RuntimeActive = 5,
+}
+
+impl BootstrapRuntimeStage {
+    const fn as_u64(self) -> u64 {
+        self as u64
+    }
+
+    const fn from_raw(raw: u64) -> Option<Self> {
+        match raw {
+            1 => Some(Self::Prepared),
+            2 => Some(Self::IdentityActive),
+            3 => Some(Self::AliasActive),
+            4 => Some(Self::ExceptionValidated),
+            5 => Some(Self::RuntimeActive),
+            _ => None,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::IdentityActive => "identity-active",
+            Self::AliasActive => "alias-active",
+            Self::ExceptionValidated => "exception-validated",
+            Self::RuntimeActive => "runtime-active",
+        }
+    }
+}
+
 #[repr(C)]
-struct TransitionData {
+#[derive(Clone, Copy, Debug)]
+struct BootstrapRuntimeState {
     magic: u64,
     active_root: u64,
+    kernel_window_base: u64,
+    kernel_window_end: u64,
+    kernel_pages_mapped: u64,
     identity_stack: u64,
     alias_stack: u64,
+    stack_pages: u64,
+    data_page: u64,
+    alias_entry: u64,
+    alias_gdt: u64,
+    alias_idt: u64,
     stage: u64,
+}
+
+impl BootstrapRuntimeState {
+    fn stage(self) -> Option<BootstrapRuntimeStage> {
+        BootstrapRuntimeStage::from_raw(self.stage)
+    }
+}
+
+impl RuntimeSnapshot {
+    fn from_state(state: BootstrapRuntimeState) -> Option<Self> {
+        if state.magic != TRANSITION_DATA_MAGIC {
+            return None;
+        }
+
+        Some(Self {
+            active_root: state.active_root,
+            kernel_window_base: state.kernel_window_base,
+            kernel_window_end: state.kernel_window_end,
+            kernel_pages_mapped: state.kernel_pages_mapped,
+            identity_stack: state.identity_stack,
+            alias_stack: state.alias_stack,
+            stack_pages: state.stack_pages,
+            data_page: state.data_page,
+            alias_entry: state.alias_entry,
+            alias_gdt: state.alias_gdt,
+            alias_idt: state.alias_idt,
+            stage: state
+                .stage()
+                .map_or("unknown", BootstrapRuntimeStage::label),
+        })
+    }
 }
 
 #[cfg(target_os = "none")]
@@ -68,6 +144,7 @@ extern "C" fn transition_stage_entry_rust() -> ! {
         "paging: transition_handoff_stack={:#018x}",
         arch::current_stack_pointer()
     );
+    crate::runtime_context::push_event("transition-handoff-entered");
     let alias_stack_top = unsafe { TRANSITION_ALIAS_STACK_TOP };
     let alias_entry = unsafe { TRANSITION_ALIAS_ENTRY };
     if alias_data_address != 0 {
@@ -75,14 +152,27 @@ extern "C" fn transition_stage_entry_rust() -> ! {
             // SAFETY: the transition data page is kernel-owned bootstrap memory
             // that was explicitly mapped into the active transition root before
             // the CR3 handoff.
-            &mut *(alias_data_address as *mut TransitionData)
+            &mut *(alias_data_address as *mut BootstrapRuntimeState)
         };
         crate::kprintln!(
-            "paging: transition_data magic={:#018x} stage={}",
+            "paging: runtime_state magic={:#018x} stage={} kernel_window={:#018x}-{:#018x} pages={}",
             transition_data.magic,
-            transition_data.stage
+            transition_data
+                .stage()
+                .map_or("unknown", BootstrapRuntimeStage::label),
+            transition_data.kernel_window_base,
+            transition_data.kernel_window_end,
+            transition_data.kernel_pages_mapped,
         );
-        transition_data.stage = 2;
+        transition_data.stage = BootstrapRuntimeStage::IdentityActive.as_u64();
+        crate::runtime_context::push_event("identity-handoff-active");
+        crate::runtime_context::store_core(BootstrapCoreContext {
+            core_id: feox_asi::CoreId(unsafe { TRANSITION_BOOTSTRAP_CORE_ID }),
+            active_root: memory::active_page_table_root().start_address().as_u64(),
+            stack_pointer: arch::current_stack_pointer(),
+            alias_entry,
+            stage: BootstrapRuntimeStage::IdentityActive.label(),
+        });
     }
     if alias_stack_top != 0
         && alias_entry != 0
@@ -123,16 +213,39 @@ extern "C" fn transition_high_stack_entry() -> ! {
         let transition_data = unsafe {
             // SAFETY: the transition data page remains mapped in the active
             // transition root and is owned by the bootstrap kernel path.
-            &mut *(alias_data_address as *mut TransitionData)
+            &mut *(alias_data_address as *mut BootstrapRuntimeState)
         };
         crate::kprintln!(
-            "paging: transition_data_post_switch magic={:#018x} stage={} identity_stack={:#018x} alias_stack={:#018x}",
+            "paging: runtime_state_post_switch magic={:#018x} stage={} identity_stack={:#018x} alias_stack={:#018x}",
             transition_data.magic,
-            transition_data.stage,
+            transition_data
+                .stage()
+                .map_or("unknown", BootstrapRuntimeStage::label),
             transition_data.identity_stack,
             transition_data.alias_stack
         );
-        transition_data.stage = 3;
+        transition_data.stage = BootstrapRuntimeStage::AliasActive.as_u64();
+        crate::kprintln!(
+            "paging: runtime_layout window={:#018x}-{:#018x} entry={:#018x} gdt={:#018x} idt={:#018x} stack_pages={} data_page={:#018x}",
+            transition_data.kernel_window_base,
+            transition_data.kernel_window_end,
+            transition_data.alias_entry,
+            transition_data.alias_gdt,
+            transition_data.alias_idt,
+            transition_data.stack_pages,
+            transition_data.data_page,
+        );
+        crate::runtime_context::push_event("higher-half-alias-active");
+        if let Some(snapshot) = RuntimeSnapshot::from_state(*transition_data) {
+            crate::runtime_context::store(snapshot);
+        }
+        crate::runtime_context::store_core(BootstrapCoreContext {
+            core_id: feox_asi::CoreId(unsafe { TRANSITION_BOOTSTRAP_CORE_ID }),
+            active_root: memory::active_page_table_root().start_address().as_u64(),
+            stack_pointer: arch::current_stack_pointer(),
+            alias_entry: transition_data.alias_entry,
+            stage: BootstrapRuntimeStage::AliasActive.label(),
+        });
     }
     if alias_gdt_base != 0 && alias_idt_base != 0 {
         unsafe {
@@ -151,11 +264,144 @@ extern "C" fn transition_high_stack_entry() -> ! {
             alias_idt_base,
             alias_handler_delta
         );
+        crate::runtime_context::push_event("descriptor-tables-reloaded");
+        crate::kprintln!("stage: validating higher-half exception path");
+        if alias_data_address != 0 {
+            let transition_data = unsafe {
+                // SAFETY: the bootstrap runtime state remains mapped in the
+                // active transition root while this validation runs.
+                &mut *(alias_data_address as *mut BootstrapRuntimeState)
+            };
+            transition_data.stage = BootstrapRuntimeStage::ExceptionValidated.as_u64();
+            if let Some(snapshot) = RuntimeSnapshot::from_state(*transition_data) {
+                crate::runtime_context::store(snapshot);
+            }
+            crate::runtime_context::store_core(BootstrapCoreContext {
+                core_id: feox_asi::CoreId(unsafe { TRANSITION_BOOTSTRAP_CORE_ID }),
+                active_root: memory::active_page_table_root().start_address().as_u64(),
+                stack_pointer: arch::current_stack_pointer(),
+                alias_entry: transition_data.alias_entry,
+                stage: BootstrapRuntimeStage::ExceptionValidated.label(),
+            });
+        }
+        crate::runtime_context::push_event("higher-half-exception-validation");
+        arch::trigger_breakpoint();
+        if alias_data_address != 0 {
+            let transition_data = unsafe {
+                // SAFETY: the bootstrap runtime state remains mapped in the
+                // active transition root after the breakpoint returns.
+                &mut *(alias_data_address as *mut BootstrapRuntimeState)
+            };
+            transition_data.stage = BootstrapRuntimeStage::RuntimeActive.as_u64();
+            if let Some(snapshot) = RuntimeSnapshot::from_state(*transition_data) {
+                crate::runtime_context::store(snapshot);
+            }
+            crate::runtime_context::store_core(BootstrapCoreContext {
+                core_id: feox_asi::CoreId(unsafe { TRANSITION_BOOTSTRAP_CORE_ID }),
+                active_root: memory::active_page_table_root().start_address().as_u64(),
+                stack_pointer: arch::current_stack_pointer(),
+                alias_entry: transition_data.alias_entry,
+                stage: BootstrapRuntimeStage::RuntimeActive.label(),
+            });
+        }
+        crate::runtime_context::push_event("higher-half-runtime-active");
+        crate::kprintln!("stage: higher-half runtime active");
+        runtime_active_entry();
     } else {
         crate::kprintln!("paging: transition_descriptors unavailable");
     }
     crate::kprintln!("stage: transition handoff complete");
     arch::halt_loop()
+}
+
+fn runtime_active_entry() -> ! {
+    crate::runtime_context::push_event("runtime-service-entered");
+    crate::kprintln!("stage: runtime service entered");
+
+    if let Some(runtime) = crate::runtime_context::snapshot() {
+        crate::kprintln!(
+            "runtime: summary root={:#018x} window={:#018x}-{:#018x} pages={} data_page={:#018x}",
+            runtime.active_root,
+            runtime.kernel_window_base,
+            runtime.kernel_window_end,
+            runtime.kernel_pages_mapped,
+            runtime.data_page
+        );
+    }
+    if let Some(core) = crate::runtime_context::core() {
+        crate::kprintln!(
+            "runtime: owner core={} stage={} stack={:#018x} entry={:#018x}",
+            core.core_id.0,
+            core.stage,
+            core.stack_pointer,
+            core.alias_entry
+        );
+    }
+
+    let events = crate::runtime_context::events();
+    let mut event_index = 0usize;
+    while event_index < events.len() {
+        if let Some(event) = events[event_index] {
+            crate::kprintln!("runtime: retained_event[{}]={}", event_index, event);
+        }
+        event_index += 1;
+    }
+
+    crate::runtime_context::push_event("runtime-service-idle");
+    crate::kprintln!("stage: runtime service idle");
+    arch::halt_loop()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BootstrapRuntimeStage, BootstrapRuntimeState, RuntimeSnapshot, TRANSITION_DATA_MAGIC};
+
+    #[test]
+    fn runtime_snapshot_reflects_retained_bootstrap_state() {
+        let state = BootstrapRuntimeState {
+            magic: TRANSITION_DATA_MAGIC,
+            active_root: 0x11e000,
+            kernel_window_base: 0xffff_9000_0000_0000,
+            kernel_window_end: 0xffff_9000_0001_8031,
+            kernel_pages_mapped: 25,
+            identity_stack: 0x11d000,
+            alias_stack: 0xffff_9000_0200_4000,
+            stack_pages: 4,
+            data_page: 0x11d000,
+            alias_entry: 0xffff_9000_0000_0970,
+            alias_gdt: 0xffff_9000_0000_f740,
+            alias_idt: 0xffff_9000_0001_7031,
+            stage: BootstrapRuntimeStage::ExceptionValidated.as_u64(),
+        };
+
+        let snapshot = RuntimeSnapshot::from_state(state).expect("valid runtime snapshot");
+
+        assert_eq!(snapshot.active_root, 0x11e000);
+        assert_eq!(snapshot.kernel_pages_mapped, 25);
+        assert_eq!(snapshot.stack_pages, 4);
+        assert_eq!(snapshot.stage, "exception-validated");
+    }
+
+    #[test]
+    fn runtime_snapshot_rejects_bad_magic() {
+        let state = BootstrapRuntimeState {
+            magic: 0,
+            active_root: 0,
+            kernel_window_base: 0,
+            kernel_window_end: 0,
+            kernel_pages_mapped: 0,
+            identity_stack: 0,
+            alias_stack: 0,
+            stack_pages: 0,
+            data_page: 0,
+            alias_entry: 0,
+            alias_gdt: 0,
+            alias_idt: 0,
+            stage: 0,
+        };
+
+        assert_eq!(RuntimeSnapshot::from_state(state), None);
+    }
 }
 
 /// Initializes the earliest architecture support and halts in a known-good
@@ -188,6 +434,7 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
     );
     match handoff {
         Some(handoff) => {
+            let runtime_layout = memory::BootstrapRuntimeLayout::new();
             crate::kprintln!(
                 "memory: boot_map regions={} usable={} MiB top={:#018x}",
                 handoff.memory_map().len(),
@@ -206,35 +453,26 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                 .clone()
                 .allocate()
                 .map_or(0, |frame| frame.start_address().as_u64());
-            let transition_virtual_address = memory::VirtualAddress::new(BOOTSTRAP_TRANSITION_VA);
-            let transition_data_alias =
-                memory::VirtualAddress::new(BOOTSTRAP_TRANSITION_DATA_VA);
-            let transition_stage_entry_alias = transition_alias_for_kernel_address(
+            let transition_virtual_address = runtime_layout.kernel_window_base();
+            let transition_data_alias = runtime_layout.data_window_base();
+            let transition_stage_entry_alias = runtime_layout.alias_for_kernel_address(
                 kernel_image,
-                transition_virtual_address,
                 memory::VirtualAddress::new(feox_transition_entry as *const () as usize as u64),
             );
             let identity_transition_entry =
                 memory::VirtualAddress::new(feox_transition_entry as *const () as usize as u64);
             let identity_gdt = memory::VirtualAddress::new(arch::x86_64::gdt::table_base());
             let identity_idt = memory::VirtualAddress::new(arch::x86_64::idt::table_base());
-            let transition_high_stack_entry_alias = transition_alias_for_kernel_address(
+            let transition_high_stack_entry_alias = runtime_layout.alias_for_kernel_address(
                 kernel_image,
-                transition_virtual_address,
                 memory::VirtualAddress::new(
                     transition_high_stack_entry as *const () as usize as u64,
                 ),
             );
-            let transition_gdt_alias = transition_alias_for_kernel_address(
-                kernel_image,
-                transition_virtual_address,
-                identity_gdt,
-            );
-            let transition_idt_alias = transition_alias_for_kernel_address(
-                kernel_image,
-                transition_virtual_address,
-                identity_idt,
-            );
+            let transition_gdt_alias =
+                runtime_layout.alias_for_kernel_address(kernel_image, identity_gdt);
+            let transition_idt_alias =
+                runtime_layout.alias_for_kernel_address(kernel_image, identity_idt);
             let reserved_ranges = reservations.len();
             let kernel_image_reserved_start = reservations
                 .region_for_kind(memory::ReservationKind::KernelImage)
@@ -297,7 +535,7 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     .flatten()
                     .next_back()
                     .map(|frame| {
-                        BOOTSTRAP_TRANSITION_STACK_VA
+                        runtime_layout.stack_window_base().as_u64()
                             + ((frame.start_address().as_u64()
                                 - transition_stack_frames[0]
                                     .unwrap()
@@ -396,7 +634,7 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                                         stack_frame.start_address().as_u64(),
                                     );
                                     let alias_stack_virtual = memory::VirtualAddress::new(
-                                        BOOTSTRAP_TRANSITION_STACK_VA + stack_offset,
+                                        runtime_layout.stack_window_base().as_u64() + stack_offset,
                                     );
                                     if page_root
                                         .map_4k_with(
@@ -633,15 +871,28 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             let transition_data = unsafe {
                                 // SAFETY: the identity data page is kernel-owned bootstrap
                                 // memory and is mapped into the transition root before handoff.
-                                &mut *(transition_data_identity as *mut TransitionData)
+                                &mut *(transition_data_identity as *mut BootstrapRuntimeState)
                             };
                             transition_data.magic = TRANSITION_DATA_MAGIC;
                             transition_data.active_root = bootstrap_page_table_frame;
+                            transition_data.kernel_window_base = transition_virtual_address.as_u64();
+                            transition_data.kernel_window_end =
+                                runtime_layout.kernel_window_end(kernel_image).as_u64();
+                            transition_data.kernel_pages_mapped = transition_pages_mapped;
                             transition_data.identity_stack = transition_stack_top;
                             transition_data.alias_stack = transition_stack_alias_top;
-                            transition_data.stage = 1;
+                            transition_data.stack_pages = TRANSITION_STACK_PAGES;
+                            transition_data.data_page = transition_data_identity;
+                            transition_data.alias_entry =
+                                transition_high_stack_entry_alias.map_or(0, |entry| entry.as_u64());
+                            transition_data.alias_gdt =
+                                transition_gdt_alias.map_or(0, |base| base.as_u64());
+                            transition_data.alias_idt =
+                                transition_idt_alias.map_or(0, |base| base.as_u64());
+                            transition_data.stage = BootstrapRuntimeStage::Prepared.as_u64();
                         }
                         unsafe {
+                            TRANSITION_BOOTSTRAP_CORE_ID = config.bootstrap_core.0;
                             TRANSITION_ALIAS_STACK_TOP = transition_stack_alias_top;
                             TRANSITION_ALIAS_ENTRY =
                                 transition_high_stack_entry_alias.map_or(0, |entry| entry.as_u64());
@@ -650,9 +901,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                                 transition_gdt_alias.map_or(0, |base| base.as_u64());
                             TRANSITION_IDT_ALIAS =
                                 transition_idt_alias.map_or(0, |base| base.as_u64());
-                            TRANSITION_HANDLER_DELTA = transition_virtual_address
-                                .as_u64()
-                                .saturating_sub(kernel_image.start.as_u64());
+                            TRANSITION_HANDLER_DELTA =
+                                runtime_layout.handler_delta(kernel_image);
                         }
                         crate::kprintln!("stage: switching to transition root (identity handoff)");
                         unsafe {
@@ -717,19 +967,4 @@ fn log_reservation_summary(reservations: &memory::EarlyKernelReservations) {
         reservations.count_by_kind(memory::ReservationKind::BootstrapPageTables),
         reservations.count_by_kind(memory::ReservationKind::BootstrapPerCoreState),
     );
-}
-
-fn transition_alias_for_kernel_address(
-    kernel_image: memory::KernelImage,
-    transition_base: memory::VirtualAddress,
-    address: memory::VirtualAddress,
-) -> Option<memory::VirtualAddress> {
-    if address.as_u64() < kernel_image.start.as_u64() || address.as_u64() >= kernel_image.end.as_u64()
-    {
-        return None;
-    }
-
-    Some(memory::VirtualAddress::new(
-        transition_base.as_u64() + (address.as_u64() - kernel_image.start.as_u64()),
-    ))
 }

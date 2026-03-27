@@ -8,6 +8,12 @@ pub const PAGE_SIZE: u64 = feox_boot::PAGE_SIZE;
 
 /// Legacy low-memory region reserved during x86 bootstrap.
 pub const X86_LEGACY_LOW_MEMORY_BYTES: u64 = 1024 * 1024;
+/// Higher-half base for the retained bootstrap kernel window.
+pub const BOOTSTRAP_KERNEL_WINDOW_BASE: u64 = 0xFFFF_9000_0000_0000;
+/// Higher-half base for the retained bootstrap stack window.
+pub const BOOTSTRAP_STACK_WINDOW_BASE: u64 = 0xFFFF_9000_0200_0000;
+/// Higher-half base for the retained bootstrap runtime-data window.
+pub const BOOTSTRAP_DATA_WINDOW_BASE: u64 = 0xFFFF_9000_0300_0000;
 
 /// Virtual address wrapper.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -181,7 +187,7 @@ pub struct EarlyKernelReservations {
 
 impl EarlyKernelReservations {
     /// Maximum number of early reservation entries tracked during bootstrap.
-    pub const MAX_REGIONS: usize = 6;
+    pub const MAX_REGIONS: usize = 20;
 
     /// Builds the initial reservation set for the currently loaded kernel image
     /// and active top-level page table root.
@@ -400,6 +406,81 @@ impl KernelImage {
     pub const fn size_bytes(self) -> u64 {
         self.end.as_u64().saturating_sub(self.start.as_u64())
     }
+
+    /// Returns whether the supplied address lies within this kernel image.
+    #[must_use]
+    pub const fn contains(self, address: VirtualAddress) -> bool {
+        address.as_u64() >= self.start.as_u64() && address.as_u64() < self.end.as_u64()
+    }
+}
+
+/// Named higher-half layout for the retained bootstrap runtime slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootstrapRuntimeLayout {
+    kernel_window_base: VirtualAddress,
+    stack_window_base: VirtualAddress,
+    data_window_base: VirtualAddress,
+}
+
+impl BootstrapRuntimeLayout {
+    /// Creates the default retained bootstrap layout.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            kernel_window_base: VirtualAddress::new(BOOTSTRAP_KERNEL_WINDOW_BASE),
+            stack_window_base: VirtualAddress::new(BOOTSTRAP_STACK_WINDOW_BASE),
+            data_window_base: VirtualAddress::new(BOOTSTRAP_DATA_WINDOW_BASE),
+        }
+    }
+
+    /// Returns the retained higher-half kernel image window base.
+    #[must_use]
+    pub const fn kernel_window_base(self) -> VirtualAddress {
+        self.kernel_window_base
+    }
+
+    /// Returns the first address after the retained higher-half kernel window.
+    #[must_use]
+    pub const fn kernel_window_end(self, kernel_image: KernelImage) -> VirtualAddress {
+        VirtualAddress::new(self.kernel_window_base.as_u64() + kernel_image.size_bytes())
+    }
+
+    /// Returns the retained higher-half stack window base.
+    #[must_use]
+    pub const fn stack_window_base(self) -> VirtualAddress {
+        self.stack_window_base
+    }
+
+    /// Returns the retained higher-half runtime-data window base.
+    #[must_use]
+    pub const fn data_window_base(self) -> VirtualAddress {
+        self.data_window_base
+    }
+
+    /// Returns the kernel-image-relative alias for a kernel address.
+    #[must_use]
+    pub const fn alias_for_kernel_address(
+        self,
+        kernel_image: KernelImage,
+        address: VirtualAddress,
+    ) -> Option<VirtualAddress> {
+        if !kernel_image.contains(address) {
+            return None;
+        }
+
+        Some(VirtualAddress::new(
+            self.kernel_window_base.as_u64() + (address.as_u64() - kernel_image.start.as_u64()),
+        ))
+    }
+
+    /// Returns the offset that maps low kernel-image addresses into the
+    /// retained higher-half kernel window.
+    #[must_use]
+    pub const fn handler_delta(self, kernel_image: KernelImage) -> u64 {
+        self.kernel_window_base
+            .as_u64()
+            .saturating_sub(kernel_image.start.as_u64())
+    }
 }
 
 /// Returns the current kernel image bounds from the linker symbols.
@@ -439,9 +520,11 @@ pub fn active_page_table_root() -> PhysicalFrame {
 #[cfg(test)]
 mod tests {
     use super::{
-        BootMemoryMap, BootReservations, EarlyKernelReservations, FrameAllocator, KernelImage,
-        MemoryRegion, MemoryRegionKind, PAGE_SIZE, PhysicalAddress, PhysicalFrame,
-        ReservationKind, ReservedRegion, VirtualAddress, X86_LEGACY_LOW_MEMORY_BYTES,
+        BootMemoryMap, BootReservations, BootstrapRuntimeLayout, EarlyKernelReservations,
+        FrameAllocator, KernelImage, MemoryRegion, MemoryRegionKind, PAGE_SIZE, PhysicalAddress,
+        PhysicalFrame, ReservationKind, ReservedRegion, VirtualAddress,
+        BOOTSTRAP_DATA_WINDOW_BASE, BOOTSTRAP_KERNEL_WINDOW_BASE, BOOTSTRAP_STACK_WINDOW_BASE,
+        X86_LEGACY_LOW_MEMORY_BYTES,
     };
 
     #[test]
@@ -593,5 +676,42 @@ mod tests {
         );
         assert_eq!(reservations.kind_labels()[0], "bootstrap-page-tables");
         assert_eq!(reservations.kind_labels()[1], "bootstrap-per-core-state");
+    }
+
+    #[test]
+    fn bootstrap_runtime_layout_derives_named_windows() {
+        let layout = BootstrapRuntimeLayout::new();
+        let kernel_image = KernelImage {
+            start: VirtualAddress::new(0x0010_0000),
+            end: VirtualAddress::new(0x0011_8000),
+        };
+        let entry = VirtualAddress::new(0x0010_0350);
+
+        assert_eq!(
+            layout.kernel_window_base().as_u64(),
+            BOOTSTRAP_KERNEL_WINDOW_BASE
+        );
+        assert_eq!(
+            layout.kernel_window_end(kernel_image).as_u64(),
+            BOOTSTRAP_KERNEL_WINDOW_BASE + 0x18_000
+        );
+        assert_eq!(
+            layout.stack_window_base().as_u64(),
+            BOOTSTRAP_STACK_WINDOW_BASE
+        );
+        assert_eq!(
+            layout.data_window_base().as_u64(),
+            BOOTSTRAP_DATA_WINDOW_BASE
+        );
+        assert_eq!(
+            layout
+                .alias_for_kernel_address(kernel_image, entry)
+                .map(VirtualAddress::as_u64),
+            Some(BOOTSTRAP_KERNEL_WINDOW_BASE + 0x350)
+        );
+        assert_eq!(
+            layout.handler_delta(kernel_image),
+            BOOTSTRAP_KERNEL_WINDOW_BASE - 0x0010_0000
+        );
     }
 }
