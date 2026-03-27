@@ -7,6 +7,7 @@ pub mod arch;
 pub mod boot;
 pub mod console;
 pub mod memory;
+pub mod paging;
 
 pub use feox_asi as asi;
 #[cfg(feature = "runtime")]

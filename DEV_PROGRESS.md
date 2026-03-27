@@ -31,6 +31,12 @@ This document is the running development record for Feox.
 - added `kernel/feox-xokernel/src/console.rs` as a kernel-level early console facade and moved panic/exception logging to use it
 - made the UEFI loader's expected kernel ELF machine target-aware and parameterized the PowerShell staging/QEMU harnesses by architecture
 - added `kernel-arm` and `loader-arm` cargo aliases to make the future ARM64 lane explicit in repo tooling
+- added `tools/check-host.ps1` so host readiness for QEMU and firmware is explicit instead of implicit
+- added `docs/MEMORY_OWNERSHIP_PHASES.md` to define when memory becomes Feox-owned instead of just firmware-described
+- added `docs/PAGE_TABLE_PLAN.md` to define the first x86 page-table mechanism layer after boot
+- added explicit physical reservation support to the early frame allocator and now reserve the active PML4 frame during bootstrap accounting
+- strengthened the early reservation model into typed bootstrap categories so kernel-image, page-table, and future per-core ownership can be tracked explicitly
+- added a first x86 bootstrap paging helper so newly allocated page-table frames are recorded as `BootstrapPageTables` instead of consuming memory ad hoc
 - re-verified `cargo test`, `cargo kernel`, and `cargo loader` after the cleanup
 - updated `README.md` to expose the real build, validation, and bootstrap entrypoints
 - installed the missing Rust targets with `rustup target add x86_64-unknown-none x86_64-unknown-uefi`
