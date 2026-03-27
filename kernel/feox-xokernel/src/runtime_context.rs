@@ -33,6 +33,13 @@ pub struct RuntimeSnapshot {
 
 static mut BOOTSTRAP_RUNTIME_SNAPSHOT: Option<RuntimeSnapshot> = None;
 static mut BOOTSTRAP_CORE_CONTEXT: Option<BootstrapCoreContext> = None;
+static mut BOOTSTRAP_SERVICE_STATE: Option<RuntimeServiceState> = None;
+static mut BOOTSTRAP_SERVICE_REPORT: Option<RuntimeServiceReport> = None;
+const BOOTSTRAP_COMMAND_CAPACITY: usize = 4;
+static mut BOOTSTRAP_COMMANDS: [Option<RuntimeServiceCommand>; BOOTSTRAP_COMMAND_CAPACITY] =
+    [None; BOOTSTRAP_COMMAND_CAPACITY];
+static mut BOOTSTRAP_COMMAND_HEAD: usize = 0;
+static mut BOOTSTRAP_COMMAND_LEN: usize = 0;
 const BOOTSTRAP_EVENT_CAPACITY: usize = 8;
 static mut BOOTSTRAP_EVENTS: [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] =
     [None; BOOTSTRAP_EVENT_CAPACITY];
@@ -51,6 +58,53 @@ pub struct BootstrapCoreContext {
     pub alias_entry: u64,
     /// Current bootstrap runtime stage label.
     pub stage: &'static str,
+}
+
+/// Retained state for the first post-handoff runtime service.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeServiceState {
+    /// Core currently responsible for the retained runtime service.
+    pub owner_core: CoreId,
+    /// Current service phase label.
+    pub phase: &'static str,
+    /// Number of completed retained service iterations.
+    pub iterations: u64,
+    /// Last concrete runtime-service action that completed.
+    pub last_action: &'static str,
+}
+
+/// Derived retained runtime accounting reported by the bootstrap service.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeServiceReport {
+    /// Current higher-half runtime window size in bytes.
+    pub kernel_window_bytes: u64,
+    /// Current retained bootstrap stack footprint in bytes.
+    pub stack_bytes: u64,
+    /// Number of retained bootstrap events currently visible.
+    pub retained_events: u64,
+}
+
+/// Minimal retained command set for the first runtime service loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeServiceCommand {
+    /// Refresh the retained runtime snapshot view.
+    RefreshSnapshot,
+    /// Recompute retained runtime accounting.
+    RefreshAccounting,
+    /// Move the service into its idle state.
+    EnterIdle,
+}
+
+impl RuntimeServiceCommand {
+    /// Stable label used in serial/debug output.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RefreshSnapshot => "refresh-snapshot",
+            Self::RefreshAccounting => "refresh-accounting",
+            Self::EnterIdle => "enter-idle",
+        }
+    }
 }
 
 /// Stores the current retained bootstrap runtime snapshot.
@@ -79,6 +133,62 @@ pub fn core() -> Option<BootstrapCoreContext> {
     unsafe { BOOTSTRAP_CORE_CONTEXT }
 }
 
+/// Stores the retained runtime service state.
+pub fn store_service(service: RuntimeServiceState) {
+    unsafe {
+        BOOTSTRAP_SERVICE_STATE = Some(service);
+    }
+}
+
+/// Returns the retained runtime service state, if one has been recorded.
+#[must_use]
+pub fn service() -> Option<RuntimeServiceState> {
+    unsafe { BOOTSTRAP_SERVICE_STATE }
+}
+
+/// Stores the retained runtime service report.
+pub fn store_service_report(report: RuntimeServiceReport) {
+    unsafe {
+        BOOTSTRAP_SERVICE_REPORT = Some(report);
+    }
+}
+
+/// Returns the retained runtime service report, if one has been recorded.
+#[must_use]
+pub fn service_report() -> Option<RuntimeServiceReport> {
+    unsafe { BOOTSTRAP_SERVICE_REPORT }
+}
+
+/// Enqueues one retained runtime-service command.
+pub fn enqueue_command(command: RuntimeServiceCommand) -> Result<(), RuntimeServiceCommand> {
+    unsafe {
+        if BOOTSTRAP_COMMAND_LEN >= BOOTSTRAP_COMMAND_CAPACITY {
+            return Err(command);
+        }
+
+        let index = (BOOTSTRAP_COMMAND_HEAD + BOOTSTRAP_COMMAND_LEN) % BOOTSTRAP_COMMAND_CAPACITY;
+        BOOTSTRAP_COMMANDS[index] = Some(command);
+        BOOTSTRAP_COMMAND_LEN += 1;
+        Ok(())
+    }
+}
+
+/// Dequeues the oldest retained runtime-service command, if one is present.
+#[must_use]
+pub fn dequeue_command() -> Option<RuntimeServiceCommand> {
+    unsafe {
+        if BOOTSTRAP_COMMAND_LEN == 0 {
+            return None;
+        }
+
+        let command = BOOTSTRAP_COMMANDS[BOOTSTRAP_COMMAND_HEAD];
+        BOOTSTRAP_COMMANDS[BOOTSTRAP_COMMAND_HEAD] = None;
+        BOOTSTRAP_COMMAND_HEAD = (BOOTSTRAP_COMMAND_HEAD + 1) % BOOTSTRAP_COMMAND_CAPACITY;
+        BOOTSTRAP_COMMAND_LEN -= 1;
+        command
+    }
+}
+
 /// Stores one retained bootstrap event in a fixed-size rolling buffer.
 pub fn push_event(event: &'static str) {
     unsafe {
@@ -102,5 +212,59 @@ pub fn events() -> [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] {
             i += 1;
         }
         ordered
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        dequeue_command, enqueue_command, service, service_report, store_service,
+        store_service_report, RuntimeServiceCommand, RuntimeServiceReport, RuntimeServiceState,
+    };
+    use feox_asi::CoreId;
+
+    #[test]
+    fn runtime_service_state_round_trips() {
+        let service_state = RuntimeServiceState {
+            owner_core: CoreId(0),
+            phase: "poll",
+            iterations: 2,
+            last_action: "retained-snapshot-scan",
+        };
+
+        store_service(service_state);
+
+        assert_eq!(service(), Some(service_state));
+    }
+
+    #[test]
+    fn runtime_service_report_round_trips() {
+        let report = RuntimeServiceReport {
+            kernel_window_bytes: 0x1b000,
+            stack_bytes: 0x4000,
+            retained_events: 6,
+        };
+
+        store_service_report(report);
+
+        assert_eq!(service_report(), Some(report));
+    }
+
+    #[test]
+    fn runtime_service_commands_round_trip_in_fifo_order() {
+        assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshSnapshot), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshAccounting), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::EnterIdle), Ok(()));
+
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::RefreshSnapshot)
+        );
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::RefreshAccounting)
+        );
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::EnterIdle));
+        assert_eq!(dequeue_command(), None);
     }
 }
