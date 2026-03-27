@@ -40,7 +40,10 @@ impl IdtEntry {
     }
 
     fn new(handler: unsafe extern "C" fn()) -> Self {
-        let address = handler as usize as u64;
+        Self::from_address(handler as usize as u64)
+    }
+
+    fn from_address(address: u64) -> Self {
 
         Self {
             offset_low: address as u16,
@@ -56,6 +59,48 @@ impl IdtEntry {
 
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 
+fn descriptor_for_base(base: u64) -> DescriptorTablePointer {
+    DescriptorTablePointer {
+        limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
+        base,
+    }
+}
+
+unsafe fn load_descriptor_table(base: u64) {
+    let descriptor = descriptor_for_base(base);
+
+    // Safety: the IDT points at a static table whose initialized entries all
+    // target assembly stubs in this kernel image.
+    unsafe {
+        asm!("lidt [{descriptor}]", descriptor = in(reg) &descriptor);
+    }
+}
+
+/// Returns the active bootstrap IDT base address.
+#[must_use]
+pub fn table_base() -> u64 {
+    (&raw const IDT) as *const _ as u64
+}
+
+/// Rebuilds vectors 0-31 with a supplied address delta and reloads the IDT.
+///
+/// Safety: `base` must point at a valid copy of the Feox bootstrap IDT, and
+/// `handler_delta` must translate the existing exception stubs to executable
+/// addresses in the active kernel mapping.
+pub unsafe fn relocate_and_reload(base: u64, handler_delta: u64) {
+    // Safety: early bootstrap remains single-core and interrupts stay disabled
+    // while we rewrite the static IDT entries.
+    unsafe {
+        let mut vector = 0usize;
+        while vector < exceptions::HANDLERS.len() {
+            let relocated = exceptions::HANDLERS[vector] as usize as u64 + handler_delta;
+            IDT[vector] = IdtEntry::from_address(relocated);
+            vector += 1;
+        }
+        load_descriptor_table(base);
+    }
+}
+
 /// Installs the bootstrap IDT with fatal exception handlers for vectors 0-31.
 pub fn init() {
     unsafe {
@@ -68,16 +113,7 @@ pub fn init() {
         }
     }
 
-    let descriptor = DescriptorTablePointer {
-        limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
-        base: (&raw const IDT) as *const _ as u64,
-    };
-
-    unsafe {
-        // Safety: the IDT points at a static table whose initialized entries all
-        // target assembly stubs in this kernel image.
-        asm!("lidt [{descriptor}]", descriptor = in(reg) &descriptor);
-    }
+    unsafe { load_descriptor_table(table_base()) }
 }
 
 #[cfg(test)]

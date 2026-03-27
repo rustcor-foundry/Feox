@@ -24,16 +24,19 @@ pub const fn kernel_code_selector() -> u16 {
     KERNEL_CODE_SELECTOR
 }
 
-/// Loads the bootstrap GDT and reloads the visible segment registers.
-pub fn init() {
-    let descriptor = DescriptorTablePointer {
+fn descriptor_for_base(base: u64) -> DescriptorTablePointer {
+    DescriptorTablePointer {
         limit: (size_of::<[u64; 3]>() - 1) as u16,
-        base: GDT.as_ptr() as u64,
-    };
+        base,
+    }
+}
 
+unsafe fn load_descriptor_table(base: u64) {
+    let descriptor = descriptor_for_base(base);
+
+    // Safety: the descriptor table points at a valid kernel GDT image and the
+    // far return reloads CS from that table before execution continues.
     unsafe {
-        // Safety: the descriptor table points at a static GDT with valid kernel
-        // code/data descriptors, and the far return reloads CS from that table.
         asm!(
             "lgdt [{descriptor}]",
             "mov ax, {data_selector:x}",
@@ -53,4 +56,22 @@ pub fn init() {
             lateout("rax") _,
         );
     }
+}
+
+/// Returns the active bootstrap GDT base address.
+#[must_use]
+pub fn table_base() -> u64 {
+    GDT.as_ptr() as u64
+}
+
+/// Reloads the bootstrap GDT from a supplied base address.
+///
+/// Safety: `base` must point at a valid copy of Feox's bootstrap GDT.
+pub unsafe fn reload_with_base(base: u64) {
+    unsafe { load_descriptor_table(base) }
+}
+
+/// Loads the bootstrap GDT and reloads the visible segment registers.
+pub fn init() {
+    unsafe { load_descriptor_table(table_base()) }
 }
