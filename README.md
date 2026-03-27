@@ -64,6 +64,7 @@ most for a low-level runtime:
 Use this order when picking up the repo on a Windows workstation:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\check-host.ps1 -Architecture x86_64
 cargo test
 cargo kernel
 cargo loader
@@ -137,6 +138,7 @@ cargo loader
 Manual bootstrap rail:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\check-host.ps1 -Architecture x86_64
 powershell -ExecutionPolicy Bypass -File .\tools\stage-efi.ps1
 powershell -ExecutionPolicy Bypass -File .\tools\run-qemu.ps1
 ```
@@ -189,6 +191,8 @@ $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 - [Architecture Checklist](docs/ARCHITECTURE_CHECKLIST.md)
 - [ARM64 Port Plan](docs/ARM64_PORT_PLAN.md)
 - [Boot Memory Review](docs/BOOT_MEMORY_REVIEW.md)
+- [Memory Ownership Phases](docs/MEMORY_OWNERSHIP_PHASES.md)
+- [Page-Table Plan](docs/PAGE_TABLE_PLAN.md)
 - [Exokernel Research Framework](docs/EXOKERNEL_RESEARCH_FRAMEWORK.md)
 - [Portfolio Positioning](docs/PORTFOLIO_POSITIONING.md)
 - [Shared Product Doctrine](docs/SHARED_PRODUCT_DOCTRINE.md)

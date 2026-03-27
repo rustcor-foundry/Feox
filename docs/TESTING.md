@@ -7,6 +7,7 @@ This is the current validation rail for Feox.
 Run from the repo root:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\check-host.ps1 -Architecture x86_64
 cargo test
 cargo kernel
 cargo loader

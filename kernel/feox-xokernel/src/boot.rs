@@ -44,13 +44,32 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     .map_or(0, |address| address.as_u64())
             );
 
-            let allocator =
-                memory::FrameAllocator::new(memory::BootMemoryMap::new(handoff.memory_map()));
+            let reservations = memory::EarlyKernelReservations::for_bootstrap(kernel_image, pml4);
+            let allocator = memory::FrameAllocator::with_reservations(
+                memory::BootMemoryMap::new(handoff.memory_map()),
+                reservations.as_view(),
+            );
             let next_frame = allocator
                 .clone()
                 .allocate()
                 .map_or(0, |frame| frame.start_address().as_u64());
 
+            crate::kprintln!(
+                "memory: reserved_ranges={} kernel_image_reserved={:#018x}-{:#018x}",
+                reservations.len(),
+                reservations
+                    .region_for_kind(memory::ReservationKind::KernelImage)
+                    .map_or(0, |region| region.start().as_u64()),
+                reservations
+                    .region_for_kind(memory::ReservationKind::KernelImage)
+                    .map_or(0, |region| region.end().as_u64())
+            );
+            crate::kprintln!(
+                "memory: active_pml4_reserved={:#018x}",
+                reservations
+                    .region_for_kind(memory::ReservationKind::ActivePageTableRoot)
+                    .map_or(0, |region| region.start().as_u64())
+            );
             crate::kprintln!(
                 "memory: handoff accepted, first_usable_frame={:#018x}",
                 next_frame

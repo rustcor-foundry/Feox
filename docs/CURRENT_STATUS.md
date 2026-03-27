@@ -21,6 +21,11 @@ Last updated: 2026-03-27
 - the first architecture-neutral cleanup pass is now in progress, with generic kernel code no longer reaching directly into `arch::x86_64` for core bootstrap/logging hooks
 - early console and logging now also pass through a kernel-level facade instead of tying generic paths directly to the x86 serial module
 - the loader ELF check and PowerShell build/staging harnesses are now architecture-aware, even though `x86_64` remains the only implemented kernel lane today
+- `tools/check-host.ps1` now gives one explicit host-readiness entrypoint for the x86 and future ARM lanes
+- the next x86-side design steps are now written down explicitly in `docs/MEMORY_OWNERSHIP_PHASES.md` and `docs/PAGE_TABLE_PLAN.md`
+- the early frame allocator now supports explicit physical reservations and the bootstrap path reserves the kernel image plus active page-table root before handing frames out
+- early kernel-owned memory is now tracked with typed bootstrap reservation categories so upcoming page-table and per-core state work has a disciplined place to land
+- the first x86 paging ownership helper now exists, with a bootstrap paging-frame allocator that records new page-table frames under typed kernel reservations
 
 ## Current Strengths
 
@@ -52,3 +57,4 @@ Use those before deeper kernel or loader changes.
 3. run the first real UEFI boot attempt under `tools/run-qemu.ps1`
 4. capture and document the first serial-output handoff from loader to kernel
 5. keep separating generic kernel plumbing from x86-specific implementation details before starting an ARM64 lane
+6. extend the typed bootstrap reservation set into the first page-table structure allocations
