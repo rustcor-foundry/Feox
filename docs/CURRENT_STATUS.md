@@ -30,6 +30,20 @@ Last updated: 2026-03-27
 - the first x86 4 KiB mapping primitive now exists, allocating intermediate tables through a supplied paging allocator and rejecting remaps or huge-page cases
 - the first x86 unmap path now exists, and the repo has a passing `map -> translate -> unmap` lifecycle test for the 4 KiB bootstrap mechanism layer
 - the loader and kernel now mirror early output to QEMU's debug console, giving the repo a reliable first-boot trace path on this host
+- the live x86 boot trace now reports a sane first allocatable frame (`0x0000000000111000`) instead of falling back to address zero
+- the live bootstrap path now performs one real paging-structure allocation and records it as `BootstrapPageTables` in the early reservation model
+- the live x86 bootstrap now builds and retains a bootstrap-owned transition root under QEMU, proving a first kernel-owned `map -> translate` paging step without mutating firmware-owned active page tables
+- the live x86 bootstrap now reports concrete transition entry and stack aliases under QEMU, so a future root switch has real handoff coordinates instead of guessed addresses
+- the live x86 bootstrap now completes the first real CR3 handoff under QEMU by switching onto the retained transition root and logging success from inside the new address space
+- the first CR3 handoff now lands on kernel-owned transition stack pages rather than reusing the original boot stack, reducing another dependency on the pre-switch environment
+- the post-switch path now climbs from the identity handoff stack onto the high-half transition stack alias under QEMU, proving one real higher-half runtime step after the CR3 switch
+- the post-switch path now also jumps into the mapped high-half code alias under QEMU, so Feox has its first real higher-half code-and-stack execution slice after the CR3 handoff
+- the post-switch path now carries a kernel-owned transition data page into the higher-half slice as well, so code, stack, and data all survive the current QEMU handoff
+- the higher-half handoff now publishes a retained shared runtime snapshot instead of treating the transition state as boot-local only
+- the bootstrap path now retains a per-core bootstrap context so the active core, root, stack, and entry are queryable after the handoff
+- the bootstrap runtime now keeps a short retained event timeline covering the major transition milestones
+- higher-half breakpoint validation is now non-fatal, returns through `iretq`, and proves the active higher-half exception path before continuing
+- the post-validation path now reaches a small retained runtime service and idles from `runtime-active` instead of halting immediately after validation
 
 ## Current Strengths
 
@@ -42,8 +56,8 @@ Last updated: 2026-03-27
 ## Current Risks
 
 - the current x86 bootstrap still halts in the early known-good loop, so successful boot visibility now outpaces real subsystem bring-up
-- first usable-frame selection during the live handoff path still needs another look because the current bootstrap log reports `first_usable_frame=0x0`
-- product framing had been underplaying the repo as a research lane instead of a core early-stage product
+- the live boot path now proves a retained bootstrap-owned transition root, a real CR3 handoff, kernel-owned transition stack pages, post-switch higher-half code-plus-stack execution, a surviving higher-half data page, and a retained runtime-active service, but broader runtime structures are still intentionally small
+- the current boot trace is strong enough to guide real VM bring-up, but bootstrap-oriented diagnostics and retained bootstrap services still outweigh sustained runtime behavior
 
 ## Recommended Entry Points
 
@@ -56,7 +70,7 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. document the first successful loader-to-kernel boot trace from this workstation
-2. investigate why the live bootstrap allocator path reports `first_usable_frame=0x0`
-3. surface the new paging lifecycle through more explicit serial/debug bootstrap checks
+1. grow the retained `runtime-active` slice from a bootstrap service into a broader long-lived runtime layout with clearer ownership boundaries
+2. extend the serial/debug trace so reservation, paging, and retained runtime changes stay easy to verify under QEMU
+3. start using the retained runtime context for one more real service beyond fault reporting and idle
 4. keep separating generic kernel plumbing from x86-specific implementation details before starting an ARM64 lane

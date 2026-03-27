@@ -138,6 +138,23 @@ global_asm!(
     "push rbx",
     "push rax",
     ".endm",
+    ".macro FEOX_POP_REGS",
+    "pop rax",
+    "pop rbx",
+    "pop rcx",
+    "pop rdx",
+    "pop rsi",
+    "pop rdi",
+    "pop rbp",
+    "pop r8",
+    "pop r9",
+    "pop r10",
+    "pop r11",
+    "pop r12",
+    "pop r13",
+    "pop r14",
+    "pop r15",
+    ".endm",
     ".macro FEOX_EXCEPTION_NO_ERROR vector",
     ".global feox_exception_\\vector",
     "feox_exception_\\vector:",
@@ -158,10 +175,23 @@ global_asm!(
     "mov rdi, rsp",
     "call {dispatch}",
     "ud2",
+    ".global feox_exception_breakpoint_common",
+    "feox_exception_breakpoint_common:",
+    "cld",
+    "FEOX_PUSH_REGS",
+    "mov rdi, rsp",
+    "call {dispatch_breakpoint}",
+    "FEOX_POP_REGS",
+    "add rsp, 16",
+    "iretq",
     "FEOX_EXCEPTION_NO_ERROR 0",
     "FEOX_EXCEPTION_NO_ERROR 1",
     "FEOX_EXCEPTION_NO_ERROR 2",
-    "FEOX_EXCEPTION_NO_ERROR 3",
+    ".global feox_exception_3",
+    "feox_exception_3:",
+    "push 0",
+    "push 3",
+    "jmp feox_exception_breakpoint_common",
     "FEOX_EXCEPTION_NO_ERROR 4",
     "FEOX_EXCEPTION_NO_ERROR 5",
     "FEOX_EXCEPTION_NO_ERROR 6",
@@ -191,6 +221,7 @@ global_asm!(
     "FEOX_EXCEPTION_WITH_ERROR 30",
     "FEOX_EXCEPTION_NO_ERROR 31",
     dispatch = sym dispatch_exception,
+    dispatch_breakpoint = sym dispatch_breakpoint,
 );
 
 extern "C" fn dispatch_exception(context: &ExceptionContext) -> ! {
@@ -223,12 +254,79 @@ extern "C" fn dispatch_exception(context: &ExceptionContext) -> ! {
         context.rdi,
         context.rbp
     );
+    if let Some(runtime) = crate::runtime_context::snapshot() {
+        crate::kprintln!(
+            "runtime: stage={} root={:#018x} window={:#018x}-{:#018x}",
+            runtime.stage,
+            runtime.active_root,
+            runtime.kernel_window_base,
+            runtime.kernel_window_end
+        );
+        crate::kprintln!(
+            "runtime: entry={:#018x} stack={:#018x} pages={} data_page={:#018x}",
+            runtime.alias_entry,
+            runtime.alias_stack,
+            runtime.kernel_pages_mapped,
+            runtime.data_page
+        );
+    }
+    if let Some(core) = crate::runtime_context::core() {
+        crate::kprintln!(
+            "runtime: core={} stage={} root={:#018x} stack={:#018x} entry={:#018x}",
+            core.core_id.0,
+            core.stage,
+            core.active_root,
+            core.stack_pointer,
+            core.alias_entry
+        );
+    }
+    let events = crate::runtime_context::events();
+    let mut event_index = 0usize;
+    while event_index < events.len() {
+        if let Some(event) = events[event_index] {
+            crate::kprintln!("runtime: event[{}]={}", event_index, event);
+        }
+        event_index += 1;
+    }
 
     if context.vector == 14 {
         crate::kprintln!("cr2={:#018x}", cpu::read_cr2());
     }
 
     cpu::hlt_loop()
+}
+
+extern "C" fn dispatch_breakpoint(context: &ExceptionContext) {
+    cpu::disable_interrupts();
+    crate::console::init();
+
+    crate::kprintln!();
+    crate::kprintln!(
+        "[feox breakpoint] rip={:#018x} cs={:#06x} rflags={:#018x}",
+        context.rip,
+        context.cs,
+        context.rflags
+    );
+    if let Some(runtime) = crate::runtime_context::snapshot() {
+        crate::kprintln!(
+            "runtime: stage={} root={:#018x} window={:#018x}-{:#018x}",
+            runtime.stage,
+            runtime.active_root,
+            runtime.kernel_window_base,
+            runtime.kernel_window_end
+        );
+    }
+    if let Some(core) = crate::runtime_context::core() {
+        crate::kprintln!(
+            "runtime: core={} stage={} root={:#018x} stack={:#018x} entry={:#018x}",
+            core.core_id.0,
+            core.stage,
+            core.active_root,
+            core.stack_pointer,
+            core.alias_entry
+        );
+    }
+    crate::runtime_context::push_event("higher-half-breakpoint-returned");
 }
 
 fn vector_name(vector: u8) -> &'static str {
