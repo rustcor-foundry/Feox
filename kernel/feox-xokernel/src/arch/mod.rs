@@ -9,7 +9,10 @@ pub mod x86_64;
 #[cfg(target_arch = "x86_64")]
 mod selected {
     pub use super::x86_64::{
-        cpu::{disable_interrupts, hlt_loop, read_cr3},
+        cpu::{
+            disable_interrupts, hlt_loop, read_cr3, read_rsp, switch_page_table_root_and_jump,
+            switch_stack_and_jump,
+        },
         debugcon, gdt, idt, panic, serial,
     };
 }
@@ -39,6 +42,36 @@ pub fn console_init() {
 #[must_use]
 pub fn active_page_table_root() -> u64 {
     selected::read_cr3()
+}
+
+/// Returns the current bootstrap stack pointer.
+#[must_use]
+pub fn current_stack_pointer() -> u64 {
+    selected::read_rsp()
+}
+
+/// Switches to a supplied page-table root and jumps to a prepared entrypoint.
+///
+/// Safety requirements are architecture-specific and enforced by the caller.
+pub unsafe fn switch_page_table_root_and_jump(root: u64, stack: u64, entry: u64) -> ! {
+    unsafe { selected::switch_page_table_root_and_jump(root, stack, entry) }
+}
+
+/// Switches to a supplied stack and jumps to a prepared entrypoint.
+///
+/// Safety requirements are architecture-specific and enforced by the caller.
+pub unsafe fn switch_stack_and_jump(stack: u64, entry: u64) -> ! {
+    unsafe { selected::switch_stack_and_jump(stack, entry) }
+}
+
+/// Reloads the bootstrap descriptor tables from supplied higher-half aliases.
+///
+/// Safety requirements are architecture-specific and enforced by the caller.
+pub unsafe fn reload_descriptor_tables(gdt_base: u64, idt_base: u64, idt_handler_delta: u64) {
+    unsafe {
+        selected::gdt::reload_with_base(gdt_base);
+        selected::idt::relocate_and_reload(idt_base, idt_handler_delta);
+    }
 }
 
 /// Writes preformatted early-boot output through the selected architecture console.
