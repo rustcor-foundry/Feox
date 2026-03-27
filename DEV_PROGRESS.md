@@ -40,6 +40,10 @@ This document is the running development record for Feox.
 - added the first x86 page-table query layer with a root wrapper, entry model, and 4 KiB translation walk over a supplied frame source
 - added the first x86 `map_4k`-style primitive so Feox can allocate missing intermediate tables and install a 4 KiB mapping in tests without a broader VM layer
 - added the first x86 `unmap_4k`-style primitive and a passing `map -> translate -> unmap` lifecycle test for the bootstrap paging layer
+- brought the x86 host boot rail to life on this workstation and captured the first successful loader-to-kernel trace under QEMU
+- fixed the x86 kernel image type so the loader now boots an `ET_EXEC` kernel instead of rejecting an `ET_DYN` artifact
+- fixed the x86 loader-to-kernel ABI handoff so the boot info pointer is passed in `rdi` as intended
+- added a QEMU debug-console path at port `0x402` for both loader and kernel so early boot traces are captured reliably on this host
 - re-verified `cargo test`, `cargo kernel`, and `cargo loader` after the cleanup
 - updated `README.md` to expose the real build, validation, and bootstrap entrypoints
 - installed the missing Rust targets with `rustup target add x86_64-unknown-none x86_64-unknown-uefi`

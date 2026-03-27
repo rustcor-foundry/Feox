@@ -13,8 +13,8 @@ cargo kernel
 cargo loader
 ```
 
-These validate the current workspace, bare-metal kernel image, and UEFI loader
-build path.
+These validate the current workspace, bare-metal kernel image, UEFI loader
+build path, and host readiness for the x86 boot rail.
 
 ## Manual Bootstrap Rail
 
@@ -38,20 +38,34 @@ Verified on 2026-03-27:
 - `cargo kernel`: passes
 - `cargo loader`: passes
 - `tools/stage-efi.ps1`: passes and stages `BOOTX64.EFI` plus `FEOXKERN.ELF`
-- `tools/run-qemu.ps1`: currently fails on this workstation because QEMU is not installed or not discoverable yet
+- `tools/check-host.ps1 -Architecture x86_64`: passes
+- `tools/run-qemu.ps1`: launches QEMU and reaches the Feox loader/kernel path on this workstation
+- bounded debug-log validation now shows:
+  - UEFI boot manager reaches `BOOTX64.EFI`
+  - the loader opens `FEOXKERN.ELF`
+  - control transfers into the kernel
+  - the kernel accepts the boot handoff and logs bootstrap state
 
 ## Boot Success Criteria
 
-When QEMU and OVMF are available, the first useful success bar is:
+The current useful success bar is:
 
 - UEFI loader starts
 - loader reports image and entrypoint details
 - control transfers into kernel `_start`
-- serial output shows the bootstrap banner or early handoff trace
+- debug or serial output shows the bootstrap banner and early handoff trace
 - the machine reaches the known halt loop instead of dying silently
 
 ## Current Host Prerequisites
 
 - `rustup target add x86_64-unknown-none x86_64-unknown-uefi`
-- install or point to QEMU
-- install or point to OVMF firmware files
+- QEMU and firmware must be discoverable either from the system install paths or the repo-local `tools/host/msys64` tree
+
+## Debug Capture Note
+
+`tools/run-qemu.ps1` now writes a debug-console log under `target/feox-qemu/`
+using the ISA debug console at `0x402`.
+
+That log is the current source of truth for first-boot validation on this
+workstation because it captures both loader and kernel output even when COM1
+behavior is noisy or inconsistent.

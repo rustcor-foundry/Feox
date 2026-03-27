@@ -47,10 +47,11 @@ function Convert-ToQemuPath {
         [string]$Path
     )
 
-    ((Resolve-Path $Path).Path) -replace '\\', '/'
+    [System.IO.Path]::GetFullPath($Path) -replace '\\', '/'
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$localMsysRoot = Join-Path $repoRoot 'tools\host\msys64\msys64'
 
 $stageInfo = & (Join-Path $PSScriptRoot 'stage-efi.ps1') -Profile $Profile -Architecture $Architecture -StageRoot $StageRoot -SkipBuild:$SkipBuild
 
@@ -64,7 +65,8 @@ switch ($Architecture) {
             'C:\Program Files (x86)\qemu\qemu-system-x86_64.exe',
             'C:\msys64\mingw64\bin\qemu-system-x86_64.exe',
             'C:\msys64\ucrt64\bin\qemu-system-x86_64.exe',
-            'C:\msys64\clang64\bin\qemu-system-x86_64.exe'
+            'C:\msys64\clang64\bin\qemu-system-x86_64.exe',
+            (Join-Path $localMsysRoot 'mingw64\bin\qemu-system-x86_64.exe')
         )
         $firmwareCodeCandidates = @(
             $OvmfCode,
@@ -76,7 +78,8 @@ switch ($Architecture) {
             'C:\Program Files (x86)\qemu\OVMF_CODE.fd',
             'C:\msys64\mingw64\share\edk2-ovmf\x64\OVMF_CODE.fd',
             'C:\msys64\ucrt64\share\edk2-ovmf\x64\OVMF_CODE.fd',
-            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_CODE.fd'
+            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_CODE.fd',
+            (Join-Path $localMsysRoot 'mingw64\share\qemu\edk2-x86_64-code.fd')
         )
         $firmwareVarsCandidates = @(
             $OvmfVars,
@@ -88,7 +91,8 @@ switch ($Architecture) {
             'C:\Program Files (x86)\qemu\OVMF_VARS.fd',
             'C:\msys64\mingw64\share\edk2-ovmf\x64\OVMF_VARS.fd',
             'C:\msys64\ucrt64\share\edk2-ovmf\x64\OVMF_VARS.fd',
-            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_VARS.fd'
+            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_VARS.fd',
+            (Join-Path $localMsysRoot 'mingw64\share\qemu\edk2-i386-vars.fd')
         )
     }
     'aarch64' {
@@ -156,6 +160,8 @@ New-Item -ItemType Directory -Path $runRoot -Force | Out-Null
 
 $varsCopy = Join-Path $runRoot "$Architecture-vars.$Profile.fd"
 Copy-Item $firmwareVars $varsCopy -Force
+$debugLog = Join-Path $runRoot "$Architecture-debug.$Profile.log"
+Remove-Item $debugLog -Force -ErrorAction SilentlyContinue
 
 $qemuArgs = @(
     '-machine', $machine,
@@ -164,6 +170,8 @@ $qemuArgs = @(
     '-drive', "if=pflash,format=raw,readonly=on,file=$(Convert-ToQemuPath $firmwareCode)",
     '-drive', "if=pflash,format=raw,file=$(Convert-ToQemuPath $varsCopy)",
     '-drive', "format=raw,file=fat:rw:$(Convert-ToQemuPath $stageInfo.StageRoot)",
+    '-global', 'isa-debugcon.iobase=0x402',
+    '-debugcon', "file:$(Convert-ToQemuPath $debugLog)",
     '-serial', 'stdio',
     '-monitor', 'none',
     '-no-reboot',
@@ -184,6 +192,7 @@ Write-Host "  QEMU:      $QemuPath"
 Write-Host "  Firmware:  $firmwareCode"
 Write-Host "  Vars:      $varsCopy"
 Write-Host "  ESP root:  $($stageInfo.StageRoot)"
+Write-Host "  Debug log: $debugLog"
 
 Push-Location $repoRoot
 try {

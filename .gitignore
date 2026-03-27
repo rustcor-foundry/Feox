@@ -1,2 +1,9 @@
 target/
 *.log
+tools/host/choco-cache/
+tools/host/msys64/
+tools/host/msys2-base-x86_64-*.tar
+tools/host/msys2-base-x86_64-*.tar.xz
+tools/host/msys2-base-x86_64-*.tar.xz.sig
+tools/host/qemu-w64-setup-*.exe
+tools/host/qemu-w64-setup-*.sha512

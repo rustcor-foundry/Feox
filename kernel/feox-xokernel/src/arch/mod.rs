@@ -10,7 +10,7 @@ pub mod x86_64;
 mod selected {
     pub use super::x86_64::{
         cpu::{disable_interrupts, hlt_loop, read_cr3},
-        gdt, idt, panic, serial,
+        debugcon, gdt, idt, panic, serial,
     };
 }
 
@@ -32,6 +32,7 @@ pub fn early_init() {
 /// Initializes the selected architecture's early console.
 pub fn console_init() {
     selected::serial::init();
+    selected::debugcon::init();
 }
 
 /// Returns the active top-level page-table root physical address.
@@ -43,6 +44,7 @@ pub fn active_page_table_root() -> u64 {
 /// Writes preformatted early-boot output through the selected architecture console.
 pub fn write_fmt(args: fmt::Arguments<'_>) {
     selected::serial::write_fmt(args);
+    selected::debugcon::write_fmt(args);
 }
 
 /// Prints an early panic and halts forever.
