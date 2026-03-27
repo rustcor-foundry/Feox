@@ -280,6 +280,23 @@ extern "C" fn dispatch_exception(context: &ExceptionContext) -> ! {
             core.alias_entry
         );
     }
+    if let Some(service) = crate::runtime_context::service() {
+        crate::kprintln!(
+            "runtime: service core={} phase={} iterations={} action={}",
+            service.owner_core.0,
+            service.phase,
+            service.iterations,
+            service.last_action
+        );
+    }
+    if let Some(report) = crate::runtime_context::service_report() {
+        crate::kprintln!(
+            "runtime: accounting window_bytes={:#018x} stack_bytes={:#018x} retained_events={}",
+            report.kernel_window_bytes,
+            report.stack_bytes,
+            report.retained_events
+        );
+    }
     let events = crate::runtime_context::events();
     let mut event_index = 0usize;
     while event_index < events.len() {
@@ -324,6 +341,23 @@ extern "C" fn dispatch_breakpoint(context: &ExceptionContext) {
             core.active_root,
             core.stack_pointer,
             core.alias_entry
+        );
+    }
+    if let Some(service) = crate::runtime_context::service() {
+        crate::kprintln!(
+            "runtime: service core={} phase={} iterations={} action={}",
+            service.owner_core.0,
+            service.phase,
+            service.iterations,
+            service.last_action
+        );
+    }
+    if let Some(report) = crate::runtime_context::service_report() {
+        crate::kprintln!(
+            "runtime: accounting window_bytes={:#018x} stack_bytes={:#018x} retained_events={}",
+            report.kernel_window_bytes,
+            report.stack_bytes,
+            report.retained_events
         );
     }
     crate::runtime_context::push_event("higher-half-breakpoint-returned");

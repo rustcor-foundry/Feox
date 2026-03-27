@@ -35,6 +35,23 @@ pub fn handle(info: &PanicInfo<'_>) -> ! {
             core.alias_entry
         );
     }
+    if let Some(service) = crate::runtime_context::service() {
+        crate::kprintln!(
+            "runtime: service core={} phase={} iterations={} action={}",
+            service.owner_core.0,
+            service.phase,
+            service.iterations,
+            service.last_action
+        );
+    }
+    if let Some(report) = crate::runtime_context::service_report() {
+        crate::kprintln!(
+            "runtime: accounting window_bytes={:#018x} stack_bytes={:#018x} retained_events={}",
+            report.kernel_window_bytes,
+            report.stack_bytes,
+            report.retained_events
+        );
+    }
 
     cpu::hlt_loop()
 }

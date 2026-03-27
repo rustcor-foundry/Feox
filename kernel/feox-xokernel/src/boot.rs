@@ -8,7 +8,10 @@ use crate::bootabi::BootHandoff;
 use crate::memory;
 use crate::memory::MemoryRegionKind;
 use crate::paging;
-use crate::runtime_context::{BootstrapCoreContext, RuntimeSnapshot};
+use crate::runtime_context::{
+    BootstrapCoreContext, RuntimeServiceCommand, RuntimeServiceReport, RuntimeServiceState,
+    RuntimeSnapshot,
+};
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
 
 const TRANSITION_STACK_PAGES: u64 = 4;
@@ -318,6 +321,15 @@ fn runtime_active_entry() -> ! {
     crate::runtime_context::push_event("runtime-service-entered");
     crate::kprintln!("stage: runtime service entered");
 
+    let owner_core = crate::runtime_context::core()
+        .map_or(feox_asi::CoreId(0), |core| core.core_id);
+    crate::runtime_context::store_service(RuntimeServiceState {
+        owner_core,
+        phase: "entered",
+        iterations: 0,
+        last_action: "service-entered",
+    });
+
     if let Some(runtime) = crate::runtime_context::snapshot() {
         crate::kprintln!(
             "runtime: summary root={:#018x} window={:#018x}-{:#018x} pages={} data_page={:#018x}",
@@ -338,6 +350,10 @@ fn runtime_active_entry() -> ! {
         );
     }
 
+    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::RefreshSnapshot);
+    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::RefreshAccounting);
+    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
+
     let events = crate::runtime_context::events();
     let mut event_index = 0usize;
     while event_index < events.len() {
@@ -347,7 +363,98 @@ fn runtime_active_entry() -> ! {
         event_index += 1;
     }
 
-    crate::runtime_context::push_event("runtime-service-idle");
+    let mut service_iteration = 0_u64;
+    while let Some(command) = crate::runtime_context::dequeue_command() {
+        service_iteration += 1;
+        crate::kprintln!(
+            "runtime: command phase={} iteration={}",
+            command.label(),
+            service_iteration
+        );
+        match command {
+            RuntimeServiceCommand::RefreshSnapshot => {
+                crate::runtime_context::push_event("runtime-service-poll");
+                crate::runtime_context::store_service(RuntimeServiceState {
+                    owner_core,
+                    phase: "poll",
+                    iterations: service_iteration,
+                    last_action: "retained-snapshot-scan",
+                });
+                if let Some(service) = crate::runtime_context::service() {
+                    crate::kprintln!(
+                        "runtime: service core={} phase={} iterations={} action={}",
+                        service.owner_core.0,
+                        service.phase,
+                        service.iterations,
+                        service.last_action
+                    );
+                }
+            }
+            RuntimeServiceCommand::RefreshAccounting => {
+                if let Some(runtime) = crate::runtime_context::snapshot() {
+                    let mut retained_events = 0_u64;
+                    let events = crate::runtime_context::events();
+                    let mut event_index = 0usize;
+                    while event_index < events.len() {
+                        if events[event_index].is_some() {
+                            retained_events += 1;
+                        }
+                        event_index += 1;
+                    }
+                    let kernel_window_bytes =
+                        runtime.kernel_window_end.saturating_sub(runtime.kernel_window_base);
+                    let stack_bytes = runtime.stack_pages.saturating_mul(memory::PAGE_SIZE);
+                    crate::runtime_context::push_event("runtime-service-accounting");
+                    crate::runtime_context::store_service(RuntimeServiceState {
+                        owner_core,
+                        phase: "accounting",
+                        iterations: service_iteration,
+                        last_action: "retained-runtime-accounting",
+                    });
+                    crate::runtime_context::store_service_report(RuntimeServiceReport {
+                        kernel_window_bytes,
+                        stack_bytes,
+                        retained_events,
+                    });
+                    if let Some(service) = crate::runtime_context::service() {
+                        crate::kprintln!(
+                            "runtime: service_accounting core={} phase={} iterations={} action={}",
+                            service.owner_core.0,
+                            service.phase,
+                            service.iterations,
+                            service.last_action
+                        );
+                    }
+                    if let Some(report) = crate::runtime_context::service_report() {
+                        crate::kprintln!(
+                            "runtime: accounting window_bytes={:#018x} stack_bytes={:#018x} retained_events={}",
+                            report.kernel_window_bytes,
+                            report.stack_bytes,
+                            report.retained_events
+                        );
+                    }
+                }
+            }
+            RuntimeServiceCommand::EnterIdle => {
+                crate::runtime_context::push_event("runtime-service-idle");
+                crate::runtime_context::store_service(RuntimeServiceState {
+                    owner_core,
+                    phase: "idle",
+                    iterations: service_iteration,
+                    last_action: "idle-loop",
+                });
+                if let Some(service) = crate::runtime_context::service() {
+                    crate::kprintln!(
+                        "runtime: service_idle core={} phase={} iterations={} action={}",
+                        service.owner_core.0,
+                        service.phase,
+                        service.iterations,
+                        service.last_action
+                    );
+                }
+            }
+        }
+    }
     crate::kprintln!("stage: runtime service idle");
     arch::halt_loop()
 }
