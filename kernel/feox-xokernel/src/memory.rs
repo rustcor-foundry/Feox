@@ -6,6 +6,9 @@ pub use feox_boot::{MemoryRegion, MemoryRegionKind, PhysicalAddress};
 /// Base x86_64 page size in bytes.
 pub const PAGE_SIZE: u64 = feox_boot::PAGE_SIZE;
 
+/// Legacy low-memory region reserved during x86 bootstrap.
+pub const X86_LEGACY_LOW_MEMORY_BYTES: u64 = 1024 * 1024;
+
 /// Virtual address wrapper.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
@@ -144,6 +147,8 @@ pub enum ReservationKind {
     KernelImage,
     /// The active top-level page-table root observed at bootstrap.
     ActivePageTableRoot,
+    /// x86 legacy low physical memory kept out of the allocatable pool.
+    LegacyLowMemory,
     /// Bootstrap-era page-table frames allocated after handoff.
     BootstrapPageTables,
     /// Bootstrap-era per-core state or stacks.
@@ -158,6 +163,7 @@ impl ReservationKind {
             Self::Unused => "unused",
             Self::KernelImage => "kernel-image",
             Self::ActivePageTableRoot => "active-page-table-root",
+            Self::LegacyLowMemory => "legacy-low-memory",
             Self::BootstrapPageTables => "bootstrap-page-tables",
             Self::BootstrapPerCoreState => "bootstrap-per-core-state",
         }
@@ -175,13 +181,20 @@ pub struct EarlyKernelReservations {
 
 impl EarlyKernelReservations {
     /// Maximum number of early reservation entries tracked during bootstrap.
-    pub const MAX_REGIONS: usize = 4;
+    pub const MAX_REGIONS: usize = 6;
 
     /// Builds the initial reservation set for the currently loaded kernel image
     /// and active top-level page table root.
     #[must_use]
     pub fn for_bootstrap(kernel_image: KernelImage, active_root: PhysicalFrame) -> Self {
         let mut reservations = Self::default();
+        reservations.reserve_region(
+            ReservationKind::LegacyLowMemory,
+            ReservedRegion::new(
+                PhysicalAddress::new(0),
+                PhysicalAddress::new(X86_LEGACY_LOW_MEMORY_BYTES),
+            ),
+        );
         reservations.reserve_region(
             ReservationKind::KernelImage,
             ReservedRegion::new(
@@ -428,7 +441,7 @@ mod tests {
     use super::{
         BootMemoryMap, BootReservations, EarlyKernelReservations, FrameAllocator, KernelImage,
         MemoryRegion, MemoryRegionKind, PAGE_SIZE, PhysicalAddress, PhysicalFrame,
-        ReservationKind, ReservedRegion, VirtualAddress,
+        ReservationKind, ReservedRegion, VirtualAddress, X86_LEGACY_LOW_MEMORY_BYTES,
     };
 
     #[test]
@@ -526,13 +539,22 @@ mod tests {
         let reservations = EarlyKernelReservations::for_bootstrap(kernel_image, active_root);
         let view = reservations.as_view();
 
-        assert_eq!(reservations.len(), 2);
-        assert_eq!(reservations.kind_labels()[0], "kernel-image");
-        assert_eq!(reservations.kind_labels()[1], "active-page-table-root");
+        assert_eq!(reservations.len(), 3);
+        assert_eq!(reservations.kind_labels()[0], "legacy-low-memory");
+        assert_eq!(reservations.kind_labels()[1], "kernel-image");
+        assert_eq!(reservations.kind_labels()[2], "active-page-table-root");
+        assert_eq!(reservations.count_by_kind(ReservationKind::LegacyLowMemory), 1);
         assert_eq!(reservations.count_by_kind(ReservationKind::KernelImage), 1);
         assert_eq!(
             reservations.count_by_kind(ReservationKind::ActivePageTableRoot),
             1
+        );
+        assert!(view.contains(PhysicalAddress::new(0x0000_1000)));
+        assert_eq!(
+            reservations
+                .region_for_kind(ReservationKind::LegacyLowMemory)
+                .map(|region| region.end().as_u64()),
+            Some(X86_LEGACY_LOW_MEMORY_BYTES)
         );
         assert!(view.contains(PhysicalAddress::new(0x0010_1000)));
         assert!(view.contains(PhysicalAddress::new(0x0030_0000)));

@@ -476,16 +476,17 @@ mod tests {
 
     #[test]
     fn bootstrap_paging_allocator_reserves_allocated_frames() {
+        let usable_start = 0x0040_0000;
         let regions = [MemoryRegion {
-            start: PhysicalAddress::new(PAGE_SIZE),
-            end: PhysicalAddress::new(PAGE_SIZE * 6),
+            start: PhysicalAddress::new(usable_start),
+            end: PhysicalAddress::new(usable_start + (PAGE_SIZE * 5)),
             kind: MemoryRegionKind::Usable,
         }];
         let kernel_image = KernelImage {
             start: VirtualAddress::new(0x0010_0000),
             end: VirtualAddress::new(0x0012_0000),
         };
-        let active_root = PhysicalFrame::containing(PhysicalAddress::new(PAGE_SIZE));
+        let active_root = PhysicalFrame::containing(PhysicalAddress::new(0x0030_0000));
         let mut reservations = EarlyKernelReservations::for_bootstrap(kernel_image, active_root);
         let mut allocator =
             BootstrapPagingAllocator::new(BootMemoryMap::new(&regions), &mut reservations);
@@ -495,11 +496,11 @@ mod tests {
 
         assert_eq!(
             first.map(|frame| frame.start_address().as_u64()),
-            Some(PAGE_SIZE * 2)
+            Some(usable_start)
         );
         assert_eq!(
             second.map(|frame| frame.start_address().as_u64()),
-            Some(PAGE_SIZE * 3)
+            Some(usable_start + PAGE_SIZE)
         );
         assert_eq!(
             reservations.count_by_kind(ReservationKind::BootstrapPageTables),

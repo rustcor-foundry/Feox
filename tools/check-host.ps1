@@ -5,6 +5,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$localMsysRoot = Join-Path $repoRoot 'tools\host\msys64\msys64'
+
 function Test-InstalledRustTarget {
     param(
         [Parameter(Mandatory = $true)]
@@ -45,7 +48,8 @@ switch ($Architecture) {
             'C:\msys64\mingw64\bin\qemu-system-x86_64.exe',
             'C:\msys64\ucrt64\bin\qemu-system-x86_64.exe',
             'C:\msys64\clang64\bin\qemu-system-x86_64.exe',
-            'D:\Paul\Software Projects\Feox\tools\host\qemu\qemu-system-x86_64.exe'
+            'D:\Paul\Software Projects\Feox\tools\host\qemu\qemu-system-x86_64.exe',
+            (Join-Path $localMsysRoot 'mingw64\bin\qemu-system-x86_64.exe')
         )
         $firmwareCodeCandidates = @(
             $env:FEOX_OVMF_CODE,
@@ -57,7 +61,8 @@ switch ($Architecture) {
             'C:\Program Files (x86)\qemu\OVMF_CODE.fd',
             'C:\msys64\mingw64\share\edk2-ovmf\x64\OVMF_CODE.fd',
             'C:\msys64\ucrt64\share\edk2-ovmf\x64\OVMF_CODE.fd',
-            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_CODE.fd'
+            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_CODE.fd',
+            (Join-Path $localMsysRoot 'mingw64\share\qemu\edk2-x86_64-code.fd')
         )
         $firmwareVarsCandidates = @(
             $env:FEOX_OVMF_VARS,
@@ -69,7 +74,8 @@ switch ($Architecture) {
             'C:\Program Files (x86)\qemu\OVMF_VARS.fd',
             'C:\msys64\mingw64\share\edk2-ovmf\x64\OVMF_VARS.fd',
             'C:\msys64\ucrt64\share\edk2-ovmf\x64\OVMF_VARS.fd',
-            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_VARS.fd'
+            'C:\msys64\clang64\share\edk2-ovmf\x64\OVMF_VARS.fd',
+            (Join-Path $localMsysRoot 'mingw64\share\qemu\edk2-i386-vars.fd')
         )
     }
     'aarch64' {

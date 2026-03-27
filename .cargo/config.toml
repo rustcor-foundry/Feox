@@ -5,4 +5,11 @@ kernel-arm = "build -p feox-xokernel --bin feox-xokernel --target aarch64-unknow
 loader-arm = "build -p feox-loader-uefi --bin feox-loader-uefi --target aarch64-unknown-uefi"
 
 [target.x86_64-unknown-none]
-rustflags = ["-C", "link-arg=-Tkernel/feox-xokernel/linker.ld"]
+rustflags = [
+    "-C",
+    "link-arg=-Tkernel/feox-xokernel/linker.ld",
+    "-C",
+    "link-arg=-no-pie",
+    "-C",
+    "relocation-model=static",
+]

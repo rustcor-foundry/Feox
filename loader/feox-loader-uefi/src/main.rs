@@ -10,7 +10,6 @@ extern crate alloc;
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::cmp;
-use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -336,6 +335,20 @@ const fn classify_memory_type(memory_type: MemoryType) -> MemoryRegionKind {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+fn jump_to_kernel(entry_point: u64, boot_info: *const BootInfo) -> ! {
+    unsafe {
+        asm!(
+            "mov rdi, {boot_info}",
+            "jmp {entry}",
+            boot_info = in(reg) boot_info,
+            entry = in(reg) entry_point,
+            options(noreturn)
+        );
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
 fn jump_to_kernel(entry_point: u64, boot_info: *const BootInfo) -> ! {
     let entry: extern "C" fn(*const BootInfo) -> ! =
         unsafe { mem::transmute(entry_point as usize) };
@@ -369,7 +382,7 @@ fn after_exit_failure(_reason: &str) -> ! {
 }
 
 mod serial {
-    use super::{COM1_PORT, LSR_TRANSMIT_HOLDING_REGISTER_EMPTY};
+    use super::{COM1_PORT, DEBUGCON_PORT, LSR_TRANSMIT_HOLDING_REGISTER_EMPTY};
     use core::fmt::{self, Write};
 
     /// Initializes COM1 for early loader diagnostics.
@@ -407,6 +420,7 @@ mod serial {
             write_raw_byte(b'\r');
         }
         write_raw_byte(byte);
+        write_debugcon_byte(byte);
     }
 
     fn write_raw_byte(byte: u8) {
@@ -416,9 +430,14 @@ mod serial {
 
         unsafe { super::outb(COM1_PORT, byte) };
     }
+
+    fn write_debugcon_byte(byte: u8) {
+        unsafe { super::outb(DEBUGCON_PORT, byte) };
+    }
 }
 
 const COM1_PORT: u16 = 0x3F8;
+const DEBUGCON_PORT: u16 = 0x402;
 const LSR_TRANSMIT_HOLDING_REGISTER_EMPTY: u8 = 1 << 5;
 
 unsafe fn outb(port: u16, value: u8) {

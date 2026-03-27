@@ -17,7 +17,7 @@ Last updated: 2026-03-27
 - `cargo loader` passes
 - `tools/stage-efi.ps1` succeeds and produces a staged EFI tree under `target/feox-efi`
 - the current machine is now provisioned with the required Rust targets for the kernel and UEFI loader
-- the remaining first-boot blocker on this workstation is host emulation tooling, not Feox repo wiring
+- the x86 host boot rail is now working on this workstation, including QEMU launch, OVMF discovery, loader execution, and kernel handoff
 - the first architecture-neutral cleanup pass is now in progress, with generic kernel code no longer reaching directly into `arch::x86_64` for core bootstrap/logging hooks
 - early console and logging now also pass through a kernel-level facade instead of tying generic paths directly to the x86 serial module
 - the loader ELF check and PowerShell build/staging harnesses are now architecture-aware, even though `x86_64` remains the only implemented kernel lane today
@@ -29,6 +29,7 @@ Last updated: 2026-03-27
 - the first x86 page-table query layer now exists, with a root wrapper, entry model, and 4 KiB translation walk over a supplied frame source
 - the first x86 4 KiB mapping primitive now exists, allocating intermediate tables through a supplied paging allocator and rejecting remaps or huge-page cases
 - the first x86 unmap path now exists, and the repo has a passing `map -> translate -> unmap` lifecycle test for the 4 KiB bootstrap mechanism layer
+- the loader and kernel now mirror early output to QEMU's debug console, giving the repo a reliable first-boot trace path on this host
 
 ## Current Strengths
 
@@ -40,8 +41,8 @@ Last updated: 2026-03-27
 
 ## Current Risks
 
-- no verified QEMU boot on this workstation yet because QEMU is not installed or not discoverable
-- OVMF availability has not been rechecked after the QEMU lookup failure because the run harness stops at the first missing prerequisite
+- the current x86 bootstrap still halts in the early known-good loop, so successful boot visibility now outpaces real subsystem bring-up
+- first usable-frame selection during the live handoff path still needs another look because the current bootstrap log reports `first_usable_frame=0x0`
 - product framing had been underplaying the repo as a research lane instead of a core early-stage product
 
 ## Recommended Entry Points
@@ -55,11 +56,7 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. install or point the host at a working QEMU binary
-2. confirm OVMF firmware paths on this workstation
-3. run the first real UEFI boot attempt under `tools/run-qemu.ps1`
-4. capture and document the first serial-output handoff from loader to kernel
-5. keep separating generic kernel plumbing from x86-specific implementation details before starting an ARM64 lane
-6. extend the typed bootstrap reservation set into the first page-table structure allocations
-7. use the new page-table query layer as the base for the first explicit mapping primitive
-8. surface the new mapping lifecycle through serial-debuggable bootstrap checks
+1. document the first successful loader-to-kernel boot trace from this workstation
+2. investigate why the live bootstrap allocator path reports `first_usable_frame=0x0`
+3. surface the new paging lifecycle through more explicit serial/debug bootstrap checks
+4. keep separating generic kernel plumbing from x86-specific implementation details before starting an ARM64 lane
