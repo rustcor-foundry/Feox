@@ -37,6 +37,9 @@ This document is the running development record for Feox.
 - added explicit physical reservation support to the early frame allocator and now reserve the active PML4 frame during bootstrap accounting
 - strengthened the early reservation model into typed bootstrap categories so kernel-image, page-table, and future per-core ownership can be tracked explicitly
 - added a first x86 bootstrap paging helper so newly allocated page-table frames are recorded as `BootstrapPageTables` instead of consuming memory ad hoc
+- added the first x86 page-table query layer with a root wrapper, entry model, and 4 KiB translation walk over a supplied frame source
+- added the first x86 `map_4k`-style primitive so Feox can allocate missing intermediate tables and install a 4 KiB mapping in tests without a broader VM layer
+- added the first x86 `unmap_4k`-style primitive and a passing `map -> translate -> unmap` lifecycle test for the bootstrap paging layer
 - re-verified `cargo test`, `cargo kernel`, and `cargo loader` after the cleanup
 - updated `README.md` to expose the real build, validation, and bootstrap entrypoints
 - installed the missing Rust targets with `rustup target add x86_64-unknown-none x86_64-unknown-uefi`

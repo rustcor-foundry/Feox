@@ -26,6 +26,9 @@ Last updated: 2026-03-27
 - the early frame allocator now supports explicit physical reservations and the bootstrap path reserves the kernel image plus active page-table root before handing frames out
 - early kernel-owned memory is now tracked with typed bootstrap reservation categories so upcoming page-table and per-core state work has a disciplined place to land
 - the first x86 paging ownership helper now exists, with a bootstrap paging-frame allocator that records new page-table frames under typed kernel reservations
+- the first x86 page-table query layer now exists, with a root wrapper, entry model, and 4 KiB translation walk over a supplied frame source
+- the first x86 4 KiB mapping primitive now exists, allocating intermediate tables through a supplied paging allocator and rejecting remaps or huge-page cases
+- the first x86 unmap path now exists, and the repo has a passing `map -> translate -> unmap` lifecycle test for the 4 KiB bootstrap mechanism layer
 
 ## Current Strengths
 
@@ -58,3 +61,5 @@ Use those before deeper kernel or loader changes.
 4. capture and document the first serial-output handoff from loader to kernel
 5. keep separating generic kernel plumbing from x86-specific implementation details before starting an ARM64 lane
 6. extend the typed bootstrap reservation set into the first page-table structure allocations
+7. use the new page-table query layer as the base for the first explicit mapping primitive
+8. surface the new mapping lifecycle through serial-debuggable bootstrap checks
