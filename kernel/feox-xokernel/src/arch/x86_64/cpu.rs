@@ -64,6 +64,88 @@ pub fn enable_nxe() {
     }
 }
 
+/// Reads the current CR4 register value.
+fn read_cr4() -> u64 {
+    let value: u64;
+    unsafe {
+        // Safety: reading CR4 is a side-effect-free architectural register read.
+        asm!("mov {}, cr4", out(reg) value, options(nomem, nostack, preserves_flags));
+    }
+    value
+}
+
+/// Writes a value to the CR4 register.
+///
+/// # Safety
+///
+/// The caller must ensure `value` is a legal CR4 state for the current
+/// processor. Enabling a feature that the CPU does not support will cause a
+/// general-protection fault.
+unsafe fn write_cr4(value: u64) {
+    unsafe {
+        // Safety: upheld by the caller.
+        asm!("mov cr4, {}", in(reg) value, options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Enables supervisor-mode security bits in CR4 if the CPU supports them.
+///
+/// Sets the following bits when reported as available by CPUID leaf 7:
+///
+/// - **SMEP** (CR4.20): prevents the kernel from executing user-mode pages.
+/// - **SMAP** (CR4.21): prevents the kernel from reading user-mode pages
+///   without an explicit `stac`/`clac` bracket.
+/// - **UMIP** (CR4.11): prevents user-mode from reading descriptor-table
+///   registers (`SGDT`, `SIDT`, `SMSW`, `SLDT`, `STR`), which would
+///   otherwise leak kernel addresses.
+///
+/// Must be called after the GDT and IDT are loaded. SMEP and SMAP are not
+/// relevant until user-mode mappings are live, but establishing them during
+/// `early_init` closes the window before any page-table work.
+pub fn enable_cr4_security_bits() {
+    // CPUID leaf 7, sub-leaf 0 reports structured extended feature flags.
+    // rbx is reserved by LLVM and cannot be named as an asm operand; save and
+    // restore it around the CPUID instruction, moving EBX output to a scratch
+    // register before restoring.
+    let ebx: u32;
+    let ecx: u32;
+    unsafe {
+        // Safety: CPUID is always available on x86_64. We preserve rbx by
+        // saving it on the stack and restoring after copying EBX's output.
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            inout("eax") 7u32 => _,
+            inout("ecx") 0u32 => ecx,
+            ebx_out = out(reg) ebx,
+            lateout("edx") _,
+            options(nomem, preserves_flags),
+        );
+    }
+
+    const CR4_UMIP: u64 = 1 << 11;
+    const CR4_SMEP: u64 = 1 << 20;
+    const CR4_SMAP: u64 = 1 << 21;
+
+    let smep_supported = (ebx >> 7) & 1 != 0;   // EBX bit 7
+    let smap_supported = (ebx >> 20) & 1 != 0;  // EBX bit 20
+    let umip_supported = (ecx >> 2) & 1 != 0;   // ECX bit 2
+
+    let mut cr4 = read_cr4();
+    if smep_supported {
+        cr4 |= CR4_SMEP;
+    }
+    if smap_supported {
+        cr4 |= CR4_SMAP;
+    }
+    if umip_supported {
+        cr4 |= CR4_UMIP;
+    }
+    unsafe { write_cr4(cr4) };
+}
+
 /// Disables maskable interrupts on the current core.
 pub fn disable_interrupts() {
     // SAFETY: this emits the architectural instruction for clearing IF.
@@ -80,7 +162,17 @@ pub fn halt() {
     }
 }
 
-/// Enters an infinite halt loop after disabling interrupts.
+/// Enters an infinite halt loop after disabling maskable interrupts.
+///
+/// `cli` clears IF, preventing maskable interrupts from waking the core.
+/// NMIs and machine-check exceptions are not masked by `cli` and will still
+/// be delivered with a valid RSP. This is intentional: the halt loop is used
+/// for panic and fatal-error paths where the core must not be rescheduled
+/// but must remain reachable by NMI-driven debuggers or watchdog signals.
+///
+/// Note: because maskable IRQs are disabled, the panic path that lands here
+/// will not accept any maskable soft-reboot or QEMU exit signal. This is a
+/// deliberate choice for the bootstrap phase.
 pub fn hlt_loop() -> ! {
     disable_interrupts();
 
