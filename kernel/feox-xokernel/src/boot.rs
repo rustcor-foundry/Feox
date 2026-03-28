@@ -9,8 +9,8 @@ use crate::memory;
 use crate::memory::MemoryRegionKind;
 use crate::paging;
 use crate::runtime_context::{
-    BootstrapCoreContext, RuntimeServiceCommand, RuntimeServiceHeartbeat, RuntimeServiceReport,
-    RuntimeServiceState,
+    BootstrapCoreContext, RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand,
+    RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
     RuntimeSnapshot,
 };
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
@@ -528,7 +528,7 @@ fn runtime_active_entry() -> ! {
                         );
                     } else {
                         let _ = crate::runtime_context::enqueue_command(
-                            RuntimeServiceCommand::EnterIdle,
+                            RuntimeServiceCommand::PublishReady,
                         );
                     }
                 } else {
@@ -536,6 +536,97 @@ fn runtime_active_entry() -> ! {
                         RuntimeServiceCommand::EnterIdle,
                     );
                 }
+            }
+            RuntimeServiceCommand::PublishReady => {
+                crate::runtime_context::push_event("runtime-service-ready");
+                crate::runtime_context::store_service(RuntimeServiceState {
+                    owner_core,
+                    phase: "ready",
+                    iterations: service_iteration,
+                    last_action: "publish-runtime-ready",
+                });
+                let settled_beats = crate::runtime_context::service_heartbeat()
+                    .map_or(0, |heartbeat| heartbeat.beats);
+                crate::runtime_context::store_runtime_readiness(RuntimeReadinessState {
+                    ready: true,
+                    published_iteration: service_iteration,
+                    settled_beats,
+                });
+                if let Some(runtime) = crate::runtime_context::snapshot() {
+                    crate::runtime_context::store(RuntimeSnapshot {
+                        stage: "runtime-ready",
+                        ..runtime
+                    });
+                }
+                if let Some(core) = crate::runtime_context::core() {
+                    crate::runtime_context::store_core(BootstrapCoreContext {
+                        stage: "runtime-ready",
+                        ..core
+                    });
+                }
+                if let Some(service) = crate::runtime_context::service() {
+                    crate::kprintln!(
+                        "runtime: service_ready core={} phase={} iterations={} action={}",
+                        service.owner_core.0,
+                        service.phase,
+                        service.iterations,
+                        service.last_action
+                    );
+                }
+                if let Some(readiness) = crate::runtime_context::runtime_readiness() {
+                    crate::kprintln!(
+                        "runtime: readiness ready={} published_iteration={} settled_beats={}",
+                        readiness.ready,
+                        readiness.published_iteration,
+                        readiness.settled_beats
+                    );
+                }
+                if let Some(runtime) = crate::runtime_context::snapshot() {
+                    crate::kprintln!(
+                        "runtime: ready_state stage={} root={:#018x}",
+                        runtime.stage,
+                        runtime.active_root
+                    );
+                }
+                let _ = crate::runtime_context::enqueue_command(
+                    RuntimeServiceCommand::PublishReadySummary,
+                );
+            }
+            RuntimeServiceCommand::PublishReadySummary => {
+                crate::runtime_context::push_event("runtime-service-ready-summary");
+                crate::runtime_context::store_service(RuntimeServiceState {
+                    owner_core,
+                    phase: "ready-summary",
+                    iterations: service_iteration,
+                    last_action: "publish-ready-summary",
+                });
+                if let Some(runtime) = crate::runtime_context::snapshot() {
+                    let retained_events = crate::runtime_context::service_report()
+                        .map_or(0, |report| report.retained_events);
+                    crate::runtime_context::store_ready_summary(RuntimeReadySummary {
+                        active_root: runtime.active_root,
+                        kernel_pages_mapped: runtime.kernel_pages_mapped,
+                        retained_events,
+                    });
+                }
+                if let Some(service) = crate::runtime_context::service() {
+                    crate::kprintln!(
+                        "runtime: service_ready_summary core={} phase={} iterations={} action={}",
+                        service.owner_core.0,
+                        service.phase,
+                        service.iterations,
+                        service.last_action
+                    );
+                }
+                if let Some(summary) = crate::runtime_context::ready_summary() {
+                    crate::kprintln!(
+                        "runtime: ready_summary root={:#018x} pages={} retained_events={}",
+                        summary.active_root,
+                        summary.kernel_pages_mapped,
+                        summary.retained_events
+                    );
+                }
+                let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
             }
             RuntimeServiceCommand::EnterIdle => {
                 crate::runtime_context::push_event("runtime-service-idle");
