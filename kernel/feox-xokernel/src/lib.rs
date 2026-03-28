@@ -1,5 +1,6 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
+#![allow(clippy::similar_names, clippy::used_underscore_items)]
 
 //! Top-level facade for the Feox xokernel prototype.
 
@@ -33,7 +34,7 @@ pub struct KernelConfig {
     pub bootstrap_core: CoreId,
     /// Maximum number of scheduler-visible cores.
     pub max_cores: u16,
-    /// Default NVMe queue depth for the early prototype.
+    /// Default `NVMe` queue depth for the early prototype.
     pub nvme_queue_depth: u16,
 }
 

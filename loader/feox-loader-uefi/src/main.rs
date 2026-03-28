@@ -13,11 +13,11 @@ use core::cmp;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use elf::abi::{ET_EXEC, PT_LOAD};
 #[cfg(target_arch = "aarch64")]
 use elf::abi::EM_AARCH64;
 #[cfg(target_arch = "x86_64")]
 use elf::abi::EM_X86_64;
+use elf::abi::{ET_EXEC, PT_LOAD};
 use elf::endian::AnyEndian;
 use elf::file::Class;
 use elf::{ElfBytes, segment::ProgramHeader};

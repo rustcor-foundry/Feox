@@ -4,16 +4,16 @@ use core::arch::asm;
 
 /// Disables maskable interrupts on the current core.
 pub fn disable_interrupts() {
+    // SAFETY: this emits the architectural instruction for clearing IF.
     unsafe {
-        // Safety: this is the architectural instruction for clearing IF.
         asm!("cli", options(nomem, nostack, preserves_flags));
     }
 }
 
 /// Halts the current core until the next interrupt.
 pub fn halt() {
+    // SAFETY: this emits the architectural halt instruction.
     unsafe {
-        // Safety: this executes the architectural halt instruction.
         asm!("hlt", options(nomem, nostack));
     }
 }
@@ -32,8 +32,8 @@ pub fn hlt_loop() -> ! {
 pub fn read_cr2() -> u64 {
     let value: u64;
 
+    // SAFETY: reading CR2 is a side-effect-free architectural register read.
     unsafe {
-        // Safety: reading CR2 is a side-effect-free architectural register read.
         asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
     }
 
@@ -45,8 +45,8 @@ pub fn read_cr2() -> u64 {
 pub fn read_cr3() -> u64 {
     let value: u64;
 
+    // SAFETY: reading CR3 is a side-effect-free architectural register read.
     unsafe {
-        // Safety: reading CR3 is a side-effect-free architectural register read.
         asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags));
     }
 
@@ -58,8 +58,8 @@ pub fn read_cr3() -> u64 {
 pub fn read_rsp() -> u64 {
     let value: u64;
 
+    // SAFETY: reading RSP is a side-effect-free register move.
     unsafe {
-        // Safety: reading RSP is a side-effect-free register move.
         asm!("mov {}, rsp", out(reg) value, options(nomem, nostack, preserves_flags));
     }
 
@@ -68,9 +68,9 @@ pub fn read_rsp() -> u64 {
 
 /// Raises a software breakpoint exception on the current core.
 pub fn trigger_breakpoint() {
+    // SAFETY: this intentionally raises vector 3 so the bootstrap exception
+    // path can be validated under controlled conditions.
     unsafe {
-        // Safety: this intentionally raises vector 3 so the bootstrap exception
-        // path can be validated under controlled conditions.
         asm!("int3", options(nomem, nostack));
     }
 }
@@ -78,13 +78,15 @@ pub fn trigger_breakpoint() {
 /// Switches to a new page-table root, installs a new stack pointer, and jumps
 /// to the supplied entrypoint.
 ///
+/// # Safety
+///
 /// The caller must ensure the current execution path remains valid long enough
 /// to execute the CR3 write and jump sequence, and that the target entry and
 /// stack are mapped in the new address space.
 pub unsafe fn switch_page_table_root_and_jump(root: u64, stack: u64, entry: u64) -> ! {
+    // SAFETY: upheld by the caller; this is the minimal architectural
+    // sequence required to move onto a prepared address space.
     unsafe {
-        // SAFETY: upheld by the caller; this is the minimal architectural
-        // sequence required to move onto a prepared address space.
         asm!(
             "mov dx, 0x402",
             "mov al, 0x3c",
@@ -122,12 +124,14 @@ pub unsafe fn switch_page_table_root_and_jump(root: u64, stack: u64, entry: u64)
 
 /// Switches to a new stack pointer and jumps to the supplied entrypoint.
 ///
+/// # Safety
+///
 /// The caller must ensure the target stack and entry are valid in the current
 /// address space.
 pub unsafe fn switch_stack_and_jump(stack: u64, entry: u64) -> ! {
+    // SAFETY: upheld by the caller; this is the minimal architectural
+    // sequence required to move onto a prepared stack and entrypoint.
     unsafe {
-        // SAFETY: upheld by the caller; this is the minimal architectural
-        // sequence required to move onto a prepared stack and entrypoint.
         asm!(
             "mov rsp, r8",
             "push 0",

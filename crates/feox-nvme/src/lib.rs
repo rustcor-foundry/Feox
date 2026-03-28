@@ -1,7 +1,7 @@
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-//! NVMe queue and inflight tracking primitives for Feox.
+//! `NVMe` queue and inflight tracking primitives for Feox.
 
 extern crate alloc;
 #[cfg(test)]
@@ -15,7 +15,7 @@ use core::pin::Pin;
 use core::ptr::NonNull;
 use core::task::{Context, Poll, Waker};
 
-/// Decoded NVMe status tuple.
+/// Decoded `NVMe` status tuple.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NvmeStatus {
     /// Status code type.
@@ -56,7 +56,7 @@ impl NvmeCompletion {
     }
 }
 
-/// Driver-visible NVMe errors.
+/// Driver-visible `NVMe` errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NvmeError {
     /// No command slots are currently available.
@@ -140,6 +140,11 @@ impl InflightMap {
 
     /// Registers a new in-flight command and returns the core-local future that
     /// will observe its completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NvmeError::QueueFull`] when no command slots are currently
+    /// available.
     pub fn register(&mut self) -> Result<(u16, NvmeIoFuture), NvmeError> {
         let cid = self.free.pop().ok_or(NvmeError::QueueFull)?;
         let entry = &mut self.entries[cid as usize];
@@ -178,10 +183,15 @@ impl InflightMap {
 
     /// Fails every live command, including commands whose futures have not been
     /// polled yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inflight entry count no longer fits in `u16`, which would
+    /// violate the queue model's command-ID contract.
     pub fn fail_all(&mut self, error: NvmeError) {
-        for cid in 0..self.entries.len() {
-            if self.entries[cid].state != SlotState::Free {
-                self.finish(cid as u16, Err(error));
+        for cid in 0..u16::try_from(self.entries.len()).expect("entry count fits in u16") {
+            if self.entries[usize::from(cid)].state != SlotState::Free {
+                self.finish(cid, Err(error));
             }
         }
     }
@@ -231,11 +241,9 @@ impl Future for NvmeIoFuture {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let map = unsafe {
-            // Safety: the future is intentionally !Send and only polled on the
-            // owning core that also owns the inflight map.
-            this.map.as_mut()
-        };
+        // SAFETY: the future is intentionally `!Send` and is only polled on the
+        // owning core that also owns the inflight map.
+        let map = unsafe { this.map.as_mut() };
         let cid = this.lease.cid as usize;
 
         if map.entries[cid].generation != this.lease.generation {
@@ -256,11 +264,9 @@ impl Future for NvmeIoFuture {
 
 impl Drop for NvmeIoFuture {
     fn drop(&mut self) {
-        let map = unsafe {
-            // Safety: the future is !Send and cannot outlive the executor-local
-            // inflight map that created it.
-            self.map.as_mut()
-        };
+        // SAFETY: the future is `!Send` and cannot outlive the executor-local
+        // inflight map that created it.
+        let map = unsafe { self.map.as_mut() };
         let cid = self.lease.cid as usize;
 
         if cid >= map.entries.len() {
@@ -305,6 +311,11 @@ impl NvmeQueuePair {
     }
 
     /// Reserves a command ID and returns the future that will complete it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the queue failure if the queue has already failed, or
+    /// [`NvmeError::QueueFull`] when no command slots remain.
     pub fn submit(&mut self) -> Result<(u16, NvmeIoFuture), NvmeError> {
         if let Some(error) = self.failed {
             return Err(error);

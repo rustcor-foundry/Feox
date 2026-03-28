@@ -1,4 +1,5 @@
 //! Early kernel bootstrap flow.
+#![allow(clippy::items_after_test_module, clippy::similar_names)]
 
 #[cfg(target_os = "none")]
 use core::arch::global_asm;
@@ -10,8 +11,7 @@ use crate::memory::MemoryRegionKind;
 use crate::paging;
 use crate::runtime_context::{
     BootstrapCoreContext, RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand,
-    RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
-    RuntimeSnapshot,
+    RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState, RuntimeSnapshot,
 };
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
 
@@ -178,9 +178,7 @@ extern "C" fn transition_stage_entry_rust() -> ! {
             stage: BootstrapRuntimeStage::IdentityActive.label(),
         });
     }
-    if alias_stack_top != 0
-        && alias_entry != 0
-        && arch::current_stack_pointer() != alias_stack_top
+    if alias_stack_top != 0 && alias_entry != 0 && arch::current_stack_pointer() != alias_stack_top
     {
         crate::kprintln!(
             "stage: switching to transition alias stack={:#018x} entry={:#018x}",
@@ -191,10 +189,7 @@ extern "C" fn transition_stage_entry_rust() -> ! {
             // SAFETY: the alias stack top was prepared and mapped in the active
             // transition root before the CR3 handoff, and the alias entry is
             // a prepared high-half mapping of the same kernel image.
-            arch::switch_stack_and_jump(
-                alias_stack_top,
-                alias_entry,
-            )
+            arch::switch_stack_and_jump(alias_stack_top, alias_entry)
         }
     }
     transition_high_stack_entry()
@@ -256,11 +251,7 @@ extern "C" fn transition_high_stack_entry() -> ! {
             // SAFETY: both descriptor tables live inside the retained kernel
             // image mapping, and the handler delta retargets the bootstrap
             // exception stubs into the same high-half image window.
-            arch::reload_descriptor_tables(
-                alias_gdt_base,
-                alias_idt_base,
-                alias_handler_delta,
-            );
+            arch::reload_descriptor_tables(alias_gdt_base, alias_idt_base, alias_handler_delta);
         }
         crate::kprintln!(
             "paging: transition_descriptors gdt={:#018x} idt={:#018x} handler_delta={:#018x}",
@@ -322,8 +313,8 @@ fn runtime_active_entry() -> ! {
     crate::runtime_context::push_event("runtime-service-entered");
     crate::kprintln!("stage: runtime service entered");
 
-    let owner_core = crate::runtime_context::core()
-        .map_or(feox_asi::CoreId(0), |core| core.core_id);
+    let owner_core =
+        crate::runtime_context::core().map_or(feox_asi::CoreId(0), |core| core.core_id);
     crate::runtime_context::store_service(RuntimeServiceState {
         owner_core,
         phase: "entered",
@@ -393,7 +384,8 @@ fn runtime_active_entry() -> ! {
                         RuntimeServiceCommand::RefreshAccounting,
                     );
                 } else {
-                    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
+                    let _ =
+                        crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
                 }
             }
             RuntimeServiceCommand::RefreshAccounting => {
@@ -407,8 +399,9 @@ fn runtime_active_entry() -> ! {
                         }
                         event_index += 1;
                     }
-                    let kernel_window_bytes =
-                        runtime.kernel_window_end.saturating_sub(runtime.kernel_window_base);
+                    let kernel_window_bytes = runtime
+                        .kernel_window_end
+                        .saturating_sub(runtime.kernel_window_base);
                     let stack_bytes = runtime.stack_pages.saturating_mul(memory::PAGE_SIZE);
                     crate::runtime_context::push_event("runtime-service-accounting");
                     crate::runtime_context::store_service(RuntimeServiceState {
@@ -449,7 +442,8 @@ fn runtime_active_entry() -> ! {
                         );
                     }
                 } else {
-                    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
+                    let _ =
+                        crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
                 }
             }
             RuntimeServiceCommand::ReportTimeline => {
@@ -473,11 +467,7 @@ fn runtime_active_entry() -> ! {
                 let mut timeline_index = 0usize;
                 while timeline_index < events.len() {
                     if let Some(event) = events[timeline_index] {
-                        crate::kprintln!(
-                            "runtime: timeline_event[{}]={}",
-                            timeline_index,
-                            event
-                        );
+                        crate::kprintln!("runtime: timeline_event[{}]={}", timeline_index, event);
                     }
                     timeline_index += 1;
                 }
@@ -486,7 +476,8 @@ fn runtime_active_entry() -> ! {
                         RuntimeServiceCommand::UpdateHeartbeat,
                     );
                 } else {
-                    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
+                    let _ =
+                        crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
                 }
             }
             RuntimeServiceCommand::UpdateHeartbeat => {
@@ -532,9 +523,8 @@ fn runtime_active_entry() -> ! {
                         );
                     }
                 } else {
-                    let _ = crate::runtime_context::enqueue_command(
-                        RuntimeServiceCommand::EnterIdle,
-                    );
+                    let _ =
+                        crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
                 }
             }
             RuntimeServiceCommand::PublishReady => {
@@ -654,7 +644,9 @@ fn runtime_active_entry() -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapRuntimeStage, BootstrapRuntimeState, RuntimeSnapshot, TRANSITION_DATA_MAGIC};
+    use super::{
+        BootstrapRuntimeStage, BootstrapRuntimeState, RuntimeSnapshot, TRANSITION_DATA_MAGIC,
+    };
 
     #[test]
     fn runtime_snapshot_reflects_retained_bootstrap_state() {
@@ -820,7 +812,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     let Some(frame) = allocator.allocate() else {
                         break;
                     };
-                    reservations.reserve_frame(memory::ReservationKind::BootstrapPerCoreState, frame);
+                    reservations
+                        .reserve_frame(memory::ReservationKind::BootstrapPerCoreState, frame);
                     transition_stack_frames[stack_page] = Some(frame);
                     stack_page += 1;
                 }
@@ -837,10 +830,7 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     .map(|frame| {
                         runtime_layout.stack_window_base().as_u64()
                             + ((frame.start_address().as_u64()
-                                - transition_stack_frames[0]
-                                    .unwrap()
-                                    .start_address()
-                                    .as_u64())
+                                - transition_stack_frames[0].unwrap().start_address().as_u64())
                                 + memory::PAGE_SIZE)
                     })
                     .unwrap_or(0);
@@ -848,7 +838,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     memory::FrameAllocator::with_reservations(boot_map, reservations.as_view());
                 let transition_data_frame = allocator.allocate();
                 if let Some(frame) = transition_data_frame {
-                    reservations.reserve_frame(memory::ReservationKind::BootstrapPerCoreState, frame);
+                    reservations
+                        .reserve_frame(memory::ReservationKind::BootstrapPerCoreState, frame);
                 }
                 let transition_data_identity = transition_data_frame
                     .map(|frame| frame.start_address().as_u64())
@@ -923,13 +914,13 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             if let Some(first_stack_frame) = transition_stack_frames[0] {
                                 let mut stack_index = 0usize;
                                 while stack_index < transition_stack_frames.len() {
-                                    let Some(stack_frame) = transition_stack_frames[stack_index] else {
+                                    let Some(stack_frame) = transition_stack_frames[stack_index]
+                                    else {
                                         map_result = Err("transition_stack_incomplete");
                                         break;
                                     };
-                                    let stack_offset =
-                                        stack_frame.start_address().as_u64()
-                                            - first_stack_frame.start_address().as_u64();
+                                    let stack_offset = stack_frame.start_address().as_u64()
+                                        - first_stack_frame.start_address().as_u64();
                                     let identity_stack_virtual = memory::VirtualAddress::new(
                                         stack_frame.start_address().as_u64(),
                                     );
@@ -1024,16 +1015,15 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                         } else {
                             Ok(None)
                         };
-                        let identity_data_translate_result = if transition_map_result.is_ok()
-                            && transition_data_identity != 0
-                        {
-                            page_root.translate_with(
-                                &live_page_tables,
-                                memory::VirtualAddress::new(transition_data_identity),
-                            )
-                        } else {
-                            Ok(None)
-                        };
+                        let identity_data_translate_result =
+                            if transition_map_result.is_ok() && transition_data_identity != 0 {
+                                page_root.translate_with(
+                                    &live_page_tables,
+                                    memory::VirtualAddress::new(transition_data_identity),
+                                )
+                            } else {
+                                Ok(None)
+                            };
 
                         (
                             bootstrap_page_table_root.start_address().as_u64(),
@@ -1080,14 +1070,14 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     transition_pages_mapped
                 );
                 if let Some(entry) = transition_stage_entry_alias {
-                    crate::kprintln!(
-                        "paging: transition_entry={:#018x}",
-                        entry.as_u64()
-                    );
+                    crate::kprintln!("paging: transition_entry={:#018x}", entry.as_u64());
                 } else {
                     crate::kprintln!("paging: transition_entry=unavailable");
                 }
-                crate::kprintln!("paging: transition_stack={:#018x}", transition_stack_alias_top);
+                crate::kprintln!(
+                    "paging: transition_stack={:#018x}",
+                    transition_stack_alias_top
+                );
                 crate::kprintln!(
                     "paging: identity_transition_stack={:#018x}",
                     transition_stack_top
@@ -1101,15 +1091,14 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     transition_data_identity
                 );
                 if let Some(entry) = transition_high_stack_entry_alias {
-                    crate::kprintln!(
-                        "paging: transition_alias_entry={:#018x}",
-                        entry.as_u64()
-                    );
+                    crate::kprintln!("paging: transition_alias_entry={:#018x}", entry.as_u64());
                 } else {
                     crate::kprintln!("paging: transition_alias_entry=unavailable");
                 }
             } else {
-                crate::kprintln!("paging: transition_root_error=transition_root_not_identity_mapped");
+                crate::kprintln!(
+                    "paging: transition_root_error=transition_root_not_identity_mapped"
+                );
             }
             match transition_map_result {
                 Ok(()) => {
@@ -1134,10 +1123,9 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             translation.physical_address.as_u64()
                         ),
                         Ok(None) => crate::kprintln!("paging: identity_entry_translate missing"),
-                        Err(error) => crate::kprintln!(
-                            "paging: identity_entry_translate_error={:?}",
-                            error
-                        ),
+                        Err(error) => {
+                            crate::kprintln!("paging: identity_entry_translate_error={:?}", error)
+                        }
                     }
                     match identity_stack_translate_result {
                         Ok(Some(translation)) => crate::kprintln!(
@@ -1145,10 +1133,9 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             translation.physical_address.as_u64()
                         ),
                         Ok(None) => crate::kprintln!("paging: identity_stack_translate missing"),
-                        Err(error) => crate::kprintln!(
-                            "paging: identity_stack_translate_error={:?}",
-                            error
-                        ),
+                        Err(error) => {
+                            crate::kprintln!("paging: identity_stack_translate_error={:?}", error)
+                        }
                     }
                     match identity_data_translate_result {
                         Ok(Some(translation)) => crate::kprintln!(
@@ -1156,17 +1143,14 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             translation.physical_address.as_u64()
                         ),
                         Ok(None) => crate::kprintln!("paging: identity_data_translate missing"),
-                        Err(error) => crate::kprintln!(
-                            "paging: identity_data_translate_error={:?}",
-                            error
-                        ),
+                        Err(error) => {
+                            crate::kprintln!("paging: identity_data_translate_error={:?}", error)
+                        }
                     }
-                    if let (Some(entry), Some(stack)) =
-                        (
-                            Some(identity_transition_entry),
-                            Some(memory::VirtualAddress::new(transition_stack_top)),
-                        )
-                    {
+                    if let (Some(entry), Some(stack)) = (
+                        Some(identity_transition_entry),
+                        Some(memory::VirtualAddress::new(transition_stack_top)),
+                    ) {
                         if transition_data_identity != 0 {
                             let transition_data = unsafe {
                                 // SAFETY: the identity data page is kernel-owned bootstrap
@@ -1175,7 +1159,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             };
                             transition_data.magic = TRANSITION_DATA_MAGIC;
                             transition_data.active_root = bootstrap_page_table_frame;
-                            transition_data.kernel_window_base = transition_virtual_address.as_u64();
+                            transition_data.kernel_window_base =
+                                transition_virtual_address.as_u64();
                             transition_data.kernel_window_end =
                                 runtime_layout.kernel_window_end(kernel_image).as_u64();
                             transition_data.kernel_pages_mapped = transition_pages_mapped;
@@ -1201,8 +1186,7 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                                 transition_gdt_alias.map_or(0, |base| base.as_u64());
                             TRANSITION_IDT_ALIAS =
                                 transition_idt_alias.map_or(0, |base| base.as_u64());
-                            TRANSITION_HANDLER_DELTA =
-                                runtime_layout.handler_delta(kernel_image);
+                            TRANSITION_HANDLER_DELTA = runtime_layout.handler_delta(kernel_image);
                         }
                         crate::kprintln!("stage: switching to transition root (identity handoff)");
                         unsafe {

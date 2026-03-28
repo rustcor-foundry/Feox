@@ -229,10 +229,11 @@ extern "C" fn dispatch_exception(context: &ExceptionContext) -> ! {
     crate::console::init();
 
     crate::kprintln!();
+    let vector = u8::try_from(context.vector).ok();
     crate::kprintln!(
         "[feox exception] vector={} {}",
         context.vector,
-        vector_name(context.vector as u8)
+        vector.map_or("unknown", vector_name)
     );
     crate::kprintln!(
         "error={:#018x} rip={:#018x} cs={:#06x} rflags={:#018x}",

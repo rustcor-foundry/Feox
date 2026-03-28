@@ -1,4 +1,5 @@
 //! Retained bootstrap runtime context shared across early kernel paths.
+#![allow(clippy::undocumented_unsafe_blocks)]
 
 use feox_asi::CoreId;
 
@@ -247,6 +248,11 @@ pub fn ready_summary() -> Option<RuntimeReadySummary> {
 }
 
 /// Enqueues one retained runtime-service command.
+///
+/// # Errors
+///
+/// Returns the supplied command when the fixed-size retained command queue is
+/// already full.
 pub fn enqueue_command(command: RuntimeServiceCommand) -> Result<(), RuntimeServiceCommand> {
     unsafe {
         if BOOTSTRAP_COMMAND_LEN >= BOOTSTRAP_COMMAND_CAPACITY {
@@ -303,18 +309,38 @@ pub fn events() -> [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] {
 }
 
 #[cfg(test)]
+fn reset_for_tests() {
+    unsafe {
+        BOOTSTRAP_RUNTIME_SNAPSHOT = None;
+        BOOTSTRAP_CORE_CONTEXT = None;
+        BOOTSTRAP_SERVICE_STATE = None;
+        BOOTSTRAP_SERVICE_REPORT = None;
+        BOOTSTRAP_SERVICE_HEARTBEAT = None;
+        BOOTSTRAP_RUNTIME_READINESS = None;
+        BOOTSTRAP_READY_SUMMARY = None;
+        BOOTSTRAP_COMMANDS = [None; BOOTSTRAP_COMMAND_CAPACITY];
+        BOOTSTRAP_COMMAND_HEAD = 0;
+        BOOTSTRAP_COMMAND_LEN = 0;
+        BOOTSTRAP_EVENTS = [None; BOOTSTRAP_EVENT_CAPACITY];
+        BOOTSTRAP_EVENT_COUNT = 0;
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        dequeue_command, enqueue_command, service, service_report, store_service,
-        store_ready_summary, store_runtime_readiness, store_service_heartbeat,
-        store_service_report, ready_summary, runtime_readiness, RuntimeReadinessState,
-        RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
-        RuntimeServiceReport, RuntimeServiceState, service_heartbeat,
+        RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
+        RuntimeServiceReport, RuntimeServiceState, dequeue_command, enqueue_command, events,
+        push_event, ready_summary, reset_for_tests, runtime_readiness, service, service_heartbeat,
+        service_report, store_ready_summary, store_runtime_readiness, store_service,
+        store_service_heartbeat, store_service_report,
     };
     use feox_asi::CoreId;
 
     #[test]
     fn runtime_service_state_round_trips() {
+        reset_for_tests();
+
         let service_state = RuntimeServiceState {
             owner_core: CoreId(0),
             phase: "poll",
@@ -329,6 +355,8 @@ mod tests {
 
     #[test]
     fn runtime_service_report_round_trips() {
+        reset_for_tests();
+
         let report = RuntimeServiceReport {
             kernel_window_bytes: 0x1b000,
             stack_bytes: 0x4000,
@@ -342,6 +370,8 @@ mod tests {
 
     #[test]
     fn runtime_service_heartbeat_round_trips() {
+        reset_for_tests();
+
         let heartbeat = RuntimeServiceHeartbeat {
             beats: 1,
             last_iteration: 3,
@@ -355,6 +385,8 @@ mod tests {
 
     #[test]
     fn runtime_readiness_round_trips() {
+        reset_for_tests();
+
         let readiness = RuntimeReadinessState {
             ready: true,
             published_iteration: 5,
@@ -368,6 +400,8 @@ mod tests {
 
     #[test]
     fn runtime_ready_summary_round_trips() {
+        reset_for_tests();
+
         let summary = RuntimeReadySummary {
             active_root: 0x124000,
             kernel_pages_mapped: 29,
@@ -381,12 +415,29 @@ mod tests {
 
     #[test]
     fn runtime_service_commands_round_trip_in_fifo_order() {
-        assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshSnapshot), Ok(()));
-        assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshAccounting), Ok(()));
-        assert_eq!(enqueue_command(RuntimeServiceCommand::ReportTimeline), Ok(()));
-        assert_eq!(enqueue_command(RuntimeServiceCommand::UpdateHeartbeat), Ok(()));
+        reset_for_tests();
+
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::RefreshSnapshot),
+            Ok(())
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::RefreshAccounting),
+            Ok(())
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::ReportTimeline),
+            Ok(())
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::UpdateHeartbeat),
+            Ok(())
+        );
         assert_eq!(enqueue_command(RuntimeServiceCommand::PublishReady), Ok(()));
-        assert_eq!(enqueue_command(RuntimeServiceCommand::PublishReadySummary), Ok(()));
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::PublishReadySummary),
+            Ok(())
+        );
         assert_eq!(enqueue_command(RuntimeServiceCommand::EnterIdle), Ok(()));
 
         assert_eq!(
@@ -397,11 +448,115 @@ mod tests {
             dequeue_command(),
             Some(RuntimeServiceCommand::RefreshAccounting)
         );
-        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::ReportTimeline));
-        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::UpdateHeartbeat));
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::ReportTimeline)
+        );
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::UpdateHeartbeat)
+        );
         assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::PublishReady));
-        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::PublishReadySummary));
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::PublishReadySummary)
+        );
         assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::EnterIdle));
         assert_eq!(dequeue_command(), None);
+    }
+
+    #[test]
+    fn runtime_service_command_queue_rejects_overflow_and_recovers_after_drain() {
+        reset_for_tests();
+
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::RefreshSnapshot),
+            Ok(())
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::RefreshAccounting),
+            Ok(())
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::ReportTimeline),
+            Ok(())
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::UpdateHeartbeat),
+            Ok(())
+        );
+        assert_eq!(enqueue_command(RuntimeServiceCommand::PublishReady), Ok(()));
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::PublishReadySummary),
+            Ok(())
+        );
+        assert_eq!(enqueue_command(RuntimeServiceCommand::EnterIdle), Ok(()));
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::RefreshSnapshot),
+            Err(RuntimeServiceCommand::RefreshSnapshot)
+        );
+
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::RefreshSnapshot)
+        );
+        assert_eq!(
+            enqueue_command(RuntimeServiceCommand::RefreshSnapshot),
+            Ok(())
+        );
+
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::RefreshAccounting)
+        );
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::ReportTimeline)
+        );
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::UpdateHeartbeat)
+        );
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::PublishReady));
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::PublishReadySummary)
+        );
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::EnterIdle));
+        assert_eq!(
+            dequeue_command(),
+            Some(RuntimeServiceCommand::RefreshSnapshot)
+        );
+        assert_eq!(dequeue_command(), None);
+    }
+
+    #[test]
+    fn retained_events_roll_forward_in_oldest_to_newest_order() {
+        reset_for_tests();
+
+        push_event("event-0");
+        push_event("event-1");
+        push_event("event-2");
+        push_event("event-3");
+        push_event("event-4");
+        push_event("event-5");
+        push_event("event-6");
+        push_event("event-7");
+        push_event("event-8");
+        push_event("event-9");
+
+        assert_eq!(
+            events(),
+            [
+                Some("event-2"),
+                Some("event-3"),
+                Some("event-4"),
+                Some("event-5"),
+                Some("event-6"),
+                Some("event-7"),
+                Some("event-8"),
+                Some("event-9"),
+            ]
+        );
     }
 }

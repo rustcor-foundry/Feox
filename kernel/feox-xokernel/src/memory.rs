@@ -3,7 +3,7 @@
 use crate::arch;
 pub use feox_boot::{MemoryRegion, MemoryRegionKind, PhysicalAddress};
 
-/// Base x86_64 page size in bytes.
+/// Base `x86_64` page size in bytes.
 pub const PAGE_SIZE: u64 = feox_boot::PAGE_SIZE;
 
 /// Legacy low-memory region reserved during x86 bootstrap.
@@ -33,7 +33,7 @@ impl VirtualAddress {
         self.0
     }
 
-    /// Returns the four x86_64 page-table indices for this address.
+    /// Returns the four `x86_64` page-table indices for this address.
     #[must_use]
     pub const fn page_table_indices(self) -> PageTableIndices {
         PageTableIndices {
@@ -45,7 +45,7 @@ impl VirtualAddress {
     }
 }
 
-/// x86_64 page-table indices derived from a canonical virtual address.
+/// `x86_64` page-table indices derived from a canonical virtual address.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PageTableIndices {
     /// PML4 index.
@@ -208,10 +208,7 @@ impl EarlyKernelReservations {
                 PhysicalAddress::new(kernel_image.end.as_u64()),
             ),
         );
-        reservations.reserve_frame(
-            ReservationKind::ActivePageTableRoot,
-            active_root,
-        );
+        reservations.reserve_frame(ReservationKind::ActivePageTableRoot, active_root);
         reservations
     }
 
@@ -219,6 +216,12 @@ impl EarlyKernelReservations {
     #[must_use]
     pub const fn len(self) -> usize {
         self.len
+    }
+
+    /// Returns whether no reservations are currently tracked.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
     }
 
     /// Returns the reservations as a borrowed view.
@@ -253,6 +256,10 @@ impl EarlyKernelReservations {
     }
 
     /// Reserves an explicit physical range under the supplied semantic category.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixed-size bootstrap reservation set is already full.
     pub fn reserve_region(&mut self, kind: ReservationKind, region: ReservedRegion) {
         if region.start.as_u64() >= region.end.as_u64() {
             return;
@@ -268,7 +275,10 @@ impl EarlyKernelReservations {
             return;
         }
 
-        assert!(self.len < Self::MAX_REGIONS, "too many early kernel reservations");
+        assert!(
+            self.len < Self::MAX_REGIONS,
+            "too many early kernel reservations"
+        );
         self.regions[self.len] = region;
         self.kinds[self.len] = kind;
         self.len += 1;
@@ -303,7 +313,10 @@ impl<'a> BootReservations<'a> {
     /// Returns whether the supplied address is reserved.
     #[must_use]
     pub fn contains(self, address: PhysicalAddress) -> bool {
-        self.regions.iter().copied().any(|region| region.contains(address))
+        self.regions
+            .iter()
+            .copied()
+            .any(|region| region.contains(address))
     }
 
     /// Returns the first address after the reservation containing the supplied address.
@@ -313,13 +326,19 @@ impl<'a> BootReservations<'a> {
             .iter()
             .copied()
             .find(|region| region.contains(address))
-            .map_or(address, |region| region.end())
+            .map_or(address, ReservedRegion::end)
     }
 
     /// Returns the number of explicit reservations.
     #[must_use]
     pub const fn len(self) -> usize {
         self.regions.len()
+    }
+
+    /// Returns whether there are no explicit reservations.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.regions.is_empty()
     }
 }
 
@@ -365,7 +384,10 @@ impl<'a> FrameAllocator<'a> {
 
             let candidate = self.next.align_up();
             if self.reservations.contains(candidate) {
-                self.next = self.reservations.next_unreserved_address(candidate).align_up();
+                self.next = self
+                    .reservations
+                    .next_unreserved_address(candidate)
+                    .align_up();
                 continue;
             }
             if candidate.as_u64() + PAGE_SIZE > region.end.as_u64() {
@@ -416,10 +438,17 @@ impl KernelImage {
 
 /// Named higher-half layout for the retained bootstrap runtime slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_field_names)]
 pub struct BootstrapRuntimeLayout {
     kernel_window_base: VirtualAddress,
     stack_window_base: VirtualAddress,
     data_window_base: VirtualAddress,
+}
+
+impl Default for BootstrapRuntimeLayout {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BootstrapRuntimeLayout {
@@ -520,10 +549,10 @@ pub fn active_page_table_root() -> PhysicalFrame {
 #[cfg(test)]
 mod tests {
     use super::{
+        BOOTSTRAP_DATA_WINDOW_BASE, BOOTSTRAP_KERNEL_WINDOW_BASE, BOOTSTRAP_STACK_WINDOW_BASE,
         BootMemoryMap, BootReservations, BootstrapRuntimeLayout, EarlyKernelReservations,
         FrameAllocator, KernelImage, MemoryRegion, MemoryRegionKind, PAGE_SIZE, PhysicalAddress,
         PhysicalFrame, ReservationKind, ReservedRegion, VirtualAddress,
-        BOOTSTRAP_DATA_WINDOW_BASE, BOOTSTRAP_KERNEL_WINDOW_BASE, BOOTSTRAP_STACK_WINDOW_BASE,
         X86_LEGACY_LOW_MEMORY_BYTES,
     };
 
@@ -626,7 +655,10 @@ mod tests {
         assert_eq!(reservations.kind_labels()[0], "legacy-low-memory");
         assert_eq!(reservations.kind_labels()[1], "kernel-image");
         assert_eq!(reservations.kind_labels()[2], "active-page-table-root");
-        assert_eq!(reservations.count_by_kind(ReservationKind::LegacyLowMemory), 1);
+        assert_eq!(
+            reservations.count_by_kind(ReservationKind::LegacyLowMemory),
+            1
+        );
         assert_eq!(reservations.count_by_kind(ReservationKind::KernelImage), 1);
         assert_eq!(
             reservations.count_by_kind(ReservationKind::ActivePageTableRoot),
