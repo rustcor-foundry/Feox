@@ -708,6 +708,10 @@ mod tests {
 /// state so higher layers can be added incrementally.
 pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
     arch::early_init();
+    // Claim the bootstrap runtime context for the bootstrap core before any
+    // store_* call is made. The CAS in claim_bootstrap_context panics in
+    // debug builds if a second core tries to claim.
+    crate::runtime_context::claim_bootstrap_context(config.bootstrap_core);
     let kernel_image = memory::kernel_image();
     let pml4 = memory::active_page_table_root();
 
