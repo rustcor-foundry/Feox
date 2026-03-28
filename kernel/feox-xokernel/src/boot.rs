@@ -23,7 +23,7 @@ static mut TRANSITION_DATA_ALIAS: u64 = 0;
 static mut TRANSITION_GDT_ALIAS: u64 = 0;
 static mut TRANSITION_IDT_ALIAS: u64 = 0;
 static mut TRANSITION_HANDLER_DELTA: u64 = 0;
-static mut TRANSITION_BOOTSTRAP_CORE_ID: u16 = 0;
+static mut TRANSITION_BOOTSTRAP_CORE_ID: u32 = 0;
 
 const TRANSITION_DATA_MAGIC: u64 = 0x4645_4F58_5452_4E31;
 
@@ -700,6 +700,10 @@ mod tests {
 /// state so higher layers can be added incrementally.
 pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
     arch::early_init();
+    // Claim the bootstrap runtime context for the bootstrap core before any
+    // store_* call is made. The CAS in claim_bootstrap_context panics in
+    // debug builds if a second core tries to claim.
+    crate::runtime_context::claim_bootstrap_context(config.bootstrap_core);
     let kernel_image = memory::kernel_image();
     let pml4 = memory::active_page_table_root();
 
@@ -910,7 +914,9 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                                 transition_pages_mapped += 1;
                                 page_index += 1;
                             }
-                            let stack_page_flags = 1_u64 << 1;
+                            // Stack pages are writable but not executable.
+                            let stack_page_flags =
+                                (1_u64 << 1) | paging::PageTableEntry::FLAG_NO_EXECUTE;
                             if let Some(first_stack_frame) = transition_stack_frames[0] {
                                 let mut stack_index = 0usize;
                                 while stack_index < transition_stack_frames.len() {
@@ -960,7 +966,9 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             }
                             if map_result.is_ok() {
                                 if let Some(data_frame) = transition_data_frame {
-                                    let data_page_flags = 1_u64 << 1;
+                                    // Data pages are writable but not executable.
+                                    let data_page_flags =
+                                        (1_u64 << 1) | paging::PageTableEntry::FLAG_NO_EXECUTE;
                                     let identity_data_virtual = memory::VirtualAddress::new(
                                         data_frame.start_address().as_u64(),
                                     );

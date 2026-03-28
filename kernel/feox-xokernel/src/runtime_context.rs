@@ -1,7 +1,71 @@
 //! Retained bootstrap runtime context shared across early kernel paths.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use feox_asi::CoreId;
+
+/// Sentinel value meaning no core has claimed the context yet.
+const CONTEXT_OWNER_NONE: u32 = u32::MAX;
+
+/// Records which core owns the bootstrap context write lock.
+///
+/// Initialized to `CONTEXT_OWNER_NONE`. The first call to
+/// `claim_bootstrap_context` atomically sets this to the claiming core's ID.
+/// All subsequent `store_*` calls assert that the recorded owner matches via
+/// `debug_assert`, preventing accidental multi-core writes without needing a
+/// full spinlock in the current single-core bootstrap phase.
+static CONTEXT_OWNER: AtomicU32 = AtomicU32::new(CONTEXT_OWNER_NONE);
+
+/// Claims exclusive write access to the bootstrap runtime context for
+/// `owner_core`.
+///
+/// Must be called before any `store_*` function is invoked. Idempotent when
+/// called multiple times with the same `owner_core` (safe in test environments
+/// where many threads share `CoreId(0)`). Panics in debug builds if a
+/// *different* core attempts to claim an already-owned context.
+pub fn claim_bootstrap_context(owner_core: CoreId) {
+    match CONTEXT_OWNER.compare_exchange(
+        CONTEXT_OWNER_NONE,
+        owner_core.0,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {}
+        Err(current) => {
+            // Already claimed: acceptable only if the same core is re-claiming.
+            debug_assert_eq!(
+                current, owner_core.0,
+                "bootstrap context owned by core {current}, cannot be claimed by core {}",
+                owner_core.0
+            );
+        }
+    }
+}
+
+/// Returns the `CoreId` of the core that claimed the bootstrap context, or
+/// `None` if `claim_bootstrap_context` has not yet been called.
+#[must_use]
+pub fn context_owner() -> Option<CoreId> {
+    let raw = CONTEXT_OWNER.load(Ordering::Acquire);
+    if raw == CONTEXT_OWNER_NONE {
+        None
+    } else {
+        Some(CoreId(raw))
+    }
+}
+
+/// Asserts in debug builds that the bootstrap context has been claimed.
+///
+/// Called at the top of every `store_*` function to catch uses before
+/// `claim_bootstrap_context` has been called.
+#[inline(always)]
+fn assert_context_claimed() {
+    debug_assert_ne!(
+        CONTEXT_OWNER.load(Ordering::Relaxed),
+        CONTEXT_OWNER_NONE,
+        "store called before claim_bootstrap_context"
+    );
+}
 
 /// Snapshot of the retained bootstrap runtime state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +222,7 @@ impl RuntimeServiceCommand {
 
 /// Stores the current retained bootstrap runtime snapshot.
 pub fn store(snapshot: RuntimeSnapshot) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_RUNTIME_SNAPSHOT = Some(snapshot);
     }
@@ -171,6 +236,7 @@ pub fn snapshot() -> Option<RuntimeSnapshot> {
 
 /// Stores the retained bootstrap core context.
 pub fn store_core(core: BootstrapCoreContext) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_CORE_CONTEXT = Some(core);
     }
@@ -184,6 +250,7 @@ pub fn core() -> Option<BootstrapCoreContext> {
 
 /// Stores the retained runtime service state.
 pub fn store_service(service: RuntimeServiceState) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_SERVICE_STATE = Some(service);
     }
@@ -197,6 +264,7 @@ pub fn service() -> Option<RuntimeServiceState> {
 
 /// Stores the retained runtime service report.
 pub fn store_service_report(report: RuntimeServiceReport) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_SERVICE_REPORT = Some(report);
     }
@@ -210,6 +278,7 @@ pub fn service_report() -> Option<RuntimeServiceReport> {
 
 /// Stores the retained runtime service heartbeat.
 pub fn store_service_heartbeat(heartbeat: RuntimeServiceHeartbeat) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_SERVICE_HEARTBEAT = Some(heartbeat);
     }
@@ -223,6 +292,7 @@ pub fn service_heartbeat() -> Option<RuntimeServiceHeartbeat> {
 
 /// Stores the retained runtime readiness state.
 pub fn store_runtime_readiness(readiness: RuntimeReadinessState) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_RUNTIME_READINESS = Some(readiness);
     }
@@ -236,6 +306,7 @@ pub fn runtime_readiness() -> Option<RuntimeReadinessState> {
 
 /// Stores the retained runtime-ready summary.
 pub fn store_ready_summary(summary: RuntimeReadySummary) {
+    assert_context_claimed();
     unsafe {
         BOOTSTRAP_READY_SUMMARY = Some(summary);
     }
@@ -254,6 +325,7 @@ pub fn ready_summary() -> Option<RuntimeReadySummary> {
 /// Returns the supplied command when the fixed-size retained command queue is
 /// already full.
 pub fn enqueue_command(command: RuntimeServiceCommand) -> Result<(), RuntimeServiceCommand> {
+    assert_context_claimed();
     unsafe {
         if BOOTSTRAP_COMMAND_LEN >= BOOTSTRAP_COMMAND_CAPACITY {
             return Err(command);
@@ -284,6 +356,7 @@ pub fn dequeue_command() -> Option<RuntimeServiceCommand> {
 
 /// Stores one retained bootstrap event in a fixed-size rolling buffer.
 pub fn push_event(event: &'static str) {
+    assert_context_claimed();
     unsafe {
         let index = BOOTSTRAP_EVENT_COUNT % BOOTSTRAP_EVENT_CAPACITY;
         BOOTSTRAP_EVENTS[index] = Some(event);
@@ -329,18 +402,17 @@ fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::{
-        RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
-        RuntimeServiceReport, RuntimeServiceState, dequeue_command, enqueue_command, events,
-        push_event, ready_summary, reset_for_tests, runtime_readiness, service, service_heartbeat,
-        service_report, store_ready_summary, store_runtime_readiness, store_service,
-        store_service_heartbeat, store_service_report,
+        claim_bootstrap_context, dequeue_command, enqueue_command, service, service_report,
+        store_service, store_ready_summary, store_runtime_readiness, store_service_heartbeat,
+        store_service_report, ready_summary, runtime_readiness, RuntimeReadinessState,
+        RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
+        RuntimeServiceReport, RuntimeServiceState, service_heartbeat,
     };
     use feox_asi::CoreId;
 
     #[test]
     fn runtime_service_state_round_trips() {
-        reset_for_tests();
-
+        claim_bootstrap_context(CoreId(0));
         let service_state = RuntimeServiceState {
             owner_core: CoreId(0),
             phase: "poll",
@@ -355,8 +427,7 @@ mod tests {
 
     #[test]
     fn runtime_service_report_round_trips() {
-        reset_for_tests();
-
+        claim_bootstrap_context(CoreId(0));
         let report = RuntimeServiceReport {
             kernel_window_bytes: 0x1b000,
             stack_bytes: 0x4000,
@@ -370,8 +441,7 @@ mod tests {
 
     #[test]
     fn runtime_service_heartbeat_round_trips() {
-        reset_for_tests();
-
+        claim_bootstrap_context(CoreId(0));
         let heartbeat = RuntimeServiceHeartbeat {
             beats: 1,
             last_iteration: 3,
@@ -385,8 +455,7 @@ mod tests {
 
     #[test]
     fn runtime_readiness_round_trips() {
-        reset_for_tests();
-
+        claim_bootstrap_context(CoreId(0));
         let readiness = RuntimeReadinessState {
             ready: true,
             published_iteration: 5,
@@ -400,8 +469,7 @@ mod tests {
 
     #[test]
     fn runtime_ready_summary_round_trips() {
-        reset_for_tests();
-
+        claim_bootstrap_context(CoreId(0));
         let summary = RuntimeReadySummary {
             active_root: 0x124000,
             kernel_pages_mapped: 29,
@@ -415,24 +483,11 @@ mod tests {
 
     #[test]
     fn runtime_service_commands_round_trip_in_fifo_order() {
-        reset_for_tests();
-
-        assert_eq!(
-            enqueue_command(RuntimeServiceCommand::RefreshSnapshot),
-            Ok(())
-        );
-        assert_eq!(
-            enqueue_command(RuntimeServiceCommand::RefreshAccounting),
-            Ok(())
-        );
-        assert_eq!(
-            enqueue_command(RuntimeServiceCommand::ReportTimeline),
-            Ok(())
-        );
-        assert_eq!(
-            enqueue_command(RuntimeServiceCommand::UpdateHeartbeat),
-            Ok(())
-        );
+        claim_bootstrap_context(CoreId(0));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshSnapshot), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshAccounting), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::ReportTimeline), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::UpdateHeartbeat), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::PublishReady), Ok(()));
         assert_eq!(
             enqueue_command(RuntimeServiceCommand::PublishReadySummary),

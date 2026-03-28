@@ -226,7 +226,9 @@ global_asm!(
 
 extern "C" fn dispatch_exception(context: &ExceptionContext) -> ! {
     cpu::disable_interrupts();
-    crate::console::init();
+    if !crate::console::is_ready() {
+        crate::console::init();
+    }
 
     crate::kprintln!();
     let vector = u8::try_from(context.vector).ok();
@@ -316,7 +318,9 @@ extern "C" fn dispatch_exception(context: &ExceptionContext) -> ! {
 
 extern "C" fn dispatch_breakpoint(context: &ExceptionContext) {
     cpu::disable_interrupts();
-    crate::console::init();
+    if !crate::console::is_ready() {
+        crate::console::init();
+    }
 
     crate::kprintln!();
     crate::kprintln!(

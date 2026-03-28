@@ -20,6 +20,11 @@ impl PageTableEntry {
     const FLAG_USER: u64 = 1 << 2;
     const FLAG_HUGE_PAGE: u64 = 1 << 7;
     const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+    /// Execute-disable flag (bit 63). Requires `EFER.NXE = 1`.
+    ///
+    /// Set this on any page that should not be executable: stacks, data pages,
+    /// and capability/MMIO windows. Never set it on code pages.
+    pub const FLAG_NO_EXECUTE: u64 = 1 << 63;
 
     /// Creates a raw entry from an encoded `u64`.
     #[must_use]
@@ -259,6 +264,12 @@ impl PageTableRoot {
             return Err(Map4kError::AlreadyMapped(existing));
         }
         table[indices.p1 as usize] = PageTableEntry::present(physical_frame, flags).raw();
+        // Flush the TLB entry for this address. The CR3 write performed during
+        // the bootstrap root switch implicitly flushes everything at that point,
+        // but any call after the root is live must flush explicitly or a stale
+        // translation could be used.
+        #[cfg(target_os = "none")]
+        crate::arch::invalidate_page(virtual_address.as_u64());
         Ok(())
     }
 
@@ -303,6 +314,10 @@ impl PageTableRoot {
             return Ok(None);
         }
         table[indices.p1 as usize] = 0;
+        // Flush the TLB entry so no subsequent access can reach the now-unmapped
+        // physical frame through a cached translation.
+        #[cfg(target_os = "none")]
+        crate::arch::invalidate_page(virtual_address.as_u64());
         Ok(Some(entry))
     }
 }

@@ -3,11 +3,9 @@
 
 //! `NVMe` queue and inflight tracking primitives for Feox.
 
-extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use alloc::vec::Vec;
 use core::cell::Cell;
 use core::future::Future;
 use core::marker::PhantomData;
@@ -86,7 +84,6 @@ struct CommandLease {
     generation: u64,
 }
 
-#[derive(Debug)]
 struct InflightEntry {
     generation: u64,
     state: SlotState,
@@ -96,7 +93,7 @@ struct InflightEntry {
 }
 
 impl InflightEntry {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             generation: 0,
             state: SlotState::Free,
@@ -111,42 +108,46 @@ impl InflightEntry {
 struct LocalOnly(Cell<()>);
 
 /// Core-local mapping from command IDs to pending futures.
-#[derive(Debug)]
-pub struct InflightMap {
-    entries: Vec<InflightEntry>,
-    free: Vec<u16>,
+///
+/// `N` is the queue depth and must be in the range `1..=65535`. Each slot
+/// corresponds to one CID value. The free list is a fixed-capacity stack; no
+/// heap allocation is required.
+pub struct InflightMap<const N: usize> {
+    entries: [InflightEntry; N],
+    /// Fixed-capacity free-CID stack. Valid entries are `free[0..free_head]`.
+    free: [u16; N],
+    /// Number of items currently on the free stack.
+    free_head: usize,
 }
 
-impl InflightMap {
-    /// Creates an inflight map with one reusable slot per possible CID.
+impl<const N: usize> InflightMap<N> {
+    /// Creates an inflight map with `N` reusable slots.
+    ///
+    /// CIDs are assigned from `0` to `N - 1`. They are pushed onto the free
+    /// stack in reverse order so the first `register` call returns CID 0.
     #[must_use]
-    pub fn new(depth: u16) -> Self {
-        let mut entries = Vec::with_capacity(depth as usize);
-        let mut free = Vec::with_capacity(depth as usize);
-
-        for cid in 0..depth {
-            entries.push(InflightEntry::new());
-            free.push(depth - cid - 1);
+    pub fn new() -> Self {
+        // Entries default to the Free/zero state; no unsafe required.
+        let entries = core::array::from_fn(|_| InflightEntry::new());
+        // Free stack: slot N-1 is the top so the first pop returns CID 0.
+        let free = core::array::from_fn(|i| (N - i - 1) as u16);
+        Self {
+            entries,
+            free,
+            free_head: N,
         }
-
-        Self { entries, free }
     }
 
     /// Returns the number of currently free CIDs.
     #[must_use]
     pub fn available(&self) -> usize {
-        self.free.len()
+        self.free_head
     }
 
     /// Registers a new in-flight command and returns the core-local future that
     /// will observe its completion.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NvmeError::QueueFull`] when no command slots are currently
-    /// available.
-    pub fn register(&mut self) -> Result<(u16, NvmeIoFuture), NvmeError> {
-        let cid = self.free.pop().ok_or(NvmeError::QueueFull)?;
+    pub fn register(&mut self) -> Result<(u16, NvmeIoFuture<N>), NvmeError> {
+        let cid = self.pop_free().ok_or(NvmeError::QueueFull)?;
         let entry = &mut self.entries[cid as usize];
         let next_generation = entry.generation.wrapping_add(1).max(1);
 
@@ -189,9 +190,9 @@ impl InflightMap {
     /// Panics if the inflight entry count no longer fits in `u16`, which would
     /// violate the queue model's command-ID contract.
     pub fn fail_all(&mut self, error: NvmeError) {
-        for cid in 0..u16::try_from(self.entries.len()).expect("entry count fits in u16") {
-            if self.entries[usize::from(cid)].state != SlotState::Free {
-                self.finish(cid, Err(error));
+        for cid in 0..N {
+            if self.entries[cid].state != SlotState::Free {
+                self.finish(cid as u16, Err(error));
             }
         }
     }
@@ -224,19 +225,40 @@ impl InflightMap {
         entry.result = None;
         entry.waker = None;
         entry.future_attached = false;
-        self.free.push(cid);
+        self.push_free(cid);
+    }
+
+    fn pop_free(&mut self) -> Option<u16> {
+        if self.free_head == 0 {
+            return None;
+        }
+        self.free_head -= 1;
+        Some(self.free[self.free_head])
+    }
+
+    fn push_free(&mut self, cid: u16) {
+        // Invariant: free_head < N because we only push CIDs that came from
+        // pop_free, so the count can never exceed N.
+        debug_assert!(self.free_head < N);
+        self.free[self.free_head] = cid;
+        self.free_head += 1;
+    }
+}
+
+impl<const N: usize> Default for InflightMap<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 /// A submitted command whose completion will be delivered to the owning core.
-#[derive(Debug)]
-pub struct NvmeIoFuture {
-    map: NonNull<InflightMap>,
+pub struct NvmeIoFuture<const N: usize> {
+    map: NonNull<InflightMap<N>>,
     lease: CommandLease,
     _not_send: PhantomData<&'static LocalOnly>,
 }
 
-impl Future for NvmeIoFuture {
+impl<const N: usize> Future for NvmeIoFuture<N> {
     type Output = Result<NvmeCompletion, NvmeError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -262,14 +284,14 @@ impl Future for NvmeIoFuture {
     }
 }
 
-impl Drop for NvmeIoFuture {
+impl<const N: usize> Drop for NvmeIoFuture<N> {
     fn drop(&mut self) {
         // SAFETY: the future is `!Send` and cannot outlive the executor-local
         // inflight map that created it.
         let map = unsafe { self.map.as_mut() };
         let cid = self.lease.cid as usize;
 
-        if cid >= map.entries.len() {
+        if cid >= N {
             return;
         }
 
@@ -288,18 +310,17 @@ impl Drop for NvmeIoFuture {
 }
 
 /// Small prototype queue pair that exposes safe CID allocation semantics.
-#[derive(Debug)]
-pub struct NvmeQueuePair {
-    inflight: InflightMap,
+pub struct NvmeQueuePair<const N: usize> {
+    inflight: InflightMap<N>,
     failed: Option<NvmeError>,
 }
 
-impl NvmeQueuePair {
-    /// Creates a new queue pair with a fixed command depth.
+impl<const N: usize> NvmeQueuePair<N> {
+    /// Creates a new queue pair with `N` command slots.
     #[must_use]
-    pub fn new(depth: u16) -> Self {
+    pub fn new() -> Self {
         Self {
-            inflight: InflightMap::new(depth),
+            inflight: InflightMap::new(),
             failed: None,
         }
     }
@@ -311,12 +332,7 @@ impl NvmeQueuePair {
     }
 
     /// Reserves a command ID and returns the future that will complete it.
-    ///
-    /// # Errors
-    ///
-    /// Returns the queue failure if the queue has already failed, or
-    /// [`NvmeError::QueueFull`] when no command slots remain.
-    pub fn submit(&mut self) -> Result<(u16, NvmeIoFuture), NvmeError> {
+    pub fn submit(&mut self) -> Result<(u16, NvmeIoFuture<N>), NvmeError> {
         if let Some(error) = self.failed {
             return Err(error);
         }
@@ -336,6 +352,12 @@ impl NvmeQueuePair {
     }
 }
 
+impl<const N: usize> Default for NvmeQueuePair<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InflightMap, NvmeCompletion, NvmeError, NvmeIoFuture, NvmeQueuePair};
@@ -347,7 +369,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
-    assert_not_impl_any!(NvmeIoFuture: Send, Sync);
+    assert_not_impl_any!(NvmeIoFuture<64>: Send, Sync);
 
     #[derive(Debug)]
     struct WakeCounter {
@@ -374,7 +396,7 @@ mod tests {
 
     #[test]
     fn completed_but_unpolled_commands_do_not_release_their_cid() {
-        let mut queue = NvmeQueuePair::new(1);
+        let mut queue = NvmeQueuePair::<1>::new();
         let (cid, future) = queue.submit().expect("first submission should fit");
         queue.complete(NvmeCompletion::success(cid));
 
@@ -387,7 +409,7 @@ mod tests {
 
     #[test]
     fn fail_all_marks_even_unpolled_futures_as_ready_with_an_error() {
-        let mut inflight = InflightMap::new(2);
+        let mut inflight = InflightMap::<2>::new();
         let (_, mut future) = inflight.register().expect("slot available");
         inflight.fail_all(NvmeError::DeviceRemoved);
 
@@ -401,7 +423,7 @@ mod tests {
 
     #[test]
     fn fail_all_wakes_registered_waiters() {
-        let mut inflight = InflightMap::new(2);
+        let mut inflight = InflightMap::<2>::new();
         let (_, mut future) = inflight.register().expect("slot available");
         let (counter, waker) = counting_waker();
         let mut cx = Context::from_waker(&waker);
