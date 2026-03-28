@@ -45,22 +45,42 @@ $env:FEOX_OVMF_CODE = 'C:\Program Files\qemu\share\OVMF_CODE.fd'
 $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 ```
 
+The repo also ships a local MSYS2 and QEMU tree under `tools/host/` which the
+scripts will discover automatically if no system-wide install is found.
+
 ## Current Validation Rail
 
-- `cargo test`
-- `cargo kernel`
-- `cargo loader`
-- `tools/stage-efi.ps1`
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\check-host.ps1 -Architecture x86_64
+cargo test
+cargo kernel
+cargo loader
+powershell -ExecutionPolicy Bypass -File .\tools\stage-efi.ps1
+```
 
-First full boot validation is:
+First full boot validation:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\run-qemu.ps1
 ```
 
-At the current checkpoint, the x86 host boot rail is live on this workstation:
+The QEMU boot rail is working on this workstation as of March 27, 2026.
 `tools/check-host.ps1 -Architecture x86_64` passes and bounded QEMU boot
-captures work end-to-end.
+captures work end-to-end. The debug-console log under `target/feox-qemu/`
+is the current source of truth for first-boot validation.
+
+## Expected Boot Trace
+
+A successful run shows:
+
+- UEFI boot manager reaches `BOOTX64.EFI`
+- loader opens and validates `FEOXKERN.ELF`
+- control transfers into kernel `_start`
+- kernel logs the bootstrap banner and early handoff state
+- bootstrap page-table transition completes
+- higher-half code, stack, and data all become live
+- breakpoint validation returns via `iretq`
+- retained runtime service enters `runtime-active` and idles cleanly
 
 ## Source Of Truth
 

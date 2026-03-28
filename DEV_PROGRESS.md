@@ -77,8 +77,38 @@ This document is the running development record for Feox.
 - added retained-runtime queue overflow/recovery coverage and rolling event-buffer coverage
 - corrected stale docs so the workstation entry reflects the live x86 QEMU rail and the README's ARM aliases match `.cargo/config.toml`
 
+### 2026-03-27 (doc pass)
+
+- completed a full doc review against the current implementation
+- updated `STATUS.md` to reflect March 27 state including all higher-half handoff and retained runtime capabilities
+- updated `docs/WORKSTATION_ENTRY.md` to reflect that the QEMU boot rail is now working on this workstation
+- added `docs/BOOTSTRAP_RUNTIME.md` to document the 5-stage bootstrap stage model and the full retained context layer (`RuntimeSnapshot`, `BootstrapCoreContext`, `RuntimeServiceState`, `RuntimeServiceReport`, `RuntimeServiceHeartbeat`, `RuntimeReadinessState`, `RuntimeReadySummary`, command queue, event timeline)
+- added `docs/VIRTUAL_ADDRESS_LAYOUT.md` to capture the three bootstrap windows now locked in code (`0xFFFF_9000_0000_0000` kernel alias, `0xFFFF_9000_0200_0000` stack, `0xFFFF_9000_0300_0000` data) and to call out the open decisions (direct map, permanent layout, user split, MMIO windows) that must be made before the layout grows
+
+### 2026-03-27 (code review pass)
+
+- completed a deep cross-referenced code review of all kernel source, crate source, and design docs
+- added `docs/CODE_REVIEW.md` with 21 classified findings (5 correctness, 5 safety, 2 performance, 5 architecture gaps, 4 research alignment)
+- immediate priority findings: no TLB invlpg in `map_4k_with`/`unmap_4k_with` (C-02), debugcon markers in production CR3 path (P-01), console re-init inside exception handler (C-03)
+- structural gap: `feox-async` executor/reactor/waker infrastructure does not exist (A-02); everything in the async and device I/O stack is blocked on it
+- `feox-nvme` blocked from kernel integration by `alloc::vec::Vec` dependency (A-01); fix is const-generic `InflightMap<const N: usize>`
+- research alignment: strong Engler SOSP95 and Corey fit; Dune and Arrakis alignment requires SYSCALL entry path and capability enforcement
+
+### 2026-03-27 (code review fix pass)
+
+- fixed P-01: split `switch_page_table_root_and_jump` into `cfg(debug_assertions)` / `cfg(not(debug_assertions))` bodies; release build is now 5 clean instructions with no debugcon I/O
+- fixed C-02: added `invalidate_page` (invlpg) to `arch::cpu` and called it after every PTE write in `map_4k_with` and `unmap_4k_with`; gated behind `cfg(target_os = "none")` so host tests are unaffected
+- fixed C-03: added `CONSOLE_READY: AtomicBool` in `console.rs` and guarded exception handler console-init calls with `is_ready()` to close the double-fault re-entry window
+- fixed A-01: replaced `alloc::vec::Vec` in `feox-nvme` with a const-generic `InflightMap<const N: usize>` backed by `[InflightEntry; N]` and a fixed-size CID free-stack; crate is now fully `no_std` with no allocator requirement
+- fixed S-05: widened `CoreId` from `u16` to `u32` in `feox-asi` to match the ASI spec; updated all downstream uses
+- fixed S-02: added `rdmsr`/`wrmsr` helpers and `enable_nxe()` in `arch::x86_64::cpu`; `early_init()` now sets EFER.NXE before any `FLAG_NO_EXECUTE` PTE is live; added `FLAG_NO_EXECUTE` constant and applied it to bootstrap stack and data pages
+- fixed A-02 (partial): added `RunQueue<const CAP: usize>` (fixed-capacity FIFO ring buffer of `NonNull<TaskHeader>`) and a static `RawWakerVTable` with `make_task_waker` to `feox-async`; executor poll loop and reactor remain pending
+- fixed C-01: added `AtomicU32 CONTEXT_OWNER` and `claim_bootstrap_context` to `runtime_context.rs`; all 9 mutation functions now carry `assert_context_claimed()` debug guards; `bootstrap()` calls `claim_bootstrap_context` immediately after `early_init`; tests call claim before any store
+- fixed S-01: added a 64-bit TSS with dedicated 4 KiB IST stacks for NMI (IST1) and double-fault (IST2) in `gdt.rs`; expanded the GDT from 3 to 5 entries to hold the 128-bit TSS descriptor; `gdt::init()` installs IST stack tops, writes the TSS descriptor, and loads the Task Register via `ltr`; `idt::init()` and `relocate_and_reload()` now set `ist=1` on vector 2 (NMI) and `ist=2` on vector 8 (#DF)
+- all 39 tests pass (27 xokernel + 6 feox-async + 3 feox-nvme + 3 feox-boot); `cargo kernel` and `cargo loader` clean
+
 ## Next Focus
 
+- close the A-02 executor gap: add a minimal single-core poll loop and a timer/event reactor stub
+- decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
 - grow the retained `runtime-active` slice into a broader long-lived runtime layout with clearer ownership boundaries
-- keep improving the serial/debug trace so paging, retained runtime, heartbeat, and runtime-service changes are obvious under QEMU
-- add one more real retained runtime mutation on top of the shared runtime context while keeping the mechanism layer tight

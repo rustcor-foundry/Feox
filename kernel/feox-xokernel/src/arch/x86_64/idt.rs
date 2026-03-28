@@ -54,6 +54,14 @@ impl IdtEntry {
             reserved: 0,
         }
     }
+
+    /// Returns a copy of this entry with the IST index set to `ist`.
+    ///
+    /// The IST field is 3 bits; valid values are 1–7 (0 = no IST).
+    fn with_ist(mut self, ist: u8) -> Self {
+        self.ist = ist & 0x07;
+        self
+    }
 }
 
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
@@ -93,7 +101,12 @@ pub unsafe fn relocate_and_reload(base: u64, handler_delta: u64) {
         let mut vector = 0usize;
         while vector < exceptions::HANDLERS.len() {
             let relocated = exceptions::HANDLERS[vector] as usize as u64 + handler_delta;
-            IDT[vector] = IdtEntry::from_address(relocated);
+            let entry = IdtEntry::from_address(relocated);
+            IDT[vector] = match vector {
+                2 => entry.with_ist(1), // NMI → IST1
+                8 => entry.with_ist(2), // #DF → IST2
+                _ => entry,
+            };
             vector += 1;
         }
         load_descriptor_table(base);
@@ -107,7 +120,12 @@ pub fn init() {
         // while we populate the static descriptor table.
         let mut vector = 0usize;
         while vector < exceptions::HANDLERS.len() {
-            IDT[vector] = IdtEntry::new(exceptions::HANDLERS[vector]);
+            let entry = IdtEntry::new(exceptions::HANDLERS[vector]);
+            IDT[vector] = match vector {
+                2 => entry.with_ist(1), // NMI → IST1
+                8 => entry.with_ist(2), // #DF → IST2
+                _ => entry,
+            };
             vector += 1;
         }
     }
