@@ -63,6 +63,11 @@ This document is the running development record for Feox.
 - reworked breakpoint handling so higher-half exception validation returns through `iretq` instead of terminating the run immediately
 - extended the post-validation path into a tiny `runtime-active` service that reports retained runtime state and then idles cleanly
 - wired exception and panic reporting to include the retained runtime snapshot, core context, and event history
+- added retained runtime-service state so the first post-handoff service now tracks its owner core, current phase, iteration count, and last action
+- verified the live QEMU trace now shows the retained service entering `poll`, reporting its retained state, and then transitioning into `idle`
+- turned the retained runtime service into a tiny FIFO command loop with explicit `refresh-snapshot`, `refresh-accounting`, `report-timeline`, `update-heartbeat`, and `enter-idle` phases
+- added retained runtime accounting and a retained heartbeat record so the post-handoff loop now mutates shared runtime state instead of only reporting it
+- made the retained runtime loop state-driven, with the heartbeat deciding whether the service performs one more refresh cycle before it settles into idle
 - re-verified `cargo test`, `cargo kernel`, and `cargo loader` after the cleanup
 - updated `README.md` to expose the real build, validation, and bootstrap entrypoints
 - installed the missing Rust targets with `rustup target add x86_64-unknown-none x86_64-unknown-uefi`
@@ -72,5 +77,5 @@ This document is the running development record for Feox.
 ## Next Focus
 
 - grow the retained `runtime-active` slice into a broader long-lived runtime layout with clearer ownership boundaries
-- keep improving the serial/debug trace so paging and retained runtime changes are obvious under QEMU
-- add one more real retained runtime service on top of the shared runtime context while keeping the mechanism layer tight
+- keep improving the serial/debug trace so paging, retained runtime, heartbeat, and runtime-service changes are obvious under QEMU
+- add one more real retained runtime mutation on top of the shared runtime context while keeping the mechanism layer tight

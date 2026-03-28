@@ -9,7 +9,8 @@ use crate::memory;
 use crate::memory::MemoryRegionKind;
 use crate::paging;
 use crate::runtime_context::{
-    BootstrapCoreContext, RuntimeServiceCommand, RuntimeServiceReport, RuntimeServiceState,
+    BootstrapCoreContext, RuntimeServiceCommand, RuntimeServiceHeartbeat, RuntimeServiceReport,
+    RuntimeServiceState,
     RuntimeSnapshot,
 };
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
@@ -351,8 +352,6 @@ fn runtime_active_entry() -> ! {
     }
 
     let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::RefreshSnapshot);
-    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::RefreshAccounting);
-    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
 
     let events = crate::runtime_context::events();
     let mut event_index = 0usize;
@@ -388,6 +387,13 @@ fn runtime_active_entry() -> ! {
                         service.iterations,
                         service.last_action
                     );
+                }
+                if crate::runtime_context::snapshot().is_some() {
+                    let _ = crate::runtime_context::enqueue_command(
+                        RuntimeServiceCommand::RefreshAccounting,
+                    );
+                } else {
+                    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
                 }
             }
             RuntimeServiceCommand::RefreshAccounting => {
@@ -433,6 +439,102 @@ fn runtime_active_entry() -> ! {
                             report.retained_events
                         );
                     }
+                    if retained_events > 0 {
+                        let _ = crate::runtime_context::enqueue_command(
+                            RuntimeServiceCommand::ReportTimeline,
+                        );
+                    } else {
+                        let _ = crate::runtime_context::enqueue_command(
+                            RuntimeServiceCommand::EnterIdle,
+                        );
+                    }
+                } else {
+                    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
+                }
+            }
+            RuntimeServiceCommand::ReportTimeline => {
+                crate::runtime_context::push_event("runtime-service-timeline");
+                crate::runtime_context::store_service(RuntimeServiceState {
+                    owner_core,
+                    phase: "timeline",
+                    iterations: service_iteration,
+                    last_action: "retained-event-report",
+                });
+                if let Some(service) = crate::runtime_context::service() {
+                    crate::kprintln!(
+                        "runtime: service_timeline core={} phase={} iterations={} action={}",
+                        service.owner_core.0,
+                        service.phase,
+                        service.iterations,
+                        service.last_action
+                    );
+                }
+                let events = crate::runtime_context::events();
+                let mut timeline_index = 0usize;
+                while timeline_index < events.len() {
+                    if let Some(event) = events[timeline_index] {
+                        crate::kprintln!(
+                            "runtime: timeline_event[{}]={}",
+                            timeline_index,
+                            event
+                        );
+                    }
+                    timeline_index += 1;
+                }
+                if crate::runtime_context::service_report().is_some() {
+                    let _ = crate::runtime_context::enqueue_command(
+                        RuntimeServiceCommand::UpdateHeartbeat,
+                    );
+                } else {
+                    let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
+                }
+            }
+            RuntimeServiceCommand::UpdateHeartbeat => {
+                crate::runtime_context::push_event("runtime-service-heartbeat");
+                crate::runtime_context::store_service(RuntimeServiceState {
+                    owner_core,
+                    phase: "heartbeat",
+                    iterations: service_iteration,
+                    last_action: "retained-heartbeat-update",
+                });
+                let previous_beats = crate::runtime_context::service_heartbeat()
+                    .map_or(0, |heartbeat| heartbeat.beats);
+                let observed_events = crate::runtime_context::service_report()
+                    .map_or(0, |report| report.retained_events);
+                crate::runtime_context::store_service_heartbeat(RuntimeServiceHeartbeat {
+                    beats: previous_beats.saturating_add(1),
+                    last_iteration: service_iteration,
+                    observed_events,
+                });
+                if let Some(service) = crate::runtime_context::service() {
+                    crate::kprintln!(
+                        "runtime: service_heartbeat core={} phase={} iterations={} action={}",
+                        service.owner_core.0,
+                        service.phase,
+                        service.iterations,
+                        service.last_action
+                    );
+                }
+                if let Some(heartbeat) = crate::runtime_context::service_heartbeat() {
+                    crate::kprintln!(
+                        "runtime: heartbeat beats={} last_iteration={} observed_events={}",
+                        heartbeat.beats,
+                        heartbeat.last_iteration,
+                        heartbeat.observed_events
+                    );
+                    if heartbeat.beats < 2 {
+                        let _ = crate::runtime_context::enqueue_command(
+                            RuntimeServiceCommand::RefreshSnapshot,
+                        );
+                    } else {
+                        let _ = crate::runtime_context::enqueue_command(
+                            RuntimeServiceCommand::EnterIdle,
+                        );
+                    }
+                } else {
+                    let _ = crate::runtime_context::enqueue_command(
+                        RuntimeServiceCommand::EnterIdle,
+                    );
                 }
             }
             RuntimeServiceCommand::EnterIdle => {

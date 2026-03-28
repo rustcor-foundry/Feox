@@ -35,7 +35,8 @@ static mut BOOTSTRAP_RUNTIME_SNAPSHOT: Option<RuntimeSnapshot> = None;
 static mut BOOTSTRAP_CORE_CONTEXT: Option<BootstrapCoreContext> = None;
 static mut BOOTSTRAP_SERVICE_STATE: Option<RuntimeServiceState> = None;
 static mut BOOTSTRAP_SERVICE_REPORT: Option<RuntimeServiceReport> = None;
-const BOOTSTRAP_COMMAND_CAPACITY: usize = 4;
+static mut BOOTSTRAP_SERVICE_HEARTBEAT: Option<RuntimeServiceHeartbeat> = None;
+const BOOTSTRAP_COMMAND_CAPACITY: usize = 5;
 static mut BOOTSTRAP_COMMANDS: [Option<RuntimeServiceCommand>; BOOTSTRAP_COMMAND_CAPACITY] =
     [None; BOOTSTRAP_COMMAND_CAPACITY];
 static mut BOOTSTRAP_COMMAND_HEAD: usize = 0;
@@ -84,6 +85,17 @@ pub struct RuntimeServiceReport {
     pub retained_events: u64,
 }
 
+/// Mutable retained heartbeat for the first runtime service loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeServiceHeartbeat {
+    /// Number of retained heartbeat updates completed so far.
+    pub beats: u64,
+    /// Service iteration that produced the latest heartbeat.
+    pub last_iteration: u64,
+    /// Number of retained events visible when the latest heartbeat ran.
+    pub observed_events: u64,
+}
+
 /// Minimal retained command set for the first runtime service loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeServiceCommand {
@@ -91,6 +103,10 @@ pub enum RuntimeServiceCommand {
     RefreshSnapshot,
     /// Recompute retained runtime accounting.
     RefreshAccounting,
+    /// Report the retained runtime timeline after accounting is available.
+    ReportTimeline,
+    /// Update a retained heartbeat after reporting.
+    UpdateHeartbeat,
     /// Move the service into its idle state.
     EnterIdle,
 }
@@ -102,6 +118,8 @@ impl RuntimeServiceCommand {
         match self {
             Self::RefreshSnapshot => "refresh-snapshot",
             Self::RefreshAccounting => "refresh-accounting",
+            Self::ReportTimeline => "report-timeline",
+            Self::UpdateHeartbeat => "update-heartbeat",
             Self::EnterIdle => "enter-idle",
         }
     }
@@ -157,6 +175,19 @@ pub fn store_service_report(report: RuntimeServiceReport) {
 #[must_use]
 pub fn service_report() -> Option<RuntimeServiceReport> {
     unsafe { BOOTSTRAP_SERVICE_REPORT }
+}
+
+/// Stores the retained runtime service heartbeat.
+pub fn store_service_heartbeat(heartbeat: RuntimeServiceHeartbeat) {
+    unsafe {
+        BOOTSTRAP_SERVICE_HEARTBEAT = Some(heartbeat);
+    }
+}
+
+/// Returns the retained runtime service heartbeat, if one has been recorded.
+#[must_use]
+pub fn service_heartbeat() -> Option<RuntimeServiceHeartbeat> {
+    unsafe { BOOTSTRAP_SERVICE_HEARTBEAT }
 }
 
 /// Enqueues one retained runtime-service command.
@@ -219,7 +250,8 @@ pub fn events() -> [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] {
 mod tests {
     use super::{
         dequeue_command, enqueue_command, service, service_report, store_service,
-        store_service_report, RuntimeServiceCommand, RuntimeServiceReport, RuntimeServiceState,
+        store_service_heartbeat, store_service_report, RuntimeServiceCommand,
+        RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState, service_heartbeat,
     };
     use feox_asi::CoreId;
 
@@ -251,9 +283,24 @@ mod tests {
     }
 
     #[test]
+    fn runtime_service_heartbeat_round_trips() {
+        let heartbeat = RuntimeServiceHeartbeat {
+            beats: 1,
+            last_iteration: 3,
+            observed_events: 7,
+        };
+
+        store_service_heartbeat(heartbeat);
+
+        assert_eq!(service_heartbeat(), Some(heartbeat));
+    }
+
+    #[test]
     fn runtime_service_commands_round_trip_in_fifo_order() {
         assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshSnapshot), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshAccounting), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::ReportTimeline), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::UpdateHeartbeat), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::EnterIdle), Ok(()));
 
         assert_eq!(
@@ -264,6 +311,8 @@ mod tests {
             dequeue_command(),
             Some(RuntimeServiceCommand::RefreshAccounting)
         );
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::ReportTimeline));
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::UpdateHeartbeat));
         assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::EnterIdle));
         assert_eq!(dequeue_command(), None);
     }
