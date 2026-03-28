@@ -645,19 +645,19 @@ mod tests {
 
         let mut root_table = [0_u64; PAGE_TABLE_ENTRY_COUNT];
         root_table[indices.p4 as usize] = PageTableEntry::present(pdpt, 0).raw();
-        source.insert(root, root_table);
+        source.insert(root, &root_table);
 
         let mut pdpt_table = [0_u64; PAGE_TABLE_ENTRY_COUNT];
         pdpt_table[indices.p3 as usize] = PageTableEntry::present(pd, 0).raw();
-        source.insert(pdpt, pdpt_table);
+        source.insert(pdpt, &pdpt_table);
 
         let mut pd_table = [0_u64; PAGE_TABLE_ENTRY_COUNT];
         pd_table[indices.p2 as usize] = PageTableEntry::present(pt, 0).raw();
-        source.insert(pd, pd_table);
+        source.insert(pd, &pd_table);
 
         let mut pt_table = [0_u64; PAGE_TABLE_ENTRY_COUNT];
         pt_table[indices.p1 as usize] = PageTableEntry::present(leaf, 1 << 1).raw();
-        source.insert(pt, pt_table);
+        source.insert(pt, &pt_table);
 
         let translation = PageTableRoot::new(root)
             .translate_with(&source, virtual_address)
@@ -676,7 +676,7 @@ mod tests {
     fn translate_with_returns_none_for_non_present_entry() {
         let root = PhysicalFrame::containing(PhysicalAddress::new(0x0010_0000));
         let mut source = FakePageTables::default();
-        source.insert(root, [0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(root, &[0; PAGE_TABLE_ENTRY_COUNT]);
 
         let result = PageTableRoot::new(root)
             .translate_with(&source, VirtualAddress::new(0x2000))
@@ -691,7 +691,7 @@ mod tests {
         let mut table = [0_u64; PAGE_TABLE_ENTRY_COUNT];
         table[0] = PageTableEntry::present(frame, 1 << 7).raw();
         let mut source = FakePageTables::default();
-        source.insert(frame, table);
+        source.insert(frame, &table);
 
         let error =
             read_entry(&source, frame, 0, PageWalkLevel::Pd).expect_err("huge pages are deferred");
@@ -710,8 +710,8 @@ mod tests {
         let root = PhysicalFrame::containing(PhysicalAddress::new(0x0010_0000));
         let child = PhysicalFrame::containing(PhysicalAddress::new(0x0011_0000));
         let mut source = FakePageTables::default();
-        source.insert(root, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(child, [u64::MAX; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(root, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(child, &[u64::MAX; PAGE_TABLE_ENTRY_COUNT]);
         let mut allocator = FakePagingAllocator::new([child, root, root, root], 1);
 
         let allocated =
@@ -735,10 +735,10 @@ mod tests {
         let virtual_address = VirtualAddress::new(0xFFFF_8000_1234_5000);
         let indices = virtual_address.page_table_indices();
         let mut source = FakePageTables::default();
-        source.insert(root, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(pdpt, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(pd, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(pt, [0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(root, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pdpt, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pd, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pt, &[0; PAGE_TABLE_ENTRY_COUNT]);
         let mut allocator = FakePagingAllocator::new([pdpt, pd, pt, root], 3);
 
         PageTableRoot::new(root)
@@ -772,19 +772,19 @@ mod tests {
 
         let mut root_table = [0; PAGE_TABLE_ENTRY_COUNT];
         root_table[indices.p4 as usize] = PageTableEntry::present(pdpt, 0).raw();
-        source.insert(root, root_table);
+        source.insert(root, &root_table);
 
         let mut pdpt_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pdpt_table[indices.p3 as usize] = PageTableEntry::present(pd, 0).raw();
-        source.insert(pdpt, pdpt_table);
+        source.insert(pdpt, &pdpt_table);
 
         let mut pd_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pd_table[indices.p2 as usize] = PageTableEntry::present(pt, 0).raw();
-        source.insert(pd, pd_table);
+        source.insert(pd, &pd_table);
 
         let mut pt_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pt_table[indices.p1 as usize] = PageTableEntry::present(existing_leaf, 0).raw();
-        source.insert(pt, pt_table);
+        source.insert(pt, &pt_table);
 
         let mut allocator = FakePagingAllocator::new([root, root, root, root], 0);
         let error = PageTableRoot::new(root)
@@ -816,19 +816,19 @@ mod tests {
 
         let mut root_table = [0; PAGE_TABLE_ENTRY_COUNT];
         root_table[indices.p4 as usize] = PageTableEntry::present(pdpt, 0).raw();
-        source.insert(root, root_table);
+        source.insert(root, &root_table);
 
         let mut pdpt_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pdpt_table[indices.p3 as usize] = PageTableEntry::present(pd, 0).raw();
-        source.insert(pdpt, pdpt_table);
+        source.insert(pdpt, &pdpt_table);
 
         let mut pd_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pd_table[indices.p2 as usize] = PageTableEntry::present(pt, 0).raw();
-        source.insert(pd, pd_table);
+        source.insert(pd, &pd_table);
 
         let mut pt_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pt_table[indices.p1 as usize] = PageTableEntry::present(leaf, 1 << 1).raw();
-        source.insert(pt, pt_table);
+        source.insert(pt, &pt_table);
 
         let removed = PageTableRoot::new(root)
             .unmap_4k_with(&mut source, virtual_address)
@@ -855,17 +855,17 @@ mod tests {
 
         let mut root_table = [0; PAGE_TABLE_ENTRY_COUNT];
         root_table[indices.p4 as usize] = PageTableEntry::present(pdpt, 0).raw();
-        source.insert(root, root_table);
+        source.insert(root, &root_table);
 
         let mut pdpt_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pdpt_table[indices.p3 as usize] = PageTableEntry::present(pd, 0).raw();
-        source.insert(pdpt, pdpt_table);
+        source.insert(pdpt, &pdpt_table);
 
         let mut pd_table = [0; PAGE_TABLE_ENTRY_COUNT];
         pd_table[indices.p2 as usize] = PageTableEntry::present(pt, 0).raw();
-        source.insert(pd, pd_table);
+        source.insert(pd, &pd_table);
 
-        source.insert(pt, [0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pt, &[0; PAGE_TABLE_ENTRY_COUNT]);
 
         let removed = PageTableRoot::new(root)
             .unmap_4k_with(&mut source, virtual_address)
@@ -883,10 +883,10 @@ mod tests {
         let leaf = PhysicalFrame::containing(PhysicalAddress::new(0x0020_0000));
         let virtual_address = VirtualAddress::new(0xFFFF_8000_1234_5678);
         let mut source = FakePageTables::default();
-        source.insert(root, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(pdpt, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(pd, [0; PAGE_TABLE_ENTRY_COUNT]);
-        source.insert(pt, [0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(root, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pdpt, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pd, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pt, &[0; PAGE_TABLE_ENTRY_COUNT]);
         let mut allocator = FakePagingAllocator::new([pdpt, pd, pt, root], 3);
         let root_wrapper = PageTableRoot::new(root);
 

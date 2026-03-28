@@ -383,6 +383,9 @@ pub fn events() -> [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] {
 
 #[cfg(test)]
 fn reset_for_tests() {
+    // Ensure the context is claimed before the reset so that subsequent
+    // store/enqueue/push calls pass the assert_context_claimed guard.
+    claim_bootstrap_context(CoreId(0));
     unsafe {
         BOOTSTRAP_RUNTIME_SNAPSHOT = None;
         BOOTSTRAP_CORE_CONTEXT = None;
@@ -402,11 +405,11 @@ fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_bootstrap_context, dequeue_command, enqueue_command, service, service_report,
-        store_service, store_ready_summary, store_runtime_readiness, store_service_heartbeat,
-        store_service_report, ready_summary, runtime_readiness, RuntimeReadinessState,
-        RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
-        RuntimeServiceReport, RuntimeServiceState, service_heartbeat,
+        claim_bootstrap_context, dequeue_command, enqueue_command, events, push_event,
+        ready_summary, reset_for_tests, runtime_readiness, service, service_heartbeat,
+        service_report, store_ready_summary, store_runtime_readiness, store_service,
+        store_service_heartbeat, store_service_report, RuntimeReadinessState, RuntimeReadySummary,
+        RuntimeServiceCommand, RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
     };
     use feox_asi::CoreId;
 
