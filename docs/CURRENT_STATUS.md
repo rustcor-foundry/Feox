@@ -44,6 +44,9 @@ Last updated: 2026-03-27
 - the bootstrap runtime now keeps a short retained event timeline covering the major transition milestones
 - higher-half breakpoint validation is now non-fatal, returns through `iretq`, and proves the active higher-half exception path before continuing
 - the post-validation path now reaches a small retained runtime service and idles from `runtime-active` instead of halting immediately after validation
+- the retained runtime service now also keeps its own shared service state, including owner core, current phase, iteration count, and last action
+- the retained runtime service now drains a tiny command queue instead of following a single hardcoded sequence
+- the retained runtime loop now keeps a shared heartbeat record and uses it to run one more refresh cycle before settling into idle
 
 ## Current Strengths
 
@@ -55,9 +58,9 @@ Last updated: 2026-03-27
 
 ## Current Risks
 
-- the current x86 bootstrap still halts in the early known-good loop, so successful boot visibility now outpaces real subsystem bring-up
-- the live boot path now proves a retained bootstrap-owned transition root, a real CR3 handoff, kernel-owned transition stack pages, post-switch higher-half code-plus-stack execution, a surviving higher-half data page, and a retained runtime-active service, but broader runtime structures are still intentionally small
-- the current boot trace is strong enough to guide real VM bring-up, but bootstrap-oriented diagnostics and retained bootstrap services still outweigh sustained runtime behavior
+- the current x86 bootstrap still settles into a retained idle loop, so successful runtime behavior now outpaces broader subsystem bring-up
+- the live boot path now proves a retained bootstrap-owned transition root, a real CR3 handoff, kernel-owned transition stack pages, post-switch higher-half code-plus-stack execution, a surviving higher-half data page, and a state-driven retained runtime loop, but broader runtime structures are still intentionally small
+- the current boot trace is strong enough to guide real VM bring-up, but bootstrap-oriented diagnostics and tiny retained runtime services still outweigh sustained runtime behavior
 
 ## Recommended Entry Points
 
@@ -70,7 +73,7 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. grow the retained `runtime-active` slice from a bootstrap service into a broader long-lived runtime layout with clearer ownership boundaries
-2. extend the serial/debug trace so reservation, paging, and retained runtime changes stay easy to verify under QEMU
-3. start using the retained runtime context for one more real service beyond fault reporting and idle
+1. grow the retained `runtime-active` slice from a tiny command loop into a broader long-lived runtime layout with clearer ownership boundaries
+2. extend the serial/debug trace so reservation, paging, retained runtime, heartbeat, and runtime-service changes stay easy to verify under QEMU
+3. let the retained runtime loop make one more useful mutation beyond heartbeat updates and reporting
 4. keep separating generic kernel plumbing from x86-specific implementation details before starting an ARM64 lane

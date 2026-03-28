@@ -90,6 +90,9 @@ Current early-boot capabilities include:
 - retained higher-half runtime handoff with shared runtime context
 - retained per-core bootstrap context and event timeline
 - non-fatal higher-half breakpoint validation before entering a runtime service
+- retained runtime-service state with phase, owner core, and iteration tracking
+- retained runtime command queue with state-driven follow-up work
+- retained runtime heartbeat and derived retry-before-idle behavior
 - deterministic runtime-service idle loop after early initialization
 - UEFI loader support for loading `\EFI\BOOT\FEOXKERN.ELF` and transferring
   control into the kernel entrypoint
@@ -185,7 +188,7 @@ $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 - installer or packaging flow: not applicable yet
 - emulated boot flow: real in-repo harness with a working x86_64 QEMU + OVMF validation lane on this workstation
 - current host posture on this workstation: `tools/check-host.ps1 -Architecture x86_64` passes and bounded QEMU boot captures work end-to-end
-- current live runtime posture: Feox reaches a retained higher-half runtime-active state, validates the exception path, enters a tiny retained runtime service, and then idles cleanly
+- current live runtime posture: Feox reaches a retained higher-half runtime-active state, validates the exception path, runs a tiny retained runtime command loop with heartbeat-driven follow-up work, and then idles cleanly
 
 ## Source-Of-Truth Docs
 
