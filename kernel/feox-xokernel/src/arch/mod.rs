@@ -10,8 +10,9 @@ pub mod x86_64;
 mod selected {
     pub use super::x86_64::{
         cpu::{
-            disable_interrupts, enable_nxe, hlt_loop, invalidate_page, read_cr3, read_rsp,
-            switch_page_table_root_and_jump, switch_stack_and_jump, trigger_breakpoint,
+            disable_interrupts, enable_cr4_security_bits, enable_nxe, hlt_loop, invalidate_page,
+            read_cr3, read_rsp, switch_page_table_root_and_jump, switch_stack_and_jump,
+            trigger_breakpoint,
         },
         debugcon, gdt, idt, panic, serial,
     };
@@ -33,6 +34,10 @@ pub fn early_init() {
     // Enable the Execute-Disable bit in EFER so FLAG_NO_EXECUTE mappings are
     // enforced by the hardware. Must happen before any NX-flagged PTE is live.
     selected::enable_nxe();
+    // Enable SMEP, SMAP, and UMIP in CR4 if the CPU supports them. These are
+    // set here — before any page-table work — to close the window where a
+    // kernel bug could accidentally execute or read a user-mode page.
+    selected::enable_cr4_security_bits();
 }
 
 /// Initializes the selected architecture's early console.

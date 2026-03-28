@@ -107,6 +107,15 @@ This document is the running development record for Feox.
 - fixed S-01: added a 64-bit TSS with dedicated 4 KiB IST stacks for NMI (IST1) and double-fault (IST2) in `gdt.rs`; expanded the GDT from 3 to 5 entries to hold the 128-bit TSS descriptor; `gdt::init()` installs IST stack tops, writes the TSS descriptor, and loads the Task Register via `ltr`; `idt::init()` and `relocate_and_reload()` now set `ist=1` on vector 2 (NMI) and `ist=2` on vector 8 (#DF)
 - all 39 tests pass (27 xokernel + 6 feox-async + 3 feox-nvme + 3 feox-boot); `cargo kernel` and `cargo loader` clean
 
+### 2026-03-27 (second fix pass)
+
+- fixed S-03: added `enable_cr4_security_bits()` in `arch::x86_64::cpu` — reads CPUID leaf 7 sub-leaf 0 and conditionally sets SMEP (CR4.20), SMAP (CR4.21), and UMIP (CR4.11); called from `early_init()` after GDT/IDT and NXE; uses push/pop rbx around CPUID to work around LLVM's reserved-register constraint
+- fixed S-04: added explicit doc comment to `hlt_loop` documenting that `cli` is intentional — NMIs are not masked, maskable reboot/QEMU-exit signals are deliberately refused from the panic halt path
+- fixed C-04: added 4 KiB alignment `debug_assert` to `identity_mapped_table_mut` and a doc comment naming the non-aliasing invariant upheld by `BootstrapPagingAllocator` never reusing frames
+- fixed C-05: added sequential-borrow explanation in `ensure_child_table` documenting why the two `table_mut` calls cannot alias
+- fixed P-02: added doc comment to the PRESENT|WRITABLE intermediate-entry install in `ensure_child_table` flagging it as a bootstrap-only policy that must be tightened before per-process address spaces are introduced
+- all 41 tests pass; `cargo kernel` and `cargo loader` clean
+
 ## Next Focus
 
 - close the A-02 executor gap: add a minimal single-core poll loop and a timer/event reactor stub

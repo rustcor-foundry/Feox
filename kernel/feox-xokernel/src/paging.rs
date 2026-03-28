@@ -416,10 +416,25 @@ fn identity_mapped_table_mut(
             return None;
         }
 
+        // C-04 aliasing invariant: Rust's aliasing rules forbid two
+        // simultaneously live `&mut` references to the same memory. This
+        // function returns a `'static mut` reference, so the caller must
+        // ensure it does not call this function again with the same frame
+        // while the previous reference is still live. In practice this is
+        // guaranteed by `BootstrapPagingAllocator`, which never reuses frames,
+        // meaning each distinct physical frame can only appear once in any
+        // traversal. If the allocator contract is ever relaxed, a debug-mode
+        // visited-set should be added to the call sites.
+        debug_assert!(
+            address & 0xFFF == 0,
+            "page-table frame {address:#x} is not 4 KiB aligned"
+        );
+
         let table = unsafe {
             // SAFETY: See `identity_mapped_table`. The mutable access stays
             // confined to bootstrap-owned page-table frames in the single-core
-            // early bring-up path.
+            // early bring-up path. Non-aliasing is upheld by the allocator
+            // never reusing frames (C-04 invariant above).
             &mut *(core::ptr::with_exposed_provenance_mut::<[u64; PAGE_TABLE_ENTRY_COUNT]>(
                 address as usize,
             ))
@@ -479,11 +494,23 @@ fn ensure_child_table(
     let child = allocator
         .allocate_table_frame()
         .ok_or(Map4kError::OutOfTableFrames)?;
+
+    // C-05: the `table_mut(child)` and subsequent `table_mut(table_frame)`
+    // calls are sequential, not simultaneous — each borrow is dropped before
+    // the next begins. Aliasing is only possible if `child == table_frame`,
+    // which cannot happen because the allocator returns a freshly allocated
+    // frame that has not been installed in any page-table tree yet.
     let child_table = source
         .table_mut(child)
         .ok_or(Map4kError::MissingTableFrame(child))?;
     child_table.fill(0);
 
+    // P-02: intermediate entries are installed with PRESENT | WRITABLE. This
+    // is correct for the bootstrap identity-mapped and transition roots where
+    // all page-table levels must be kernel-writable. When per-process address
+    // spaces are introduced this policy must be revisited: intermediate entries
+    // covering user-space subtrees should not carry WRITABLE at the kernel
+    // privilege level. See docs/PAGE_TABLE_PLAN.md.
     let table = source
         .table_mut(table_frame)
         .ok_or(Map4kError::MissingTableFrame(table_frame))?;
