@@ -3,10 +3,21 @@
 
 //! Executor primitives for the Feox async runtime.
 
+use core::cell::UnsafeCell;
+use core::future::Future;
+use core::mem::MaybeUninit;
+use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU8, Ordering};
-use core::task::{RawWaker, RawWakerVTable, Waker};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use feox_asi::CoreId;
+
+/// Type-erased poll function installed in a [`TaskHeader`] at spawn time.
+///
+/// Called by the executor with a pointer to the task's header. The callee
+/// locates the surrounding [`TaskCell`] storage via the `#[repr(C)]` layout
+/// guarantee that the header is always at offset zero.
+pub type PollFn = for<'cx> unsafe fn(NonNull<TaskHeader>, &mut Context<'cx>) -> Poll<()>;
 
 /// Task scheduler state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,20 +71,58 @@ pub enum PendingDisposition {
 }
 
 /// Minimal task header used by the executor and waker paths.
+///
+/// Always the first field of [`TaskCell`] (enforced by `#[repr(C)]`), so a
+/// `*mut TaskHeader` can be safely cast to a `*mut TaskCell<F>` by the
+/// type-erased poll path.
 #[derive(Debug)]
 pub struct TaskHeader {
     state: AtomicU8,
     core_affinity: CoreId,
+    /// Type-erased poll function. `None` until [`TaskCell::spawn`] installs it.
+    poll_fn: UnsafeCell<Option<PollFn>>,
 }
 
+// Safety: `TaskHeader` uses `AtomicU8` for state transitions and a
+// `UnsafeCell<Option<PollFn>>` for the poll function. The poll function is
+// written exactly once (before any polling begins) and then only read. All
+// concurrent state access goes through the atomic state machine.
+unsafe impl Sync for TaskHeader {}
+
 impl TaskHeader {
-    /// Creates a task header in the ready state.
+    /// Creates a task header in the ready state with no poll function installed.
     #[must_use]
     pub const fn new(core_affinity: CoreId) -> Self {
         Self {
             state: AtomicU8::new(TaskState::Ready as u8),
             core_affinity,
+            poll_fn: UnsafeCell::new(None),
         }
+    }
+
+    /// Installs the type-erased poll function.
+    ///
+    /// # Safety
+    ///
+    /// Must be called exactly once, before the task is enqueued for polling.
+    pub unsafe fn install_poll_fn(&self, f: PollFn) {
+        // SAFETY: upheld by the caller — no concurrent write is possible
+        // because this is called exactly once before the task is visible to
+        // the executor.
+        unsafe { *self.poll_fn.get() = Some(f) };
+    }
+
+    /// Calls the installed poll function.
+    ///
+    /// # Safety
+    ///
+    /// `this` must be in the `Polling` state and have a poll function
+    /// installed via [`TaskHeader::install_poll_fn`].
+    pub unsafe fn poll(this: NonNull<TaskHeader>, cx: &mut Context<'_>) -> Poll<()> {
+        // SAFETY: upheld by the caller — Polling state guarantees exclusive
+        // access to the future, and the poll_fn is installed before first poll.
+        let f = unsafe { (*this.as_ref().poll_fn.get()).expect("poll called before install_poll_fn") };
+        unsafe { f(this, cx) }
     }
 
     /// Returns the owning core.
@@ -275,6 +324,186 @@ impl<const CAP: usize> Default for RunQueue<CAP> {
 }
 
 // ---------------------------------------------------------------------------
+// TaskCell — pinned per-task future storage
+// ---------------------------------------------------------------------------
+
+/// Pinned storage for a single async task.
+///
+/// Intended to be placed in a `static` binding so the future has a stable
+/// address for the duration of its lifetime. `spawn` writes the future and
+/// returns a header pointer ready to enqueue into a [`SingleCoreExecutor`].
+///
+/// # Layout
+///
+/// `#[repr(C)]` guarantees that `header` is at offset zero, so the executor's
+/// type-erased poll path can safely cast a `*mut TaskHeader` back to a
+/// `*mut TaskCell<F>`.
+#[repr(C)]
+pub struct TaskCell<F: Future<Output = ()>> {
+    /// Task state machine — must remain the first field.
+    header: TaskHeader,
+    /// Future storage, written once by `spawn` and polled exclusively while
+    /// in the `Polling` state.
+    future: UnsafeCell<MaybeUninit<F>>,
+    /// Guards against double-spawn.
+    spawned: AtomicBool,
+}
+
+// Safety: `TaskCell` mediates all future access through the atomic state
+// machine in `TaskHeader`. The future is written once (protected by the
+// `spawned` CAS) and polled exclusively while in `Polling` state. Requiring
+// `F: Send` allows the waker to move a wake signal across cores.
+unsafe impl<F: Future<Output = ()> + Send> Sync for TaskCell<F> {}
+unsafe impl<F: Future<Output = ()> + Send> Send for TaskCell<F> {}
+
+impl<F: Future<Output = ()>> TaskCell<F> {
+    /// Creates an empty task cell for the given core affinity.
+    #[must_use]
+    pub const fn new(core_affinity: CoreId) -> Self {
+        Self {
+            header: TaskHeader::new(core_affinity),
+            future: UnsafeCell::new(MaybeUninit::uninit()),
+            spawned: AtomicBool::new(false),
+        }
+    }
+
+    /// Installs `future` and returns a header pointer ready for enqueueing.
+    ///
+    /// Returns `None` if the cell is already occupied (double-spawn guard).
+    pub fn spawn(&self, future: F) -> Option<NonNull<TaskHeader>> {
+        self.spawned
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+
+        // SAFETY: the CAS above gave us exclusive write access to the future
+        // slot; no concurrent spawn or poll is possible at this point.
+        unsafe {
+            (*self.future.get()).write(future);
+            self.header.install_poll_fn(Self::poll_erased);
+        }
+        Some(NonNull::from(&self.header))
+    }
+
+    /// Type-erased poll trampoline stored in `TaskHeader::poll_fn`.
+    ///
+    /// # Safety
+    ///
+    /// `task` must point to the `header` field of a live `TaskCell<F>`.
+    /// Because `TaskCell<F>` is `#[repr(C)]` with `header` first, the header
+    /// address equals the cell address, making the pointer cast valid.
+    unsafe fn poll_erased(task: NonNull<TaskHeader>, cx: &mut Context<'_>) -> Poll<()> {
+        // SAFETY: #[repr(C)] puts `header` at offset 0, so the TaskHeader
+        // pointer equals the TaskCell pointer.
+        let cell_ptr = task.as_ptr() as *mut TaskCell<F>;
+        // SAFETY: the executor holds the Polling state, guaranteeing that no
+        // other thread can concurrently access the future.
+        unsafe {
+            let future = Pin::new_unchecked((*(*cell_ptr).future.get()).assume_init_mut());
+            future.poll(cx)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SingleCoreExecutor — drives a run queue to completion
+// ---------------------------------------------------------------------------
+
+/// Minimal single-core async executor.
+///
+/// Drives a fixed-capacity [`RunQueue`] of type-erased tasks. Each call to
+/// [`poll_one`] dequeues one task, invokes its poll function, and re-enqueues
+/// it if a wake arrived during the poll. [`run_until_idle`] loops until the
+/// queue drains.
+///
+/// The executor is `!Send` and `!Sync` through its `RunQueue` and must only
+/// be used from the core that owns it.
+///
+/// [`poll_one`]: SingleCoreExecutor::poll_one
+/// [`run_until_idle`]: SingleCoreExecutor::run_until_idle
+pub struct SingleCoreExecutor<const CAP: usize> {
+    run_queue: RunQueue<CAP>,
+}
+
+impl<const CAP: usize> SingleCoreExecutor<CAP> {
+    /// Creates an idle executor with an empty run queue.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            run_queue: RunQueue::new(),
+        }
+    }
+
+    /// Returns `true` if the run queue holds no tasks.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        self.run_queue.is_empty()
+    }
+
+    /// Enqueues a task header returned by [`TaskCell::spawn`].
+    ///
+    /// Returns `false` if the run queue is full.
+    pub fn enqueue(&mut self, task: NonNull<TaskHeader>) -> bool {
+        self.run_queue.push(task)
+    }
+
+    /// Dequeues and polls one task.
+    ///
+    /// Returns `true` if a task was polled, `false` if the queue was empty.
+    ///
+    /// # Safety
+    ///
+    /// Every header in the run queue must have been produced by a live
+    /// [`TaskCell::spawn`] call whose [`TaskCell`] has not been dropped or
+    /// moved since spawning.
+    pub unsafe fn poll_one(&mut self) -> bool {
+        let task_ptr = match self.run_queue.pop() {
+            Some(ptr) => ptr,
+            None => return false,
+        };
+
+        // SAFETY: upheld by the caller.
+        let header = unsafe { task_ptr.as_ref() };
+        header.begin_poll();
+
+        let waker = unsafe { make_task_waker(task_ptr) };
+        let cx = &mut Context::from_waker(&waker);
+
+        // SAFETY: the task is in Polling state and has a poll_fn installed.
+        let result = unsafe { TaskHeader::poll(task_ptr, cx) };
+
+        match result {
+            Poll::Ready(()) => {
+                header.complete();
+            }
+            Poll::Pending => match header.finish_pending_poll() {
+                PendingDisposition::Parked => {}
+                PendingDisposition::Requeue(_) => {
+                    // A wake arrived during poll — re-enqueue immediately.
+                    let _ = self.run_queue.push(task_ptr);
+                }
+            },
+        }
+        true
+    }
+
+    /// Polls tasks until the run queue is empty.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`poll_one`](SingleCoreExecutor::poll_one).
+    pub unsafe fn run_until_idle(&mut self) {
+        // SAFETY: upheld by the caller.
+        while unsafe { self.poll_one() } {}
+    }
+}
+
+impl<const CAP: usize> Default for SingleCoreExecutor<CAP> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Waker infrastructure
 // ---------------------------------------------------------------------------
 
@@ -336,7 +565,13 @@ pub unsafe fn make_task_waker(header: NonNull<TaskHeader>) -> Waker {
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingDisposition, RunQueue, TaskHeader, TaskState, WakeDisposition};
+    use super::{
+        PendingDisposition, RunQueue, SingleCoreExecutor, TaskCell, TaskHeader, TaskState,
+        WakeDisposition,
+    };
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
     use feox_asi::CoreId;
 
     #[test]
@@ -422,5 +657,74 @@ mod tests {
         assert_eq!(queue.pop(), Some(ptr_b));
         assert_eq!(queue.pop(), Some(ptr_c));
         assert!(queue.is_empty());
+    }
+
+    // --- SingleCoreExecutor + TaskCell tests ---
+
+    /// A future that completes immediately on its first poll.
+    struct ReadyFuture;
+
+    impl Future for ReadyFuture {
+        type Output = ();
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+            Poll::Ready(())
+        }
+    }
+
+    /// A future that returns `Pending` for `n` polls, self-waking each time,
+    /// then returns `Ready`.
+    struct CountdownFuture {
+        remaining: u32,
+    }
+
+    impl Future for CountdownFuture {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if self.remaining == 0 {
+                Poll::Ready(())
+            } else {
+                self.remaining -= 1;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn executor_runs_immediately_ready_task_to_completion() {
+        let cell = TaskCell::<ReadyFuture>::new(CoreId(0));
+        let header = cell.spawn(ReadyFuture).expect("spawn succeeds on fresh cell");
+
+        let mut executor = SingleCoreExecutor::<4>::new();
+        assert!(executor.enqueue(header));
+
+        // SAFETY: cell is live for the duration of this test.
+        unsafe { executor.run_until_idle() };
+
+        assert_eq!(unsafe { header.as_ref() }.state(), TaskState::Complete);
+        assert!(executor.is_idle());
+    }
+
+    #[test]
+    fn executor_double_spawn_returns_none() {
+        let cell = TaskCell::<ReadyFuture>::new(CoreId(0));
+        assert!(cell.spawn(ReadyFuture).is_some());
+        assert!(cell.spawn(ReadyFuture).is_none());
+    }
+
+    #[test]
+    fn executor_runs_self_waking_task_through_multiple_polls() {
+        let cell = TaskCell::<CountdownFuture>::new(CoreId(0));
+        let header = cell
+            .spawn(CountdownFuture { remaining: 3 })
+            .expect("spawn succeeds");
+
+        let mut executor = SingleCoreExecutor::<4>::new();
+        assert!(executor.enqueue(header));
+
+        // SAFETY: cell is live for the duration of this test.
+        unsafe { executor.run_until_idle() };
+
+        assert_eq!(unsafe { header.as_ref() }.state(), TaskState::Complete);
     }
 }
