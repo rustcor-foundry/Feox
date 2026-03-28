@@ -170,6 +170,14 @@ pub trait PageTableFrameMutSource: PageTableFrameSource {
 pub trait PageTableFrameAllocator {
     /// Allocates one 4 KiB frame for page-table use.
     fn allocate_table_frame(&mut self) -> Option<PhysicalFrame>;
+
+    /// Records a directed edge from `parent` to the newly allocated `child`
+    /// in the allocator's frame-tree sidecar, if one exists.
+    ///
+    /// Called by [`ensure_child_table`] immediately after every successful
+    /// allocation. The default implementation is a no-op; allocators that
+    /// carry a [`PageTableEdges`] sidecar override this to record the edge.
+    fn record_edge(&mut self, _parent: PhysicalFrame, _child: PhysicalFrame) {}
 }
 
 /// Wrapper for a top-level page-table root frame.
@@ -322,6 +330,117 @@ impl PageTableRoot {
     }
 }
 
+/// Fixed-capacity sidecar recording directed edges in the bootstrap
+/// page-table tree.
+///
+/// Each entry `(parent_phys, child_phys)` means the page table at `parent`
+/// holds an entry pointing to `child`. A capacity of 32 pairs is sufficient
+/// for all intermediate frames reachable in a 4-level walk over a modest
+/// kernel image (at most ~3 levels × ~10 mappings).
+///
+/// Produced by [`BootstrapPagingAllocator`] and consumed when the transition
+/// root is replaced by the permanent kernel root, at which point the tree can
+/// be enumerated to determine which frames to reclaim.
+#[derive(Clone, Copy, Debug)]
+pub struct PageTableEdges {
+    edges: [(u64, u64); Self::CAPACITY],
+    count: usize,
+}
+
+impl PageTableEdges {
+    /// Maximum number of parent→child edges this sidecar can record.
+    pub const CAPACITY: usize = 32;
+
+    /// Creates an empty edge sidecar.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            edges: [(0, 0); Self::CAPACITY],
+            count: 0,
+        }
+    }
+
+    /// Returns the number of recorded edges.
+    #[must_use]
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Records a `parent → child` page-table edge.
+    ///
+    /// Returns `false` without recording if capacity is exhausted.
+    pub fn record(&mut self, parent: PhysicalFrame, child: PhysicalFrame) -> bool {
+        if self.count >= Self::CAPACITY {
+            return false;
+        }
+        self.edges[self.count] = (
+            parent.start_address().as_u64(),
+            child.start_address().as_u64(),
+        );
+        self.count += 1;
+        true
+    }
+
+    /// Returns all frames reachable from `root` via recorded edges (BFS).
+    ///
+    /// The returned array contains up to `CAPACITY` frames in discovery
+    /// order; trailing entries are `None`. `root` itself is not included.
+    #[must_use]
+    pub fn frames_reachable_from(
+        &self,
+        root: PhysicalFrame,
+    ) -> [Option<PhysicalFrame>; Self::CAPACITY] {
+        let mut result = [None; Self::CAPACITY];
+        let mut result_count = 0;
+
+        // BFS frontier stored in a fixed-size array.
+        let mut frontier = [0u64; Self::CAPACITY];
+        let mut frontier_head = 0;
+        let mut frontier_len = 1;
+        frontier[0] = root.start_address().as_u64();
+
+        while frontier_head < frontier_len {
+            let current = frontier[frontier_head];
+            frontier_head += 1;
+
+            let mut i = 0;
+            while i < self.count {
+                let (parent, child) = self.edges[i];
+                if parent == current {
+                    // Skip if already in the frontier (dedup).
+                    let mut found = false;
+                    let mut j = 0;
+                    while j < frontier_len {
+                        if frontier[j] == child {
+                            found = true;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    if !found && frontier_len < Self::CAPACITY {
+                        frontier[frontier_len] = child;
+                        frontier_len += 1;
+                        if result_count < Self::CAPACITY {
+                            result[result_count] = Some(PhysicalFrame::containing(
+                                PhysicalAddress::new(child),
+                            ));
+                            result_count += 1;
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
+        result
+    }
+}
+
+impl Default for PageTableEdges {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Bootstrap allocator for new paging-structure frames.
 ///
 /// This is intentionally tiny: it only hands out 4 KiB frames and records
@@ -329,6 +448,8 @@ impl PageTableRoot {
 pub struct BootstrapPagingAllocator<'map, 'reservations> {
     map: BootMemoryMap<'map>,
     reservations: &'reservations mut EarlyKernelReservations,
+    /// Sidecar recording every parent→child edge produced during allocation.
+    edges: PageTableEdges,
 }
 
 impl<'map, 'reservations> BootstrapPagingAllocator<'map, 'reservations> {
@@ -339,7 +460,11 @@ impl<'map, 'reservations> BootstrapPagingAllocator<'map, 'reservations> {
         map: BootMemoryMap<'map>,
         reservations: &'reservations mut EarlyKernelReservations,
     ) -> Self {
-        Self { map, reservations }
+        Self {
+            map,
+            reservations,
+            edges: PageTableEdges::new(),
+        }
     }
 
     /// Allocates one 4 KiB frame for bootstrap paging structures and records
@@ -352,11 +477,21 @@ impl<'map, 'reservations> BootstrapPagingAllocator<'map, 'reservations> {
             .reserve_frame(ReservationKind::BootstrapPageTables, frame);
         Some(frame)
     }
+
+    /// Returns the frame-tree edge sidecar accumulated during allocation.
+    #[must_use]
+    pub fn edges(&self) -> &PageTableEdges {
+        &self.edges
+    }
 }
 
 impl PageTableFrameAllocator for BootstrapPagingAllocator<'_, '_> {
     fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
         BootstrapPagingAllocator::allocate_table_frame(self)
+    }
+
+    fn record_edge(&mut self, parent: PhysicalFrame, child: PhysicalFrame) {
+        self.edges.record(parent, child);
     }
 }
 
@@ -494,6 +629,7 @@ fn ensure_child_table(
     let child = allocator
         .allocate_table_frame()
         .ok_or(Map4kError::OutOfTableFrames)?;
+    allocator.record_edge(table_frame, child);
 
     // C-05: the `table_mut(child)` and subsequent `table_mut(table_frame)`
     // calls are sequential, not simultaneous — each borrow is dropped before
@@ -530,9 +666,9 @@ fn to_unmap_error(error: PageWalkError) -> Unmap4kError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapPagingAllocator, Map4kError, PAGE_TABLE_ENTRY_COUNT, PageTableEntry,
-        PageTableFrameAllocator, PageTableFrameMutSource, PageTableFrameSource, PageTableRoot,
-        PageWalkError, PageWalkLevel, ensure_child_table, read_entry,
+        BootstrapPagingAllocator, Map4kError, PAGE_TABLE_ENTRY_COUNT, PageTableEdges,
+        PageTableEntry, PageTableFrameAllocator, PageTableFrameMutSource, PageTableFrameSource,
+        PageTableRoot, PageWalkError, PageWalkLevel, ensure_child_table, read_entry,
     };
     use crate::memory::{
         BootMemoryMap, EarlyKernelReservations, KernelImage, MemoryRegion, MemoryRegionKind,
@@ -940,5 +1076,101 @@ mod tests {
             .translate_with(&source, virtual_address)
             .expect("translate should succeed after unmap");
         assert_eq!(translation_after, None);
+    }
+
+    #[test]
+    fn page_table_edges_records_and_reports_count() {
+        let a = PhysicalFrame::containing(PhysicalAddress::new(0x0010_0000));
+        let b = PhysicalFrame::containing(PhysicalAddress::new(0x0011_0000));
+        let c = PhysicalFrame::containing(PhysicalAddress::new(0x0012_0000));
+        let mut edges = PageTableEdges::new();
+
+        assert_eq!(edges.count(), 0);
+        assert!(edges.record(a, b));
+        assert!(edges.record(a, c));
+        assert_eq!(edges.count(), 2);
+    }
+
+    #[test]
+    fn frames_reachable_from_traverses_tree() {
+        let root = PhysicalFrame::containing(PhysicalAddress::new(0x0010_0000));
+        let child1 = PhysicalFrame::containing(PhysicalAddress::new(0x0011_0000));
+        let child2 = PhysicalFrame::containing(PhysicalAddress::new(0x0012_0000));
+        let grandchild = PhysicalFrame::containing(PhysicalAddress::new(0x0013_0000));
+        let unrelated = PhysicalFrame::containing(PhysicalAddress::new(0x0014_0000));
+        let mut edges = PageTableEdges::new();
+
+        edges.record(root, child1);
+        edges.record(root, child2);
+        edges.record(child1, grandchild);
+        // unrelated is not connected to root
+        edges.record(unrelated, child2);
+
+        let reachable = edges.frames_reachable_from(root);
+        let reachable_addrs: [u64; PageTableEdges::CAPACITY] =
+            core::array::from_fn(|i| reachable[i].map_or(0, |f| f.start_address().as_u64()));
+
+        assert!(reachable_addrs.contains(&child1.start_address().as_u64()));
+        assert!(reachable_addrs.contains(&child2.start_address().as_u64()));
+        assert!(reachable_addrs.contains(&grandchild.start_address().as_u64()));
+        assert!(!reachable_addrs.contains(&root.start_address().as_u64()));
+        assert!(!reachable_addrs.contains(&unrelated.start_address().as_u64()));
+    }
+
+    #[test]
+    fn bootstrap_paging_allocator_records_edges_on_map() {
+        let usable_start = 0x0040_0000u64;
+        let regions = [MemoryRegion {
+            start: PhysicalAddress::new(usable_start),
+            end: PhysicalAddress::new(usable_start + (PAGE_SIZE * 8)),
+            kind: MemoryRegionKind::Usable,
+        }];
+        let kernel_image = KernelImage {
+            start: VirtualAddress::new(0x0010_0000),
+            end: VirtualAddress::new(0x0012_0000),
+        };
+        let active_root = PhysicalFrame::containing(PhysicalAddress::new(0x0030_0000));
+        let mut reservations = EarlyKernelReservations::for_bootstrap(kernel_image, active_root);
+
+        // Pre-populate fake page tables with slots for the root and three
+        // intermediate frames that the allocator will hand out.
+        let root_frame = PhysicalFrame::containing(PhysicalAddress::new(usable_start));
+        let pdpt_frame = PhysicalFrame::containing(PhysicalAddress::new(usable_start + PAGE_SIZE));
+        let pd_frame = PhysicalFrame::containing(PhysicalAddress::new(usable_start + PAGE_SIZE * 2));
+        let pt_frame = PhysicalFrame::containing(PhysicalAddress::new(usable_start + PAGE_SIZE * 3));
+        let leaf_frame = PhysicalFrame::containing(PhysicalAddress::new(usable_start + PAGE_SIZE * 4));
+
+        let mut source = FakePageTables::default();
+        source.insert(root_frame, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pdpt_frame, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pd_frame, &[0; PAGE_TABLE_ENTRY_COUNT]);
+        source.insert(pt_frame, &[0; PAGE_TABLE_ENTRY_COUNT]);
+
+        // Reserve the root frame so the allocator hands out pdpt, pd, pt in order.
+        reservations.reserve_frame(ReservationKind::BootstrapPageTables, root_frame);
+
+        let mut allocator =
+            BootstrapPagingAllocator::new(BootMemoryMap::new(&regions), &mut reservations);
+
+        PageTableRoot::new(root_frame)
+            .map_4k_with(
+                &mut source,
+                &mut allocator,
+                VirtualAddress::new(0xFFFF_8000_1234_5000),
+                leaf_frame,
+                1 << 1,
+            )
+            .expect("map should succeed");
+
+        // Three intermediate tables were allocated (PDPT, PD, PT).
+        assert_eq!(allocator.edges().count(), 3);
+
+        // All intermediate frames are reachable from the root.
+        let reachable = allocator.edges().frames_reachable_from(root_frame);
+        let reachable_addrs: [u64; PageTableEdges::CAPACITY] =
+            core::array::from_fn(|i| reachable[i].map_or(0, |f| f.start_address().as_u64()));
+        assert!(reachable_addrs.contains(&pdpt_frame.start_address().as_u64()));
+        assert!(reachable_addrs.contains(&pd_frame.start_address().as_u64()));
+        assert!(reachable_addrs.contains(&pt_frame.start_address().as_u64()));
     }
 }

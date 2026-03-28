@@ -124,8 +124,16 @@ This document is the running development record for Feox.
 - added 3 executor tests: immediately-ready task completes in one pass; double-spawn returns `None`; self-waking countdown future runs through multiple requeue cycles and completes
 - all 44 tests pass; `cargo kernel` and `cargo loader` clean
 
+### 2026-03-27 (A-05 frame-tree sidecar)
+
+- closed A-05: added `PageTableEdges` — a fixed-capacity 32-pair `(parent_phys, child_phys)` sidecar for bootstrap page-table frame-tree tracking; BFS `frames_reachable_from` enables future reclaim of all intermediate frames once the transition root is replaced
+- added `record_edge` default no-op method to `PageTableFrameAllocator` trait; `BootstrapPagingAllocator` overrides it to call `PageTableEdges::record`
+- wired `allocator.record_edge(table_frame, child)` call into `ensure_child_table` immediately after every successful intermediate-table allocation
+- added `edges()` accessor on `BootstrapPagingAllocator` to expose the accumulated sidecar after a mapping sequence
+- added 3 tests: `page_table_edges_records_and_reports_count`, `frames_reachable_from_traverses_tree`, `bootstrap_paging_allocator_records_edges_on_map`
+- all 47 tests pass; `cargo kernel` and `cargo loader` clean
+
 ## Next Focus
 
 - decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
 - A-03: add the ASI syscall entry path (SYSCALL/SYSRET stub + ring-3 entry point)
-- A-05: add intermediate page-table frame ownership tracking to `BootstrapPagingAllocator`
