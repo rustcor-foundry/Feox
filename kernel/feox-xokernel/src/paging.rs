@@ -241,6 +241,12 @@ impl PageTableRoot {
             return Err(Map4kError::AlreadyMapped(existing));
         }
         table[indices.p1 as usize] = PageTableEntry::present(physical_frame, flags).raw();
+        // Flush the TLB entry for this address. The CR3 write performed during
+        // the bootstrap root switch implicitly flushes everything at that point,
+        // but any call after the root is live must flush explicitly or a stale
+        // translation could be used.
+        #[cfg(target_os = "none")]
+        crate::arch::invalidate_page(virtual_address.as_u64());
         Ok(())
     }
 
@@ -280,6 +286,10 @@ impl PageTableRoot {
             return Ok(None);
         }
         table[indices.p1 as usize] = 0;
+        // Flush the TLB entry so no subsequent access can reach the now-unmapped
+        // physical frame through a cached translation.
+        #[cfg(target_os = "none")]
+        crate::arch::invalidate_page(virtual_address.as_u64());
         Ok(Some(entry))
     }
 }
