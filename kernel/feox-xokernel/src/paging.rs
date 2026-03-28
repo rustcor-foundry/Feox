@@ -18,6 +18,11 @@ impl PageTableEntry {
     const FLAG_USER: u64 = 1 << 2;
     const FLAG_HUGE_PAGE: u64 = 1 << 7;
     const ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+    /// Execute-disable flag (bit 63). Requires `EFER.NXE = 1`.
+    ///
+    /// Set this on any page that should not be executable: stacks, data pages,
+    /// and capability/MMIO windows. Never set it on code pages.
+    pub const FLAG_NO_EXECUTE: u64 = 1 << 63;
 
     /// Creates a raw entry from an encoded `u64`.
     #[must_use]

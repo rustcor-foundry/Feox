@@ -10,7 +10,7 @@ pub mod x86_64;
 mod selected {
     pub use super::x86_64::{
         cpu::{
-            disable_interrupts, hlt_loop, invalidate_page, read_cr3, read_rsp,
+            disable_interrupts, enable_nxe, hlt_loop, invalidate_page, read_cr3, read_rsp,
             switch_page_table_root_and_jump, switch_stack_and_jump, trigger_breakpoint,
         },
         debugcon, gdt, idt, panic, serial,
@@ -30,6 +30,9 @@ pub fn early_init() {
     console_init();
     selected::gdt::init();
     selected::idt::init();
+    // Enable the Execute-Disable bit in EFER so FLAG_NO_EXECUTE mappings are
+    // enforced by the hardware. Must happen before any NX-flagged PTE is live.
+    selected::enable_nxe();
 }
 
 /// Initializes the selected architecture's early console.

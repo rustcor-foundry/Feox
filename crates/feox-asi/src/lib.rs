@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// Identifier for a physical or logical CPU core.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
-pub struct CoreId(pub u16);
+pub struct CoreId(pub u32);
 
 /// ASI duration value with nanosecond precision.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]

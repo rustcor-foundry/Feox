@@ -2,6 +2,68 @@
 
 use core::arch::asm;
 
+/// IA32_EFER MSR address.
+const IA32_EFER: u32 = 0xC000_0080;
+/// Execute-disable enable bit in IA32_EFER (bit 11).
+const EFER_NXE: u64 = 1 << 11;
+
+/// Reads a 64-bit MSR.
+///
+/// # Safety
+///
+/// The caller must ensure `msr` is a valid MSR address for the current
+/// processor and that reading it does not produce side effects that violate
+/// kernel invariants.
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    unsafe {
+        asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+/// Writes a 64-bit MSR.
+///
+/// # Safety
+///
+/// The caller must ensure `msr` is a valid writable MSR address and that the
+/// supplied value is within the legal range for that register.
+unsafe fn wrmsr(msr: u32, value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
+    unsafe {
+        asm!(
+            "wrmsr",
+            in("ecx") msr,
+            in("eax") lo,
+            in("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+}
+
+/// Enables the Execute-Disable (NX) bit in IA32_EFER.
+///
+/// After this call, page-table entries with bit 63 set will prevent
+/// instruction fetches from those pages. Must be called before any
+/// `FLAG_NO_EXECUTE` mappings are installed.
+pub fn enable_nxe() {
+    unsafe {
+        // Safety: IA32_EFER is a valid MSR on all x86_64 processors. Setting
+        // NXE only extends the page-table encoding; it does not change the
+        // meaning of existing entries that have bit 63 clear.
+        let efer = rdmsr(IA32_EFER);
+        wrmsr(IA32_EFER, efer | EFER_NXE);
+    }
+}
+
 /// Disables maskable interrupts on the current core.
 pub fn disable_interrupts() {
     unsafe {
