@@ -91,10 +91,21 @@ This document is the running development record for Feox.
 - `feox-nvme` blocked from kernel integration by `alloc::vec::Vec` dependency (A-01); fix is const-generic `InflightMap<const N: usize>`
 - research alignment: strong Engler SOSP95 and Corey fit; Dune and Arrakis alignment requires SYSCALL entry path and capability enforcement
 
+### 2026-03-27 (code review fix pass)
+
+- fixed P-01: split `switch_page_table_root_and_jump` into `cfg(debug_assertions)` / `cfg(not(debug_assertions))` bodies; release build is now 5 clean instructions with no debugcon I/O
+- fixed C-02: added `invalidate_page` (invlpg) to `arch::cpu` and called it after every PTE write in `map_4k_with` and `unmap_4k_with`; gated behind `cfg(target_os = "none")` so host tests are unaffected
+- fixed C-03: added `CONSOLE_READY: AtomicBool` in `console.rs` and guarded exception handler console-init calls with `is_ready()` to close the double-fault re-entry window
+- fixed A-01: replaced `alloc::vec::Vec` in `feox-nvme` with a const-generic `InflightMap<const N: usize>` backed by `[InflightEntry; N]` and a fixed-size CID free-stack; crate is now fully `no_std` with no allocator requirement
+- fixed S-05: widened `CoreId` from `u16` to `u32` in `feox-asi` to match the ASI spec; updated all downstream uses
+- fixed S-02: added `rdmsr`/`wrmsr` helpers and `enable_nxe()` in `arch::x86_64::cpu`; `early_init()` now sets EFER.NXE before any `FLAG_NO_EXECUTE` PTE is live; added `FLAG_NO_EXECUTE` constant and applied it to bootstrap stack and data pages
+- fixed A-02 (partial): added `RunQueue<const CAP: usize>` (fixed-capacity FIFO ring buffer of `NonNull<TaskHeader>`) and a static `RawWakerVTable` with `make_task_waker` to `feox-async`; executor poll loop and reactor remain pending
+- fixed C-01: added `AtomicU32 CONTEXT_OWNER` and `claim_bootstrap_context` to `runtime_context.rs`; all 9 mutation functions now carry `assert_context_claimed()` debug guards; `bootstrap()` calls `claim_bootstrap_context` immediately after `early_init`; tests call claim before any store
+- fixed S-01: added a 64-bit TSS with dedicated 4 KiB IST stacks for NMI (IST1) and double-fault (IST2) in `gdt.rs`; expanded the GDT from 3 to 5 entries to hold the 128-bit TSS descriptor; `gdt::init()` installs IST stack tops, writes the TSS descriptor, and loads the Task Register via `ltr`; `idt::init()` and `relocate_and_reload()` now set `ist=1` on vector 2 (NMI) and `ist=2` on vector 8 (#DF)
+- all 39 tests pass (27 xokernel + 6 feox-async + 3 feox-nvme + 3 feox-boot); `cargo kernel` and `cargo loader` clean
+
 ## Next Focus
 
-- fix C-02: add `invlpg` to `map_4k_with` and `unmap_4k_with`
-- fix P-01: gate debugcon markers in `switch_page_table_root_and_jump` behind `cfg(debug_assertions)`
-- fix C-03: track console readiness with `AtomicBool` to prevent re-entry in exception handler
+- close the A-02 executor gap: add a minimal single-core poll loop and a timer/event reactor stub
 - decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
 - grow the retained `runtime-active` slice into a broader long-lived runtime layout with clearer ownership boundaries
