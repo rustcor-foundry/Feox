@@ -58,8 +58,9 @@ First full boot validation is:
 powershell -ExecutionPolicy Bypass -File .\tools\run-qemu.ps1
 ```
 
-At the current checkpoint, that run is still blocked on missing QEMU host
-tooling on this machine.
+At the current checkpoint, the x86 host boot rail is live on this workstation:
+`tools/check-host.ps1 -Architecture x86_64` passes and bounded QEMU boot
+captures work end-to-end.
 
 ## Source Of Truth
 

@@ -5,7 +5,7 @@
 
 use core::slice;
 
-/// Base x86_64 page size in bytes.
+/// Base `x86_64` page size in bytes.
 pub const PAGE_SIZE: u64 = 4096;
 
 /// Physical address wrapper.
@@ -40,7 +40,7 @@ impl PhysicalAddress {
 }
 
 /// Semantic type for memory regions supplied by firmware or a bootloader.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u32)]
 pub enum MemoryRegionKind {
     /// General-purpose RAM that the kernel may eventually allocate from.
@@ -48,17 +48,12 @@ pub enum MemoryRegionKind {
     /// The loaded kernel image.
     Kernel = 2,
     /// Reserved memory that must not be handed out.
+    #[default]
     Reserved = 3,
     /// Memory-mapped I/O range.
     Mmio = 4,
     /// Bootloader-owned memory that may become reclaimable later.
     BootloaderReclaimable = 5,
-}
-
-impl Default for MemoryRegionKind {
-    fn default() -> Self {
-        Self::Reserved
-    }
 }
 
 impl MemoryRegionKind {
@@ -168,9 +163,15 @@ pub struct BootHandoff<'a> {
 impl<'a> BootHandoff<'a> {
     /// Validates and decodes a raw boot info pointer.
     ///
-    /// Safety: `ptr` must be either null or point to a valid `BootInfo`
-    /// structure mapped into the current address space.
+    /// # Safety
+    ///
+    /// `ptr` must be either null or point to a valid [`BootInfo`] structure
+    /// mapped into the current address space for the duration of the returned
+    /// handoff view.
+    #[must_use]
     pub unsafe fn from_ptr(ptr: *const BootInfo) -> Option<Self> {
+        // SAFETY: the caller guarantees that `ptr` is either null or points to
+        // a valid `BootInfo` in the active address space.
         let info = unsafe { ptr.as_ref() }?;
         if info.magic != BOOT_INFO_MAGIC || info.version != BOOT_INFO_VERSION {
             return None;
@@ -183,6 +184,8 @@ impl<'a> BootHandoff<'a> {
                 return None;
             }
 
+            // SAFETY: the validated boot info points at a memory-map array
+            // whose length is carried in the same handoff structure.
             unsafe { slice::from_raw_parts(info.memory_map_ptr, info.memory_map_len) }
         };
 
@@ -236,7 +239,9 @@ mod tests {
             memory_map_len: 0,
         };
 
-        let handoff = unsafe { BootHandoff::from_ptr(&info) };
+        // SAFETY: `info` lives for the duration of this test and points to a
+        // valid local `BootInfo`.
+        let handoff = unsafe { BootHandoff::from_ptr(&raw const info) };
         assert!(handoff.is_none());
     }
 
@@ -262,13 +267,15 @@ mod tests {
             memory_map_len: regions.len(),
         };
 
-        let handoff = unsafe { BootHandoff::from_ptr(&info) }.expect("valid handoff");
+        // SAFETY: `info` lives for the duration of this test and points to a
+        // valid local `BootInfo`.
+        let handoff = unsafe { BootHandoff::from_ptr(&raw const info) }.expect("valid handoff");
         assert_eq!(handoff.memory_map(), &regions);
         assert_eq!(handoff.usable_bytes(), 0x2000);
         assert_eq!(
             handoff
                 .highest_physical_address()
-                .map(|address| address.as_u64()),
+                .map(PhysicalAddress::as_u64),
             Some(0x5000)
         );
     }

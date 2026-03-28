@@ -1,4 +1,4 @@
-//! Minimal x86_64 bootstrap support.
+//! Minimal `x86_64` bootstrap support.
 
 pub mod cpu;
 pub mod debugcon;

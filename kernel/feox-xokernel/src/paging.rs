@@ -1,14 +1,16 @@
-//! Early x86-first paging ownership and query helpers.
+#![allow(clippy::similar_names)]
+
+//! Early `x86`-first paging ownership and query helpers.
 
 use crate::memory::{
-    active_page_table_root, BootMemoryMap, EarlyKernelReservations, FrameAllocator,
-    PhysicalAddress, PhysicalFrame, ReservationKind, VirtualAddress, PAGE_SIZE,
+    BootMemoryMap, EarlyKernelReservations, FrameAllocator, PAGE_SIZE, PhysicalAddress,
+    PhysicalFrame, ReservationKind, VirtualAddress, active_page_table_root,
 };
 
-/// Number of entries in one x86_64 page table.
+/// Number of entries in one `x86_64` page table.
 pub const PAGE_TABLE_ENTRY_COUNT: usize = 512;
 
-/// Raw x86_64 page-table entry.
+/// Raw `x86_64` page-table entry.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PageTableEntry(u64);
 
@@ -123,7 +125,7 @@ pub enum PageWalkError {
     },
 }
 
-/// x86_64 walk depth labels used for diagnostics.
+/// `x86_64` walk depth labels used for diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PageWalkLevel {
     /// PML4 level.
@@ -192,6 +194,11 @@ impl PageTableRoot {
 
     /// Translates a virtual address through this root using the supplied
     /// read-only table source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PageWalkError`] when a required table frame is unavailable or
+    /// when a huge-page entry is encountered before a 4 KiB leaf table.
     pub fn translate_with(
         self,
         source: &impl PageTableFrameSource,
@@ -220,6 +227,12 @@ impl PageTableRoot {
     }
 
     /// Installs a 4 KiB mapping, allocating missing intermediate tables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Map4kError`] when a required table is missing, a huge-page
+    /// entry blocks the walk, the virtual address is already mapped, or the
+    /// paging allocator runs out of table frames.
     pub fn map_4k_with(
         self,
         source: &mut impl PageTableFrameMutSource,
@@ -229,8 +242,13 @@ impl PageTableRoot {
         flags: u64,
     ) -> Result<(), Map4kError> {
         let indices = virtual_address.page_table_indices();
-        let pdpt =
-            ensure_child_table(source, allocator, self.frame, indices.p4, PageWalkLevel::Pml4)?;
+        let pdpt = ensure_child_table(
+            source,
+            allocator,
+            self.frame,
+            indices.p4,
+            PageWalkLevel::Pml4,
+        )?;
         let pd = ensure_child_table(source, allocator, pdpt, indices.p3, PageWalkLevel::Pdpt)?;
         let pt = ensure_child_table(source, allocator, pd, indices.p2, PageWalkLevel::Pd)?;
         let table = source
@@ -245,29 +263,34 @@ impl PageTableRoot {
     }
 
     /// Removes a 4 KiB mapping and returns the previously installed leaf entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Unmap4kError`] when a required table is missing or a huge-page
+    /// entry blocks the walk.
     pub fn unmap_4k_with(
         self,
         source: &mut impl PageTableFrameMutSource,
         virtual_address: VirtualAddress,
     ) -> Result<Option<PageTableEntry>, Unmap4kError> {
         let indices = virtual_address.page_table_indices();
-        let Some(p4) =
-            read_entry(source, self.frame, indices.p4, PageWalkLevel::Pml4).map_err(to_unmap_error)?
+        let Some(p4) = read_entry(source, self.frame, indices.p4, PageWalkLevel::Pml4)
+            .map_err(to_unmap_error)?
         else {
             return Ok(None);
         };
-        let Some(p3) =
-            read_entry(source, p4.frame(), indices.p3, PageWalkLevel::Pdpt).map_err(to_unmap_error)?
+        let Some(p3) = read_entry(source, p4.frame(), indices.p3, PageWalkLevel::Pdpt)
+            .map_err(to_unmap_error)?
         else {
             return Ok(None);
         };
-        let Some(p2) =
-            read_entry(source, p3.frame(), indices.p2, PageWalkLevel::Pd).map_err(to_unmap_error)?
+        let Some(p2) = read_entry(source, p3.frame(), indices.p2, PageWalkLevel::Pd)
+            .map_err(to_unmap_error)?
         else {
             return Ok(None);
         };
-        let Some(_) =
-            read_entry(source, p2.frame(), indices.p1, PageWalkLevel::Pt).map_err(to_unmap_error)?
+        let Some(_) = read_entry(source, p2.frame(), indices.p1, PageWalkLevel::Pt)
+            .map_err(to_unmap_error)?
         else {
             return Ok(None);
         };
@@ -307,7 +330,8 @@ impl<'map, 'reservations> BootstrapPagingAllocator<'map, 'reservations> {
     /// Allocates one 4 KiB frame for bootstrap paging structures and records
     /// it as kernel-owned paging memory.
     pub fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
-        let mut allocator = FrameAllocator::with_reservations(self.map, self.reservations.as_view());
+        let mut allocator =
+            FrameAllocator::with_reservations(self.map, self.reservations.as_view());
         let frame = allocator.allocate()?;
         self.reservations
             .reserve_frame(ReservationKind::BootstrapPageTables, frame);
@@ -315,9 +339,7 @@ impl<'map, 'reservations> BootstrapPagingAllocator<'map, 'reservations> {
     }
 }
 
-impl<'map, 'reservations> PageTableFrameAllocator
-    for BootstrapPagingAllocator<'map, 'reservations>
-{
+impl PageTableFrameAllocator for BootstrapPagingAllocator<'_, '_> {
     fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
         BootstrapPagingAllocator::allocate_table_frame(self)
     }
@@ -466,9 +488,9 @@ fn to_unmap_error(error: PageWalkError) -> Unmap4kError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_child_table, read_entry, BootstrapPagingAllocator, Map4kError, PageTableEntry,
+        BootstrapPagingAllocator, Map4kError, PAGE_TABLE_ENTRY_COUNT, PageTableEntry,
         PageTableFrameAllocator, PageTableFrameMutSource, PageTableFrameSource, PageTableRoot,
-        PageWalkError, PageWalkLevel, PAGE_TABLE_ENTRY_COUNT,
+        PageWalkError, PageWalkLevel, ensure_child_table, read_entry,
     };
     use crate::memory::{
         BootMemoryMap, EarlyKernelReservations, KernelImage, MemoryRegion, MemoryRegionKind,
@@ -496,8 +518,11 @@ mod tests {
     }
 
     impl FakePageTables {
-        fn insert(&mut self, frame: PhysicalFrame, table: [u64; PAGE_TABLE_ENTRY_COUNT]) {
-            self.slots[self.len] = TableSlot { frame, table };
+        fn insert(&mut self, frame: PhysicalFrame, table: &[u64; PAGE_TABLE_ENTRY_COUNT]) {
+            self.slots[self.len] = TableSlot {
+                frame,
+                table: *table,
+            };
             self.len += 1;
         }
     }
@@ -512,7 +537,10 @@ mod tests {
     }
 
     impl PageTableFrameMutSource for FakePageTables {
-        fn table_mut(&mut self, frame: PhysicalFrame) -> Option<&mut [u64; PAGE_TABLE_ENTRY_COUNT]> {
+        fn table_mut(
+            &mut self,
+            frame: PhysicalFrame,
+        ) -> Option<&mut [u64; PAGE_TABLE_ENTRY_COUNT]> {
             self.slots[..self.len]
                 .iter_mut()
                 .find(|slot| slot.frame == frame)
@@ -671,14 +699,9 @@ mod tests {
         source.insert(child, [u64::MAX; PAGE_TABLE_ENTRY_COUNT]);
         let mut allocator = FakePagingAllocator::new([child, root, root, root], 1);
 
-        let allocated = ensure_child_table(
-            &mut source,
-            &mut allocator,
-            root,
-            3,
-            PageWalkLevel::Pml4,
-        )
-        .expect("child table should be allocated");
+        let allocated =
+            ensure_child_table(&mut source, &mut allocator, root, 3, PageWalkLevel::Pml4)
+                .expect("child table should be allocated");
 
         assert_eq!(allocated, child);
         let root_table = source.table(root).expect("root table should still exist");
@@ -799,7 +822,10 @@ mod tests {
 
         assert_eq!(removed, PageTableEntry::present(leaf, 1 << 1));
         let pt_table = source.table(pt).unwrap();
-        assert_eq!(PageTableEntry::from_raw(pt_table[indices.p1 as usize]).raw(), 0);
+        assert_eq!(
+            PageTableEntry::from_raw(pt_table[indices.p1 as usize]).raw(),
+            0
+        );
     }
 
     #[test]
@@ -857,7 +883,10 @@ mod tests {
             .translate_with(&source, virtual_address)
             .expect("translate should succeed")
             .expect("mapping should exist");
-        assert_eq!(translation.physical_address, PhysicalAddress::new(0x0020_0678));
+        assert_eq!(
+            translation.physical_address,
+            PhysicalAddress::new(0x0020_0678)
+        );
 
         let removed = root_wrapper
             .unmap_4k_with(&mut source, virtual_address)

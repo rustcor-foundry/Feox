@@ -44,7 +44,6 @@ impl IdtEntry {
     }
 
     fn from_address(address: u64) -> Self {
-
         Self {
             offset_low: address as u16,
             selector: gdt::kernel_code_selector(),

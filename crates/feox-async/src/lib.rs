@@ -140,6 +140,11 @@ impl TaskHeader {
     }
 
     /// Applies the poll epilogue when a future returns `Pending`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the task is not currently in either the `Polling` or
+    /// `WakePending` state when the pending-poll epilogue runs.
     #[must_use]
     pub fn finish_pending_poll(&self) -> PendingDisposition {
         loop {

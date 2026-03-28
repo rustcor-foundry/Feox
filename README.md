@@ -127,8 +127,8 @@ cargo loader-arm
 Those aliases expand to:
 
 ```powershell
-cargo build -p feox-xokernel --bin feox-xokernel --target x86_64-unknown-none
-cargo build -p feox-loader-uefi --bin feox-loader-uefi --target x86_64-unknown-uefi
+cargo build -p feox-xokernel --bin feox-xokernel --target aarch64-unknown-none-softfloat
+cargo build -p feox-loader-uefi --bin feox-loader-uefi --target aarch64-unknown-uefi
 ```
 
 ## Testing And QA

@@ -26,6 +26,8 @@ impl Write for DebugconWriter {
 }
 
 fn write_byte(byte: u8) {
+    // SAFETY: writing one byte to the configured ISA debug port is the entire
+    // purpose of this helper.
     unsafe {
         asm!(
             "out dx, al",

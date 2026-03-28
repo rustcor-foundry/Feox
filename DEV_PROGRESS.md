@@ -73,6 +73,9 @@ This document is the running development record for Feox.
 - installed the missing Rust targets with `rustup target add x86_64-unknown-none x86_64-unknown-uefi`
 - re-verified `cargo loader` and `tools/stage-efi.ps1`
 - completed the host setup on this workstation so `tools/check-host.ps1 -Architecture x86_64` and bounded QEMU boot captures now work end-to-end
+- isolated `runtime_context` tests from shared retained globals with an explicit test reset path
+- added retained-runtime queue overflow/recovery coverage and rolling event-buffer coverage
+- corrected stale docs so the workstation entry reflects the live x86 QEMU rail and the README's ARM aliases match `.cargo/config.toml`
 
 ## Next Focus
 
