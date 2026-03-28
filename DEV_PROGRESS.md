@@ -133,7 +133,12 @@ This document is the running development record for Feox.
 - added 3 tests: `page_table_edges_records_and_reports_count`, `frames_reachable_from_traverses_tree`, `bootstrap_paging_allocator_records_edges_on_map`
 - all 47 tests pass; `cargo kernel` and `cargo loader` clean
 
+### 2026-03-27 (status doc pass)
+
+- updated `STATUS.md` to reflect post-code-review state: all 21 findings resolved or deferred, 47 tests, full capability inventory including TSS/IST stacks, EFER.NXE, CR4 security bits, TLB invalidation, console guard, executor scaffold, and PageTableEdges sidecar
+- updated `docs/CURRENT_STATUS.md` to summarize all code review fixes by finding ID and call out the two deferred items (A-03 syscall entry, A-04 capability table)
+
 ## Next Focus
 
+- **A-03**: add the ASI syscall entry path (SYSCALL/SYSRET stub + ring-3 entry point)
 - decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
-- A-03: add the ASI syscall entry path (SYSCALL/SYSRET stub + ring-3 entry point)
