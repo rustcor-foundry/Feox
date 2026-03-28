@@ -74,8 +74,27 @@ This document is the running development record for Feox.
 - re-verified `cargo loader` and `tools/stage-efi.ps1`
 - completed the host setup on this workstation so `tools/check-host.ps1 -Architecture x86_64` and bounded QEMU boot captures now work end-to-end
 
+### 2026-03-27 (doc pass)
+
+- completed a full doc review against the current implementation
+- updated `STATUS.md` to reflect March 27 state including all higher-half handoff and retained runtime capabilities
+- updated `docs/WORKSTATION_ENTRY.md` to reflect that the QEMU boot rail is now working on this workstation
+- added `docs/BOOTSTRAP_RUNTIME.md` to document the 5-stage bootstrap stage model and the full retained context layer (`RuntimeSnapshot`, `BootstrapCoreContext`, `RuntimeServiceState`, `RuntimeServiceReport`, `RuntimeServiceHeartbeat`, `RuntimeReadinessState`, `RuntimeReadySummary`, command queue, event timeline)
+- added `docs/VIRTUAL_ADDRESS_LAYOUT.md` to capture the three bootstrap windows now locked in code (`0xFFFF_9000_0000_0000` kernel alias, `0xFFFF_9000_0200_0000` stack, `0xFFFF_9000_0300_0000` data) and to call out the open decisions (direct map, permanent layout, user split, MMIO windows) that must be made before the layout grows
+
+### 2026-03-27 (code review pass)
+
+- completed a deep cross-referenced code review of all kernel source, crate source, and design docs
+- added `docs/CODE_REVIEW.md` with 21 classified findings (5 correctness, 5 safety, 2 performance, 5 architecture gaps, 4 research alignment)
+- immediate priority findings: no TLB invlpg in `map_4k_with`/`unmap_4k_with` (C-02), debugcon markers in production CR3 path (P-01), console re-init inside exception handler (C-03)
+- structural gap: `feox-async` executor/reactor/waker infrastructure does not exist (A-02); everything in the async and device I/O stack is blocked on it
+- `feox-nvme` blocked from kernel integration by `alloc::vec::Vec` dependency (A-01); fix is const-generic `InflightMap<const N: usize>`
+- research alignment: strong Engler SOSP95 and Corey fit; Dune and Arrakis alignment requires SYSCALL entry path and capability enforcement
+
 ## Next Focus
 
+- fix C-02: add `invlpg` to `map_4k_with` and `unmap_4k_with`
+- fix P-01: gate debugcon markers in `switch_page_table_root_and_jump` behind `cfg(debug_assertions)`
+- fix C-03: track console readiness with `AtomicBool` to prevent re-entry in exception handler
+- decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
 - grow the retained `runtime-active` slice into a broader long-lived runtime layout with clearer ownership boundaries
-- keep improving the serial/debug trace so paging, retained runtime, heartbeat, and runtime-service changes are obvious under QEMU
-- add one more real retained runtime mutation on top of the shared runtime context while keeping the mechanism layer tight
