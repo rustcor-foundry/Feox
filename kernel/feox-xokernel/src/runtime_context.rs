@@ -36,7 +36,9 @@ static mut BOOTSTRAP_CORE_CONTEXT: Option<BootstrapCoreContext> = None;
 static mut BOOTSTRAP_SERVICE_STATE: Option<RuntimeServiceState> = None;
 static mut BOOTSTRAP_SERVICE_REPORT: Option<RuntimeServiceReport> = None;
 static mut BOOTSTRAP_SERVICE_HEARTBEAT: Option<RuntimeServiceHeartbeat> = None;
-const BOOTSTRAP_COMMAND_CAPACITY: usize = 5;
+static mut BOOTSTRAP_RUNTIME_READINESS: Option<RuntimeReadinessState> = None;
+static mut BOOTSTRAP_READY_SUMMARY: Option<RuntimeReadySummary> = None;
+const BOOTSTRAP_COMMAND_CAPACITY: usize = 7;
 static mut BOOTSTRAP_COMMANDS: [Option<RuntimeServiceCommand>; BOOTSTRAP_COMMAND_CAPACITY] =
     [None; BOOTSTRAP_COMMAND_CAPACITY];
 static mut BOOTSTRAP_COMMAND_HEAD: usize = 0;
@@ -96,6 +98,28 @@ pub struct RuntimeServiceHeartbeat {
     pub observed_events: u64,
 }
 
+/// Retained readiness marker published by the bootstrap runtime loop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeReadinessState {
+    /// Whether the retained runtime loop considers the bootstrap runtime ready.
+    pub ready: bool,
+    /// Service iteration that published the readiness state.
+    pub published_iteration: u64,
+    /// Heartbeat count observed at the moment readiness was published.
+    pub settled_beats: u64,
+}
+
+/// Retained summary published once the bootstrap runtime reaches ready state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeReadySummary {
+    /// Ready-state root carried into the settled runtime.
+    pub active_root: u64,
+    /// Ready-state page count carried into the settled runtime.
+    pub kernel_pages_mapped: u64,
+    /// Ready-state event count visible at publish time.
+    pub retained_events: u64,
+}
+
 /// Minimal retained command set for the first runtime service loop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeServiceCommand {
@@ -107,6 +131,10 @@ pub enum RuntimeServiceCommand {
     ReportTimeline,
     /// Update a retained heartbeat after reporting.
     UpdateHeartbeat,
+    /// Publish a retained runtime-ready state once the loop has settled.
+    PublishReady,
+    /// Publish a retained summary after the runtime reaches ready state.
+    PublishReadySummary,
     /// Move the service into its idle state.
     EnterIdle,
 }
@@ -120,6 +148,8 @@ impl RuntimeServiceCommand {
             Self::RefreshAccounting => "refresh-accounting",
             Self::ReportTimeline => "report-timeline",
             Self::UpdateHeartbeat => "update-heartbeat",
+            Self::PublishReady => "publish-ready",
+            Self::PublishReadySummary => "publish-ready-summary",
             Self::EnterIdle => "enter-idle",
         }
     }
@@ -190,6 +220,32 @@ pub fn service_heartbeat() -> Option<RuntimeServiceHeartbeat> {
     unsafe { BOOTSTRAP_SERVICE_HEARTBEAT }
 }
 
+/// Stores the retained runtime readiness state.
+pub fn store_runtime_readiness(readiness: RuntimeReadinessState) {
+    unsafe {
+        BOOTSTRAP_RUNTIME_READINESS = Some(readiness);
+    }
+}
+
+/// Returns the retained runtime readiness state, if one has been recorded.
+#[must_use]
+pub fn runtime_readiness() -> Option<RuntimeReadinessState> {
+    unsafe { BOOTSTRAP_RUNTIME_READINESS }
+}
+
+/// Stores the retained runtime-ready summary.
+pub fn store_ready_summary(summary: RuntimeReadySummary) {
+    unsafe {
+        BOOTSTRAP_READY_SUMMARY = Some(summary);
+    }
+}
+
+/// Returns the retained runtime-ready summary, if one has been recorded.
+#[must_use]
+pub fn ready_summary() -> Option<RuntimeReadySummary> {
+    unsafe { BOOTSTRAP_READY_SUMMARY }
+}
+
 /// Enqueues one retained runtime-service command.
 pub fn enqueue_command(command: RuntimeServiceCommand) -> Result<(), RuntimeServiceCommand> {
     unsafe {
@@ -250,8 +306,10 @@ pub fn events() -> [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] {
 mod tests {
     use super::{
         dequeue_command, enqueue_command, service, service_report, store_service,
-        store_service_heartbeat, store_service_report, RuntimeServiceCommand,
-        RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState, service_heartbeat,
+        store_ready_summary, store_runtime_readiness, store_service_heartbeat,
+        store_service_report, ready_summary, runtime_readiness, RuntimeReadinessState,
+        RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
+        RuntimeServiceReport, RuntimeServiceState, service_heartbeat,
     };
     use feox_asi::CoreId;
 
@@ -296,11 +354,39 @@ mod tests {
     }
 
     #[test]
+    fn runtime_readiness_round_trips() {
+        let readiness = RuntimeReadinessState {
+            ready: true,
+            published_iteration: 5,
+            settled_beats: 2,
+        };
+
+        store_runtime_readiness(readiness);
+
+        assert_eq!(runtime_readiness(), Some(readiness));
+    }
+
+    #[test]
+    fn runtime_ready_summary_round_trips() {
+        let summary = RuntimeReadySummary {
+            active_root: 0x124000,
+            kernel_pages_mapped: 29,
+            retained_events: 8,
+        };
+
+        store_ready_summary(summary);
+
+        assert_eq!(ready_summary(), Some(summary));
+    }
+
+    #[test]
     fn runtime_service_commands_round_trip_in_fifo_order() {
         assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshSnapshot), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshAccounting), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::ReportTimeline), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::UpdateHeartbeat), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::PublishReady), Ok(()));
+        assert_eq!(enqueue_command(RuntimeServiceCommand::PublishReadySummary), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::EnterIdle), Ok(()));
 
         assert_eq!(
@@ -313,6 +399,8 @@ mod tests {
         );
         assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::ReportTimeline));
         assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::UpdateHeartbeat));
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::PublishReady));
+        assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::PublishReadySummary));
         assert_eq!(dequeue_command(), Some(RuntimeServiceCommand::EnterIdle));
         assert_eq!(dequeue_command(), None);
     }
