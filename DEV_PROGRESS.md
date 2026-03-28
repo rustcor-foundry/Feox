@@ -116,8 +116,16 @@ This document is the running development record for Feox.
 - fixed P-02: added doc comment to the PRESENT|WRITABLE intermediate-entry install in `ensure_child_table` flagging it as a bootstrap-only policy that must be tightened before per-process address spaces are introduced
 - all 41 tests pass; `cargo kernel` and `cargo loader` clean
 
+### 2026-03-27 (A-02 executor scaffold)
+
+- closed A-02: added `PollFn` type alias, `poll_fn: UnsafeCell<Option<PollFn>>` field to `TaskHeader`, and `install_poll_fn` / `poll` methods to complete the type-erased poll path
+- added `TaskCell<F>` — `#[repr(C)]` pinned per-task future storage; `spawn()` writes the future, installs the poll trampoline, and returns a `NonNull<TaskHeader>` ready for enqueueing; `#[repr(C)]` with `header` first guarantees the header pointer equals the cell pointer so the trampoline can cast back without offset arithmetic
+- added `SingleCoreExecutor<const CAP>` — drives a `RunQueue<CAP>` of type-erased tasks; `poll_one` dequeues, calls `begin_poll`, constructs the waker, invokes the poll trampoline, and handles `Parked` vs `Requeue` epilogue; `run_until_idle` loops to empty
+- added 3 executor tests: immediately-ready task completes in one pass; double-spawn returns `None`; self-waking countdown future runs through multiple requeue cycles and completes
+- all 44 tests pass; `cargo kernel` and `cargo loader` clean
+
 ## Next Focus
 
-- close the A-02 executor gap: add a minimal single-core poll loop and a timer/event reactor stub
 - decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
-- grow the retained `runtime-active` slice into a broader long-lived runtime layout with clearer ownership boundaries
+- A-03: add the ASI syscall entry path (SYSCALL/SYSRET stub + ring-3 entry point)
+- A-05: add intermediate page-table frame ownership tracking to `BootstrapPagingAllocator`
