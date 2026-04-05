@@ -16,7 +16,7 @@ env:
 jobs:
   check:
     name: Check kernel and loader crates
-    runs-on: self-hosted
+    runs-on: linux
     steps:
       - uses: actions/checkout@v4
 
