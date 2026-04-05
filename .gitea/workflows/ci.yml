@@ -16,7 +16,7 @@ env:
 jobs:
   check:
     name: Check kernel and loader crates
-    runs-on: linux
+    runs-on: lx-ws01
     steps:
       - uses: actions/checkout@v4
 
