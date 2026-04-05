@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# lx-ws01: 80 threads, 503 GB RAM
+# Feox is a bare-metal no_std kernel. CI checks kernel/loader crates against
+# their proper targets so we catch type/borrow errors without needing hardware.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "80"
+
+jobs:
+  check:
+    name: Check kernel and loader crates
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with bare-metal targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+          components: clippy
+
+      - name: Check kernel crates (x86_64-unknown-none)
+        run: |
+          cargo check \
+            -p feox-asi -p feox-async -p feox-boot -p feox-nvme -p feox-xokernel \
+            --target x86_64-unknown-none \
+            --jobs 80
+
+      - name: Check UEFI loader (x86_64-unknown-uefi)
+        run: |
+          cargo check \
+            -p feox-loader-uefi \
+            --target x86_64-unknown-uefi \
+            --jobs 80
+
+      - name: Clippy kernel crates
+        run: |
+          cargo clippy \
+            -p feox-asi -p feox-async -p feox-boot -p feox-nvme -p feox-xokernel \
+            --target x86_64-unknown-none \
+            --jobs 80 \
+            -- -D warnings
