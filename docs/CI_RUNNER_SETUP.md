@@ -88,3 +88,9 @@ sudo apt-get install -y powershell qemu-system-x86 ovmf
 Exact package names may differ by distro. The important contract is that the
 paths above resolve, or the `FEOX_*` environment variables point to valid
 alternatives.
+
+## Triage
+
+If a Feox CI lane fails on `lx-ws01`, start with:
+
+- `docs/CI_TRIAGE.md`
