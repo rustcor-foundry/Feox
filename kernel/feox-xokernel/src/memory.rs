@@ -18,6 +18,10 @@ pub const BOOTSTRAP_DATA_WINDOW_BASE: u64 = 0xFFFF_9000_0300_0000;
 pub const BOOTSTRAP_VM_WINDOW_BASE: u64 = 0xFFFF_9000_0400_0000;
 /// Size of the bootstrap VM window in bytes.
 pub const BOOTSTRAP_VM_WINDOW_SIZE: u64 = 64 * 1024 * 1024;
+/// Higher-half base for the bootstrap page-table access window.
+pub const BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE: u64 = 0xFFFF_9000_0800_0000;
+/// Size of the bootstrap page-table access window in bytes.
+pub const BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE: u64 = 16 * 1024;
 
 /// Virtual address wrapper.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -459,6 +463,7 @@ pub struct BootstrapRuntimeLayout {
     stack_window_base: VirtualAddress,
     data_window_base: VirtualAddress,
     vm_window_base: VirtualAddress,
+    page_table_access_window_base: VirtualAddress,
 }
 
 impl Default for BootstrapRuntimeLayout {
@@ -476,6 +481,9 @@ impl BootstrapRuntimeLayout {
             stack_window_base: VirtualAddress::new(BOOTSTRAP_STACK_WINDOW_BASE),
             data_window_base: VirtualAddress::new(BOOTSTRAP_DATA_WINDOW_BASE),
             vm_window_base: VirtualAddress::new(BOOTSTRAP_VM_WINDOW_BASE),
+            page_table_access_window_base: VirtualAddress::new(
+                BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE,
+            ),
         }
     }
 
@@ -519,6 +527,26 @@ impl BootstrapRuntimeLayout {
     #[must_use]
     pub const fn vm_window_end(self) -> VirtualAddress {
         VirtualAddress::new(self.vm_window_base.as_u64() + BOOTSTRAP_VM_WINDOW_SIZE)
+    }
+
+    /// Returns the bootstrap page-table access window base.
+    #[must_use]
+    pub const fn page_table_access_window_base(self) -> VirtualAddress {
+        self.page_table_access_window_base
+    }
+
+    /// Returns the bootstrap page-table access window size in bytes.
+    #[must_use]
+    pub const fn page_table_access_window_size(self) -> u64 {
+        BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE
+    }
+
+    /// Returns the first address after the bootstrap page-table access window.
+    #[must_use]
+    pub const fn page_table_access_window_end(self) -> VirtualAddress {
+        VirtualAddress::new(
+            self.page_table_access_window_base.as_u64() + BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE,
+        )
     }
 
     /// Returns the kernel-image-relative alias for a kernel address.
@@ -584,10 +612,12 @@ pub fn active_page_table_root() -> PhysicalFrame {
 #[cfg(test)]
 mod tests {
     use super::{
-        BOOTSTRAP_DATA_WINDOW_BASE, BOOTSTRAP_KERNEL_WINDOW_BASE, BOOTSTRAP_STACK_WINDOW_BASE,
-        BootMemoryMap, BootReservations, BootstrapRuntimeLayout, EarlyKernelReservations,
-        FrameAllocator, KernelImage, MemoryRegion, MemoryRegionKind, PAGE_SIZE, PhysicalAddress,
-        PhysicalFrame, ReservationKind, ReservedRegion, VirtualAddress,
+        BOOTSTRAP_DATA_WINDOW_BASE, BOOTSTRAP_KERNEL_WINDOW_BASE,
+        BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE, BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE,
+        BOOTSTRAP_STACK_WINDOW_BASE, BOOTSTRAP_VM_WINDOW_BASE, BootMemoryMap, BootReservations,
+        BootstrapRuntimeLayout, EarlyKernelReservations, FrameAllocator, KernelImage, MemoryRegion,
+        MemoryRegionKind, PAGE_SIZE, PhysicalAddress, PhysicalFrame, ReservationKind,
+        ReservedRegion, VirtualAddress,
         X86_LEGACY_LOW_MEMORY_BYTES,
     };
 
@@ -769,6 +799,18 @@ mod tests {
         assert_eq!(
             layout.data_window_base().as_u64(),
             BOOTSTRAP_DATA_WINDOW_BASE
+        );
+        assert_eq!(
+            layout.vm_window_base().as_u64(),
+            BOOTSTRAP_VM_WINDOW_BASE
+        );
+        assert_eq!(
+            layout.page_table_access_window_base().as_u64(),
+            BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE
+        );
+        assert_eq!(
+            layout.page_table_access_window_end().as_u64(),
+            BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE + BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE
         );
         assert_eq!(
             layout
