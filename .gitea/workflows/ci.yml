@@ -14,8 +14,40 @@ env:
   CARGO_BUILD_JOBS: "80"
 
 jobs:
-  check:
-    name: Check kernel and loader crates
+  host-tests:
+    name: Workspace host tests
+    runs-on: lx-ws01
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with bare-metal targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+          components: clippy
+
+      - name: Run workspace unit tests
+        run: cargo test --jobs 80
+
+  build:
+    name: Build kernel and loader artifacts
+    runs-on: lx-ws01
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with bare-metal targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Build x86_64 kernel
+        run: cargo kernel --jobs 80
+
+      - name: Build x86_64 UEFI loader
+        run: cargo loader --jobs 80
+
+  lint-and-check:
+    name: Target checks and lints
     runs-on: lx-ws01
     steps:
       - uses: actions/checkout@v4
@@ -47,3 +79,32 @@ jobs:
             --target x86_64-unknown-none \
             --jobs 80 \
             -- -D warnings
+
+      - name: Clippy UEFI loader
+        run: |
+          cargo clippy \
+            -p feox-loader-uefi \
+            --target x86_64-unknown-uefi \
+            --jobs 80 \
+            -- -D warnings
+
+  qemu-smoke:
+    name: x86_64 QEMU smoke boot
+    runs-on: lx-ws01
+    needs: [host-tests, build, lint-and-check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable with bare-metal targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+
+      - name: Confirm PowerShell is available
+        run: pwsh --version
+
+      - name: Check x86_64 boot-host prerequisites
+        run: pwsh -File ./tools/check-host.ps1 -Architecture x86_64
+
+      - name: Run bounded x86_64 QEMU smoke boot
+        run: pwsh -File ./tools/run-qemu-smoke.ps1 -Architecture x86_64 -TimeoutSeconds 20 -SuccessMarker "stage: runtime service idle"

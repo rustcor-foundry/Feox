@@ -22,6 +22,8 @@ This document is the running development record for Feox.
 - extended the shared ASI memory ABI with `MemVtoPArgs` and `MemVtoPBatchArgs`
 - added retained bootstrap mapping lookup by handle and virtual address, then wired bootstrap `mem_vtop` / `mem_vtop_batch` helpers and x86_64 syscall dispatch support
 - added host-safe positive tests for bootstrap virtual-to-physical translation and exposed the retained-runtime test reset path so shared bootstrap state stays isolated
+- expanded `.gitea/workflows/ci.yml` so `lx-ws01` now runs host tests, real target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
+- taught `tools/check-host.ps1` and `tools/run-qemu.ps1` to discover common Linux QEMU and OVMF paths, then added `tools/run-qemu-smoke.ps1` as the normal bounded CI boot wrapper
 
 ### 2026-04-07
 
