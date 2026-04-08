@@ -191,6 +191,9 @@ cargo kernel
 cargo loader
 ```
 
+Normal Gitea validation on `lx-ws01` now mirrors that baseline and adds a
+bounded x86_64 QEMU smoke boot through `tools/run-qemu-smoke.ps1`.
+
 Manual bootstrap rail:
 
 ```powershell
@@ -200,7 +203,7 @@ powershell -ExecutionPolicy Bypass -File .\tools\run-qemu.ps1
 ```
 
 See [docs/TESTING.md](docs/TESTING.md) for the real operator checklist and
-host prerequisites.
+host prerequisites, including the `lx-ws01` CI runner contract.
 
 ## Boot Harness
 

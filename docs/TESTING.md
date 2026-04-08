@@ -16,6 +16,28 @@ cargo loader
 These validate the current workspace, bare-metal kernel image, UEFI loader
 build path, and host readiness for the x86 boot rail.
 
+## Gitea CI Rail
+
+The normal Feox CI runner is `lx-ws01`.
+
+The Gitea workflow now validates four lanes on that runner:
+
+- `cargo test`
+- `cargo kernel`
+- `cargo loader`
+- bounded `x86_64` QEMU smoke boot through `pwsh -File ./tools/run-qemu-smoke.ps1`
+
+For `lx-ws01` to stay green, it must provide:
+
+- `pwsh`
+- `qemu-system-x86_64`
+- x86_64 OVMF firmware code and vars files
+- Rust targets `x86_64-unknown-none` and `x86_64-unknown-uefi`
+
+The PowerShell harnesses now search common Linux paths for QEMU and OVMF in
+addition to the existing Windows paths, so the same scripts are used on both
+the workstation and the CI runner.
+
 ## Manual Bootstrap Rail
 
 Stage the EFI tree:
@@ -69,3 +91,6 @@ using the ISA debug console at `0x402`.
 That log is the current source of truth for first-boot validation on this
 workstation because it captures both loader and kernel output even when COM1
 behavior is noisy or inconsistent.
+
+For CI, `tools/run-qemu-smoke.ps1` uses the same harness in bounded mode and
+asserts that the boot log reaches the configured success marker.

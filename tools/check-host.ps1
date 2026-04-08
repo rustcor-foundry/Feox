@@ -43,6 +43,8 @@ switch ($Architecture) {
         $loaderTarget = 'x86_64-unknown-uefi'
         $qemuCandidates = @(
             $env:FEOX_QEMU,
+            '/usr/bin/qemu-system-x86_64',
+            '/usr/local/bin/qemu-system-x86_64',
             'C:\Program Files\qemu\qemu-system-x86_64.exe',
             'C:\Program Files (x86)\qemu\qemu-system-x86_64.exe',
             'C:\msys64\mingw64\bin\qemu-system-x86_64.exe',
@@ -53,6 +55,11 @@ switch ($Architecture) {
         )
         $firmwareCodeCandidates = @(
             $env:FEOX_OVMF_CODE,
+            '/usr/share/OVMF/OVMF_CODE.fd',
+            '/usr/share/OVMF/OVMF_CODE_4M.fd',
+            '/usr/share/edk2/x64/OVMF_CODE.fd',
+            '/usr/share/edk2-ovmf/x64/OVMF_CODE.fd',
+            '/usr/share/qemu/OVMF_CODE.fd',
             'C:\Program Files\qemu\share\edk2-x86_64-code.fd',
             'C:\Program Files\qemu\share\OVMF_CODE.fd',
             'C:\Program Files\qemu\OVMF_CODE.fd',
@@ -66,6 +73,11 @@ switch ($Architecture) {
         )
         $firmwareVarsCandidates = @(
             $env:FEOX_OVMF_VARS,
+            '/usr/share/OVMF/OVMF_VARS.fd',
+            '/usr/share/OVMF/OVMF_VARS_4M.fd',
+            '/usr/share/edk2/x64/OVMF_VARS.fd',
+            '/usr/share/edk2-ovmf/x64/OVMF_VARS.fd',
+            '/usr/share/qemu/OVMF_VARS.fd',
             'C:\Program Files\qemu\share\edk2-i386-vars.fd',
             'C:\Program Files\qemu\share\OVMF_VARS.fd',
             'C:\Program Files\qemu\OVMF_VARS.fd',
@@ -83,6 +95,8 @@ switch ($Architecture) {
         $loaderTarget = 'aarch64-unknown-uefi'
         $qemuCandidates = @(
             $env:FEOX_QEMU,
+            '/usr/bin/qemu-system-aarch64',
+            '/usr/local/bin/qemu-system-aarch64',
             'C:\Program Files\qemu\qemu-system-aarch64.exe',
             'C:\Program Files (x86)\qemu\qemu-system-aarch64.exe',
             'C:\msys64\mingw64\bin\qemu-system-aarch64.exe',
@@ -93,6 +107,10 @@ switch ($Architecture) {
         $firmwareCodeCandidates = @(
             $env:FEOX_OVMF_CODE,
             $env:FEOX_ARMVIRT_CODE,
+            '/usr/share/AAVMF/AAVMF_CODE.fd',
+            '/usr/share/AAVMF/AAVMF_CODE.ms.fd',
+            '/usr/share/edk2/aarch64/QEMU_EFI.fd',
+            '/usr/share/qemu-efi-aarch64/QEMU_EFI.fd',
             'C:\Program Files\qemu\share\edk2-aarch64-code.fd',
             'C:\Program Files\qemu\share\QEMU_EFI.fd',
             'C:\Program Files (x86)\qemu\share\edk2-aarch64-code.fd',
@@ -104,6 +122,10 @@ switch ($Architecture) {
         $firmwareVarsCandidates = @(
             $env:FEOX_OVMF_VARS,
             $env:FEOX_ARMVIRT_VARS,
+            '/usr/share/AAVMF/AAVMF_VARS.fd',
+            '/usr/share/AAVMF/AAVMF_VARS.ms.fd',
+            '/usr/share/edk2/aarch64/vars-template-pflash.raw',
+            '/usr/share/qemu-efi-aarch64/vars-template-pflash.raw',
             'C:\Program Files\qemu\share\vars-template-pflash.raw',
             'C:\Program Files (x86)\qemu\share\vars-template-pflash.raw',
             'C:\msys64\mingw64\share\edk2-armvirt\aarch64\vars-template-pflash.raw',

@@ -21,6 +21,10 @@ param(
 
     [switch]$Graphic,
 
+    [int]$TimeoutSeconds = 0,
+
+    [string]$SuccessMarker = '',
+
     [string[]]$ExtraQemuArgs = @()
 )
 
@@ -61,6 +65,8 @@ switch ($Architecture) {
         $cpu = 'qemu64'
         $qemuCandidates = @(
             $QemuPath,
+            '/usr/bin/qemu-system-x86_64',
+            '/usr/local/bin/qemu-system-x86_64',
             'C:\Program Files\qemu\qemu-system-x86_64.exe',
             'C:\Program Files (x86)\qemu\qemu-system-x86_64.exe',
             'C:\msys64\mingw64\bin\qemu-system-x86_64.exe',
@@ -70,6 +76,11 @@ switch ($Architecture) {
         )
         $firmwareCodeCandidates = @(
             $OvmfCode,
+            '/usr/share/OVMF/OVMF_CODE.fd',
+            '/usr/share/OVMF/OVMF_CODE_4M.fd',
+            '/usr/share/edk2/x64/OVMF_CODE.fd',
+            '/usr/share/edk2-ovmf/x64/OVMF_CODE.fd',
+            '/usr/share/qemu/OVMF_CODE.fd',
             'C:\Program Files\qemu\share\edk2-x86_64-code.fd',
             'C:\Program Files\qemu\share\OVMF_CODE.fd',
             'C:\Program Files\qemu\OVMF_CODE.fd',
@@ -83,6 +94,11 @@ switch ($Architecture) {
         )
         $firmwareVarsCandidates = @(
             $OvmfVars,
+            '/usr/share/OVMF/OVMF_VARS.fd',
+            '/usr/share/OVMF/OVMF_VARS_4M.fd',
+            '/usr/share/edk2/x64/OVMF_VARS.fd',
+            '/usr/share/edk2-ovmf/x64/OVMF_VARS.fd',
+            '/usr/share/qemu/OVMF_VARS.fd',
             'C:\Program Files\qemu\share\edk2-i386-vars.fd',
             'C:\Program Files\qemu\share\OVMF_VARS.fd',
             'C:\Program Files\qemu\OVMF_VARS.fd',
@@ -100,6 +116,8 @@ switch ($Architecture) {
         $cpu = 'cortex-a72'
         $qemuCandidates = @(
             $QemuPath,
+            '/usr/bin/qemu-system-aarch64',
+            '/usr/local/bin/qemu-system-aarch64',
             'C:\Program Files\qemu\qemu-system-aarch64.exe',
             'C:\Program Files (x86)\qemu\qemu-system-aarch64.exe',
             'C:\msys64\mingw64\bin\qemu-system-aarch64.exe',
@@ -109,6 +127,10 @@ switch ($Architecture) {
         $firmwareCodeCandidates = @(
             $OvmfCode,
             $env:FEOX_ARMVIRT_CODE,
+            '/usr/share/AAVMF/AAVMF_CODE.fd',
+            '/usr/share/AAVMF/AAVMF_CODE.ms.fd',
+            '/usr/share/edk2/aarch64/QEMU_EFI.fd',
+            '/usr/share/qemu-efi-aarch64/QEMU_EFI.fd',
             'C:\Program Files\qemu\share\edk2-aarch64-code.fd',
             'C:\Program Files\qemu\share\QEMU_EFI.fd',
             'C:\Program Files (x86)\qemu\share\edk2-aarch64-code.fd',
@@ -120,6 +142,10 @@ switch ($Architecture) {
         $firmwareVarsCandidates = @(
             $OvmfVars,
             $env:FEOX_ARMVIRT_VARS,
+            '/usr/share/AAVMF/AAVMF_VARS.fd',
+            '/usr/share/AAVMF/AAVMF_VARS.ms.fd',
+            '/usr/share/edk2/aarch64/vars-template-pflash.raw',
+            '/usr/share/qemu-efi-aarch64/vars-template-pflash.raw',
             'C:\Program Files\qemu\share\vars-template-pflash.raw',
             'C:\Program Files (x86)\qemu\share\vars-template-pflash.raw',
             'C:\msys64\mingw64\share\edk2-armvirt\aarch64\vars-template-pflash.raw',
@@ -162,16 +188,21 @@ $varsCopy = Join-Path $runRoot "$Architecture-vars.$Profile.fd"
 Copy-Item $firmwareVars $varsCopy -Force
 $debugLog = Join-Path $runRoot "$Architecture-debug.$Profile.log"
 Remove-Item $debugLog -Force -ErrorAction SilentlyContinue
+$stdoutLog = Join-Path $runRoot "$Architecture-stdout.$Profile.log"
+$stderrLog = Join-Path $runRoot "$Architecture-stderr.$Profile.log"
+if ($TimeoutSeconds -gt 0) {
+    Remove-Item $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
+}
 
 $qemuArgs = @(
     '-machine', $machine,
     '-cpu', $cpu,
     '-m', $MemoryMiB.ToString(),
-    '-drive', "if=pflash,format=raw,readonly=on,file=$(Convert-ToQemuPath $firmwareCode)",
-    '-drive', "if=pflash,format=raw,file=$(Convert-ToQemuPath $varsCopy)",
-    '-drive', "format=raw,file=fat:rw:$(Convert-ToQemuPath $stageInfo.StageRoot)",
+    '-drive', "if=pflash,format=raw,readonly=on,file=""$(Convert-ToQemuPath $firmwareCode)""",
+    '-drive', "if=pflash,format=raw,file=""$(Convert-ToQemuPath $varsCopy)""",
+    '-drive', "format=raw,file=fat:rw:""$(Convert-ToQemuPath $stageInfo.StageRoot)""",
     '-global', 'isa-debugcon.iobase=0x402',
-    '-debugcon', "file:$(Convert-ToQemuPath $debugLog)",
+    '-debugcon', "file:""$(Convert-ToQemuPath $debugLog)""",
     '-serial', 'stdio',
     '-monitor', 'none',
     '-no-reboot',
@@ -193,12 +224,48 @@ Write-Host "  Firmware:  $firmwareCode"
 Write-Host "  Vars:      $varsCopy"
 Write-Host "  ESP root:  $($stageInfo.StageRoot)"
 Write-Host "  Debug log: $debugLog"
+if ($TimeoutSeconds -gt 0) {
+    Write-Host "  Timeout:   ${TimeoutSeconds}s"
+}
 
 Push-Location $repoRoot
 try {
-    & $QemuPath @qemuArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "QEMU exited with status $LASTEXITCODE."
+    if ($TimeoutSeconds -gt 0) {
+        $process = Start-Process `
+            -FilePath $QemuPath `
+            -ArgumentList $qemuArgs `
+            -WorkingDirectory $repoRoot `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError $stderrLog `
+            -PassThru
+        $timedOut = $false
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $timedOut = $true
+            Stop-Process -Id $process.Id -Force
+            $process.WaitForExit()
+        }
+
+        if (-not $timedOut -and $process.ExitCode -ne 0) {
+            throw "QEMU exited with status $($process.ExitCode)."
+        }
+
+        $logSources = @()
+        if (Test-Path $debugLog) {
+            $logSources += Get-Content $debugLog -Raw
+        }
+        if (Test-Path $stdoutLog) {
+            $logSources += Get-Content $stdoutLog -Raw
+        }
+
+        if ($SuccessMarker -and (($logSources -join "`n") -notmatch [regex]::Escape($SuccessMarker))) {
+            throw "QEMU smoke run did not reach success marker '$SuccessMarker'."
+        }
+    }
+    else {
+        & $QemuPath @qemuArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "QEMU exited with status $LASTEXITCODE."
+        }
     }
 }
 finally {
