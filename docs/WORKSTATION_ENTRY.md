@@ -23,6 +23,45 @@ powershell -ExecutionPolicy Bypass -File .\tools\stage-efi.ps1
 If those all pass, the repo is in a good local state for deeper kernel or
 loader work.
 
+## First Documentation Sweep
+
+After the validation rail is green, use this reading order for the first doc
+pass.
+
+### 1. Confirm what is true right now
+
+- [README.md](../README.md)
+- [docs/CURRENT_STATUS.md](CURRENT_STATUS.md)
+- [docs/TESTING.md](TESTING.md)
+- [DEV_PROGRESS.md](../DEV_PROGRESS.md)
+
+### 2. Pull in the active architecture lane
+
+- [docs/ARCHITECTURE_PRIORITY.md](ARCHITECTURE_PRIORITY.md)
+- [docs/ARCHITECTURE_CHECKLIST.md](ARCHITECTURE_CHECKLIST.md)
+- [docs/BOOTSTRAP_RUNTIME.md](BOOTSTRAP_RUNTIME.md)
+- [docs/VIRTUAL_ADDRESS_LAYOUT.md](VIRTUAL_ADDRESS_LAYOUT.md)
+- [docs/MEMORY_OWNERSHIP_PHASES.md](MEMORY_OWNERSHIP_PHASES.md)
+- [docs/PAGE_TABLE_PLAN.md](PAGE_TABLE_PLAN.md)
+- [docs/BOOT_MEMORY_REVIEW.md](BOOT_MEMORY_REVIEW.md)
+
+### 3. Pull in the broader direction and reference rails
+
+- [docs/CODE_REVIEW.md](CODE_REVIEW.md)
+- [docs/EXOKERNEL_RESEARCH_FRAMEWORK.md](EXOKERNEL_RESEARCH_FRAMEWORK.md)
+- [docs/ARM64_PORT_PLAN.md](ARM64_PORT_PLAN.md)
+- [ASI-SPEC.md](../ASI-SPEC.md)
+- [CAPABILITY-SYSTEM.md](../CAPABILITY-SYSTEM.md)
+- [ASYNC-RUNTIME.md](../ASYNC-RUNTIME.md)
+- [NVME-DRIVER.md](../NVME-DRIVER.md)
+
+That sweep should leave you with:
+
+- the current validation rail
+- the live x86_64 architecture story
+- the open design decisions
+- the deeper spec and review context behind the code
+
 ## Host Prerequisites
 
 Rust targets required for the current bootstrap lane:
@@ -88,3 +127,11 @@ A successful run shows:
 - [docs/CURRENT_STATUS.md](CURRENT_STATUS.md)
 - [docs/TESTING.md](TESTING.md)
 - [DEV_PROGRESS.md](../DEV_PROGRESS.md)
+- [docs/ARCHITECTURE_PRIORITY.md](ARCHITECTURE_PRIORITY.md)
+- [docs/ARCHITECTURE_CHECKLIST.md](ARCHITECTURE_CHECKLIST.md)
+- [docs/BOOTSTRAP_RUNTIME.md](BOOTSTRAP_RUNTIME.md)
+- [docs/VIRTUAL_ADDRESS_LAYOUT.md](VIRTUAL_ADDRESS_LAYOUT.md)
+- [docs/MEMORY_OWNERSHIP_PHASES.md](MEMORY_OWNERSHIP_PHASES.md)
+- [docs/PAGE_TABLE_PLAN.md](PAGE_TABLE_PLAN.md)
+- [docs/BOOT_MEMORY_REVIEW.md](BOOT_MEMORY_REVIEW.md)
+- [docs/CODE_REVIEW.md](CODE_REVIEW.md)

@@ -14,6 +14,10 @@ pub const BOOTSTRAP_KERNEL_WINDOW_BASE: u64 = 0xFFFF_9000_0000_0000;
 pub const BOOTSTRAP_STACK_WINDOW_BASE: u64 = 0xFFFF_9000_0200_0000;
 /// Higher-half base for the retained bootstrap runtime-data window.
 pub const BOOTSTRAP_DATA_WINDOW_BASE: u64 = 0xFFFF_9000_0300_0000;
+/// Higher-half base for the bootstrap capability-backed VM window.
+pub const BOOTSTRAP_VM_WINDOW_BASE: u64 = 0xFFFF_9000_0400_0000;
+/// Size of the bootstrap VM window in bytes.
+pub const BOOTSTRAP_VM_WINDOW_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Virtual address wrapper.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -178,16 +182,27 @@ impl ReservationKind {
 
 /// Fixed-size early reservation set used during bootstrap before any dynamic
 /// kernel-owned allocation structures exist.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct EarlyKernelReservations {
     regions: [ReservedRegion; Self::MAX_REGIONS],
     kinds: [ReservationKind; Self::MAX_REGIONS],
     len: usize,
 }
 
+impl Default for EarlyKernelReservations {
+    fn default() -> Self {
+        Self {
+            regions: [ReservedRegion::new(PhysicalAddress::new(0), PhysicalAddress::new(0));
+                Self::MAX_REGIONS],
+            kinds: [ReservationKind::Unused; Self::MAX_REGIONS],
+            len: 0,
+        }
+    }
+}
+
 impl EarlyKernelReservations {
     /// Maximum number of early reservation entries tracked during bootstrap.
-    pub const MAX_REGIONS: usize = 20;
+    pub const MAX_REGIONS: usize = 96;
 
     /// Builds the initial reservation set for the currently loaded kernel image
     /// and active top-level page table root.
@@ -443,6 +458,7 @@ pub struct BootstrapRuntimeLayout {
     kernel_window_base: VirtualAddress,
     stack_window_base: VirtualAddress,
     data_window_base: VirtualAddress,
+    vm_window_base: VirtualAddress,
 }
 
 impl Default for BootstrapRuntimeLayout {
@@ -459,6 +475,7 @@ impl BootstrapRuntimeLayout {
             kernel_window_base: VirtualAddress::new(BOOTSTRAP_KERNEL_WINDOW_BASE),
             stack_window_base: VirtualAddress::new(BOOTSTRAP_STACK_WINDOW_BASE),
             data_window_base: VirtualAddress::new(BOOTSTRAP_DATA_WINDOW_BASE),
+            vm_window_base: VirtualAddress::new(BOOTSTRAP_VM_WINDOW_BASE),
         }
     }
 
@@ -484,6 +501,24 @@ impl BootstrapRuntimeLayout {
     #[must_use]
     pub const fn data_window_base(self) -> VirtualAddress {
         self.data_window_base
+    }
+
+    /// Returns the bootstrap capability-backed VM window base.
+    #[must_use]
+    pub const fn vm_window_base(self) -> VirtualAddress {
+        self.vm_window_base
+    }
+
+    /// Returns the bootstrap capability-backed VM window size in bytes.
+    #[must_use]
+    pub const fn vm_window_size(self) -> u64 {
+        BOOTSTRAP_VM_WINDOW_SIZE
+    }
+
+    /// Returns the first address after the bootstrap VM window.
+    #[must_use]
+    pub const fn vm_window_end(self) -> VirtualAddress {
+        VirtualAddress::new(self.vm_window_base.as_u64() + BOOTSTRAP_VM_WINDOW_SIZE)
     }
 
     /// Returns the kernel-image-relative alias for a kernel address.

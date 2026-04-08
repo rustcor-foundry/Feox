@@ -6,7 +6,10 @@ use core::mem::size_of;
 use core::ptr::{addr_of, slice_from_raw_parts_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use feox_asi::{AsiOp, BatchOp, CapDelegateArgs, CapHandle, CapInfo, CapRequest};
+use feox_asi::{
+    AsiOp, BatchOp, CapDelegateArgs, CapHandle, CapInfo, CapRequest, MemError, MemMapArgs,
+    MappedRegion,
+};
 
 #[cfg(target_os = "none")]
 use super::cpu;
@@ -32,6 +35,7 @@ const SYSCALL_ERR_INVALID_ARGS: u64 = 0xFFFF_0003;
 const SYSCALL_ERR_BATCH_FAILED: u64 = 0xFFFF_0004;
 const SYSCALL_ERR_NOT_READY: u64 = 0xFFFF_0005;
 const SYSCALL_CAP_ERROR_BASE: u64 = 0x100;
+const SYSCALL_MEM_ERROR_BASE: u64 = 0x200;
 
 const SYSCALL_STACK_SIZE: usize = 16 * 1024;
 
@@ -142,6 +146,8 @@ extern "C" fn feox_syscall_dispatch(
         AsiOp::CapList => dispatch_cap_list(args_ptr.cast_mut(), args_len, out_value),
         AsiOp::CapDelegate => dispatch_cap_delegate(args_ptr, args_len, out_value),
         AsiOp::CapRelease => dispatch_cap_release(args_ptr, args_len, out_value),
+        AsiOp::MemMap => dispatch_mem_map(args_ptr, args_len, out_value),
+        AsiOp::MemUnmap => dispatch_mem_unmap(args_ptr, args_len, out_value),
         AsiOp::ProcYield => {
             push_event_if_ready("asi-proc-yield");
             write_out(out_value, 0);
@@ -259,6 +265,55 @@ fn dispatch_cap_delegate(args_ptr: *const u8, args_len: u64, out_value: *mut u64
     }
 }
 
+fn dispatch_mem_map(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<MemMapArgs>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+
+    let args = unsafe {
+        // SAFETY: length is checked against `MemMapArgs` and the pointer is non-null.
+        *(args_ptr.cast::<MemMapArgs>())
+    };
+
+    match crate::vm::mem_map_bootstrap(args) {
+        Ok(region) => {
+            write_mapped_region(args.out_region, region);
+            push_event_if_ready("asi-mem-map");
+            write_out(out_value, region.base);
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_mem_error(error.as_mem_error())
+        }
+    }
+}
+
+fn dispatch_mem_unmap(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<MappedRegion>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+
+    let region = unsafe {
+        // SAFETY: length is checked against `MappedRegion` and the pointer is non-null.
+        *(args_ptr.cast::<MappedRegion>())
+    };
+
+    match crate::vm::mem_unmap_bootstrap(region) {
+        Ok(()) => {
+            push_event_if_ready("asi-mem-unmap");
+            write_out(out_value, 0);
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_mem_error(error.as_mem_error())
+        }
+    }
+}
+
 fn dispatch_batch(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
     if args_len == 0 || args_ptr.is_null() {
         write_out(out_value, 0);
@@ -347,6 +402,49 @@ fn dispatch_batch_op(op: BatchOp, out_value: &mut u64) -> u64 {
                 }
             }
         }
+        AsiOp::MemMap => {
+            if op.args.is_null() || op.args_len != size_of::<MemMapArgs>() {
+                *out_value = 0;
+                return SYSCALL_ERR_INVALID_ARGS;
+            }
+            let args = unsafe {
+                // SAFETY: batch validation checked pointer non-null and exact size.
+                *(op.args.cast::<MemMapArgs>())
+            };
+            match crate::vm::mem_map_bootstrap(args) {
+                Ok(region) => {
+                    write_mapped_region(args.out_region, region);
+                    push_event_if_ready("asi-mem-map");
+                    *out_value = region.base;
+                    SYSCALL_OK
+                }
+                Err(error) => {
+                    *out_value = 0;
+                    syscall_mem_error(error.as_mem_error())
+                }
+            }
+        }
+        AsiOp::MemUnmap => {
+            if op.args.is_null() || op.args_len != size_of::<MappedRegion>() {
+                *out_value = 0;
+                return SYSCALL_ERR_INVALID_ARGS;
+            }
+            let region = unsafe {
+                // SAFETY: batch validation checked pointer non-null and exact size.
+                *(op.args.cast::<MappedRegion>())
+            };
+            match crate::vm::mem_unmap_bootstrap(region) {
+                Ok(()) => {
+                    push_event_if_ready("asi-mem-unmap");
+                    *out_value = 0;
+                    SYSCALL_OK
+                }
+                Err(error) => {
+                    *out_value = 0;
+                    syscall_mem_error(error.as_mem_error())
+                }
+            }
+        }
         AsiOp::CapRelease => {
             if op.args.is_null() || op.args_len != size_of::<CapHandle>() {
                 *out_value = 0;
@@ -397,8 +495,21 @@ fn write_out(out_value: *mut u64, value: u64) {
     }
 }
 
+fn write_mapped_region(out_region: *mut MappedRegion, region: MappedRegion) {
+    if !out_region.is_null() {
+        unsafe {
+            // SAFETY: the caller owns the output slot, and null is explicitly allowed.
+            *out_region = region;
+        }
+    }
+}
+
 fn syscall_cap_error(error: feox_asi::CapError) -> u64 {
     SYSCALL_CAP_ERROR_BASE + error as u64
+}
+
+fn syscall_mem_error(error: MemError) -> u64 {
+    SYSCALL_MEM_ERROR_BASE + error as u64
 }
 
 #[cfg(test)]
@@ -410,8 +521,9 @@ mod tests {
     };
     use core::mem::size_of;
     use feox_asi::{
-        AsiOp, BatchOp, CapDelegateArgs, CapError, CapHandle, CapInfo, CapRequest, PageFlags,
-        PhysicalAddress, ProcessId, SyscallResult,
+        AsiOp, BatchOp, CapDelegateArgs, CapError, CapHandle, CapInfo, CapRequest, CoreId,
+        MapFlags, MemError, MemMapArgs, PageFlags, PhysicalAddress, ProcessId,
+        SyscallResult,
     };
 
     #[test]
@@ -647,5 +759,28 @@ mod tests {
         let (_, total) = crate::capability::list_bootstrap_capabilities(&mut infos);
         assert_eq!(total, 2);
         assert!(infos.iter().any(|info| info.handle == child && info.has_parent == 1));
+    }
+
+    #[test]
+    fn mem_map_reports_invalid_flags() {
+        let _guard = crate::capability::acquire_test_lock();
+        init();
+        crate::runtime_context::claim_bootstrap_context(CoreId(0));
+        crate::capability::init_bootstrap_process(ProcessId(0));
+        let args = MemMapArgs {
+            handle: CapHandle::default(),
+            offset_bytes: 0,
+            length_bytes: 0x1000,
+            flags: MapFlags::READ | MapFlags::UNCACHEABLE,
+            out_region: core::ptr::null_mut(),
+        };
+        let mut out = 0;
+        let code = feox_syscall_dispatch(
+            AsiOp::MemMap as u64,
+            (&raw const args).cast(),
+            size_of::<MemMapArgs>() as u64,
+            &mut out,
+        );
+        assert_eq!(code, super::SYSCALL_MEM_ERROR_BASE + MemError::InvalidFlags as u64);
     }
 }

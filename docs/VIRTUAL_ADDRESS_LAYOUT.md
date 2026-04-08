@@ -16,7 +16,7 @@ is still open.
 
 ## What Is Decided
 
-The bootstrap runtime owns three named higher-half windows. These are defined
+The bootstrap runtime owns four named higher-half windows. These are defined
 as constants in `kernel/feox-xokernel/src/memory.rs` and are part of the
 `BootstrapRuntimeLayout` struct.
 
@@ -39,9 +39,16 @@ as constants in `kernel/feox-xokernel/src/memory.rs` and are part of the
     The kernel-owned transition data page is mapped here. This page carries
     the BootstrapRuntimeState struct across the CR3 switch until its
     contents are promoted into the retained context statics.
+
+0xFFFF_9000_0400_0000   BOOTSTRAP_VM_WINDOW_BASE
+    Bootstrap capability-backed VM window.
+    This is a temporary 64 MiB higher-half arena for the first retained
+    `mem_map` / `mem_unmap` lane. It is bootstrap-scoped, fixed-size,
+    and intentionally separate from any future permanent direct map,
+    MMIO layout, or per-process address-space plan.
 ```
 
-These three windows are not yet the permanent kernel virtual layout. They are
+These four windows are not yet the permanent kernel virtual layout. They are
 the bootstrap layout — the minimal higher-half footprint that the transition
 root needs to carry the kernel from the identity-mapped post-switch entry point
 into a stable higher-half `runtime-active` state.
@@ -100,6 +107,21 @@ Feox has not yet committed to a direct-map region or size. This decision
 should be made before the early frame allocator or page-table layer needs
 to access arbitrary physical frames through a virtual window.
 
+### Bootstrap VM lane note
+
+The new bootstrap VM window is a narrow tactical decision, not a permanent
+layout commitment.
+
+The current bootstrap `mem_map` / `mem_unmap` lane uses:
+
+- a fixed 64 MiB window
+- 4 KiB mappings only
+- a fixed-capacity retained mapping table
+- physical-memory capabilities only in the current implementation pass
+
+That keeps the first syscall-facing mapping path real without forcing an early
+decision on the permanent direct map or MMIO layout.
+
 ### 2. Permanent kernel virtual layout
 
 The three bootstrap windows are transition-time only. A permanent kernel
@@ -146,13 +168,14 @@ follow from the decision, not the other way around.
 
 ## Bottom Line
 
-Three windows are currently locked in code and proven under QEMU:
+Four windows are now locked in code for the bootstrap lane:
 
 | Window | Base | Purpose |
 |--------|------|---------|
 | Kernel image alias | `0xFFFF_9000_0000_0000` | Higher-half code, GDT, IDT |
 | Stack window | `0xFFFF_9000_0200_0000` | Bootstrap transition stack |
 | Data window | `0xFFFF_9000_0300_0000` | Runtime state data page |
+| Bootstrap VM window | `0xFFFF_9000_0400_0000` | First capability-backed `mem_map` arena |
 
 Everything above that — direct map, permanent kernel layout, user split, MMIO
 windows — is still open and should be decided before the layout grows.

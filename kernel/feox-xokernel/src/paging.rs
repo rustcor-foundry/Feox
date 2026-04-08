@@ -281,6 +281,45 @@ impl PageTableRoot {
         Ok(())
     }
 
+    /// Ensures all intermediate page tables needed for a 4 KiB-mapped range exist.
+    ///
+    /// This allocates any missing PML4/PDPT/PD/PT structures for every 2 MiB
+    /// chunk touched by the supplied range, but does not install any leaf PTEs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Map4kError`] when a required table is missing, a huge-page
+    /// entry blocks the walk, or the paging allocator runs out of table frames.
+    pub fn prepare_4k_pages_with(
+        self,
+        source: &mut impl PageTableFrameMutSource,
+        allocator: &mut impl PageTableFrameAllocator,
+        start: VirtualAddress,
+        length_bytes: u64,
+    ) -> Result<(), Map4kError> {
+        if length_bytes == 0 {
+            return Ok(());
+        }
+
+        let end = start
+            .as_u64()
+            .checked_add(length_bytes)
+            .ok_or(Map4kError::OutOfTableFrames)?;
+        let mut current = start.as_u64();
+        while current < end {
+            let virtual_address = VirtualAddress::new(current);
+            let indices = virtual_address.page_table_indices();
+            let pdpt =
+                ensure_child_table(source, allocator, self.frame, indices.p4, PageWalkLevel::Pml4)?;
+            let pd =
+                ensure_child_table(source, allocator, pdpt, indices.p3, PageWalkLevel::Pdpt)?;
+            let _pt = ensure_child_table(source, allocator, pd, indices.p2, PageWalkLevel::Pd)?;
+            current = current.saturating_add(1 << 21);
+        }
+
+        Ok(())
+    }
+
     /// Removes a 4 KiB mapping and returns the previously installed leaf entry.
     ///
     /// # Errors
