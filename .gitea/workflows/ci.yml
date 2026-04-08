@@ -108,3 +108,15 @@ jobs:
 
       - name: Run bounded x86_64 QEMU smoke boot
         run: pwsh -File ./tools/run-qemu-smoke.ps1 -Architecture x86_64 -TimeoutSeconds 20 -SuccessMarker "stage: runtime service idle"
+
+      - name: Dump QEMU smoke logs
+        if: always()
+        run: |
+          echo "== target/feox-qemu =="
+          ls -la target/feox-qemu || true
+          echo "== debug log tail =="
+          tail -n 120 target/feox-qemu/x86_64-debug.debug.log || true
+          echo "== stdout log tail =="
+          tail -n 80 target/feox-qemu/x86_64-stdout.debug.log || true
+          echo "== stderr log tail =="
+          tail -n 80 target/feox-qemu/x86_64-stderr.debug.log || true

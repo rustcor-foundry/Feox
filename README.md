@@ -204,6 +204,8 @@ powershell -ExecutionPolicy Bypass -File .\tools\run-qemu.ps1
 
 See [docs/TESTING.md](docs/TESTING.md) for the real operator checklist and
 host prerequisites, including the `lx-ws01` CI runner contract.
+See [docs/CI_RUNNER_SETUP.md](docs/CI_RUNNER_SETUP.md) for the runner-specific
+Linux host setup details.
 
 ## Boot Harness
 
