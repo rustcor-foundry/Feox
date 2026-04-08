@@ -38,6 +38,9 @@ The PowerShell harnesses now search common Linux paths for QEMU and OVMF in
 addition to the existing Windows paths, so the same scripts are used on both
 the workstation and the CI runner.
 
+See `docs/CI_RUNNER_SETUP.md` for the explicit `lx-ws01` runner contract and
+expected Linux package/tool posture.
+
 ## Manual Bootstrap Rail
 
 Stage the EFI tree:
