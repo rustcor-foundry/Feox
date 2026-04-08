@@ -6,6 +6,7 @@ use core::arch::global_asm;
 
 use crate::arch;
 use crate::bootabi::BootHandoff;
+use crate::capability;
 use crate::memory;
 use crate::memory::MemoryRegionKind;
 use crate::paging;
@@ -704,6 +705,7 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
     // store_* call is made. The CAS in claim_bootstrap_context panics in
     // debug builds if a second core tries to claim.
     crate::runtime_context::claim_bootstrap_context(config.bootstrap_core);
+    capability::init_bootstrap_process(feox_asi::ProcessId(0));
     let kernel_image = memory::kernel_image();
     let pml4 = memory::active_page_table_root();
 
@@ -730,14 +732,37 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
     );
     match handoff {
         Some(handoff) => {
+            let registered_resources =
+                capability::seed_bootstrap_resources_from_handoff(handoff.memory_map())
+                    .unwrap_or(0);
+            let mut minted_capabilities = 0usize;
+            let mut resource_index = 0usize;
+            while resource_index < capability::resource_count_public() {
+                if capability::mint_bootstrap_root_capability(
+                    crate::capability::ResourceId(resource_index as u32),
+                    feox_asi::CapPermissions::all(),
+                )
+                .is_ok()
+                {
+                    minted_capabilities += 1;
+                }
+                resource_index += 1;
+            }
+            crate::runtime_context::push_event("bootstrap-capabilities-ready");
             let runtime_layout = memory::BootstrapRuntimeLayout::new();
             crate::kprintln!(
                 "memory: boot_map regions={} usable={} MiB top={:#018x}",
                 handoff.memory_map().len(),
                 handoff.usable_bytes() / (1024 * 1024),
-                handoff
-                    .highest_physical_address()
-                    .map_or(0, |address| address.as_u64())
+                    handoff
+                        .highest_physical_address()
+                        .map_or(0, |address| address.as_u64())
+            );
+            crate::kprintln!(
+                "capability: bootstrap_owner={} resources={} active_caps={}",
+                capability::owner().0,
+                registered_resources,
+                minted_capabilities
             );
 
             let mut reservations =

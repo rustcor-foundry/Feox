@@ -14,7 +14,7 @@ mod selected {
             read_cr3, read_rsp, switch_page_table_root_and_jump, switch_stack_and_jump,
             trigger_breakpoint,
         },
-        debugcon, gdt, idt, panic, serial,
+        debugcon, gdt, idt, panic, serial, syscall,
     };
 }
 
@@ -38,6 +38,9 @@ pub fn early_init() {
     // set here — before any page-table work — to close the window where a
     // kernel bug could accidentally execute or read a user-mode page.
     selected::enable_cr4_security_bits();
+    // Install the typed ASI syscall transport once the descriptor tables and
+    // kernel segments are live.
+    selected::syscall::init();
 }
 
 /// Initializes the selected architecture's early console.

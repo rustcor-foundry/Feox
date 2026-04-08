@@ -58,6 +58,12 @@ most for a low-level runtime:
 - NVMe futures remain core-local and intentionally `!Send`
 - fail-all paths complete every in-flight operation, even before waker
   registration
+- the x86_64 lane now has a real ASI `SYSCALL` / `SYSRET` transport with
+  shared opcode and batch ABI types
+- the first bootstrap capability table now exists, with generation-checked
+  handles and initial `cap_list` / `cap_release` syscall coverage
+- bootstrap capabilities are now backed by a real resource registry and
+  delegation tree, with first `cap_delegate` coverage
 
 ## Workstation Entry
 
@@ -208,7 +214,6 @@ $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 - [Workstation Entry](docs/WORKSTATION_ENTRY.md)
 - [Testing](docs/TESTING.md)
 - [Development Progress](DEV_PROGRESS.md)
-- [Detailed Status](STATUS.md)
 - [ASI Spec](ASI-SPEC.md)
 - [Async Runtime Notes](ASYNC-RUNTIME.md)
 - [Capability System](CAPABILITY-SYSTEM.md)

@@ -6,6 +6,7 @@
 
 pub mod arch;
 pub mod boot;
+pub mod capability;
 pub mod console;
 pub mod memory;
 pub mod paging;
