@@ -25,6 +25,8 @@ This document is the running development record for Feox.
 - expanded `.gitea/workflows/ci.yml` so `lx-ws01` now runs host tests, real target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
 - taught `tools/check-host.ps1` and `tools/run-qemu.ps1` to discover common Linux QEMU and OVMF paths, then added `tools/run-qemu-smoke.ps1` as the normal bounded CI boot wrapper
 - attempted a live bootstrap VM self-test in the higher-half runtime path and confirmed the current VM helpers still rely on page-table-access assumptions that are safe in host tests but not yet hardened for live post-handoff use; reverted that probe and documented the limitation explicitly
+- added `docs/PAGE_TABLE_ACCESS_PLAN.md` to define the next narrow design step: a bootstrap page-table access window for live higher-half paging operations without committing to a permanent direct map yet
+- reserved a 16 KiB bootstrap page-table access window at `0xFFFF_9000_0800_0000` in `memory.rs` and `docs/VIRTUAL_ADDRESS_LAYOUT.md` so the next implementation slice has an explicit live paging access target
 
 ### 2026-04-07
 

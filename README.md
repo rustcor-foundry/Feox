@@ -259,6 +259,7 @@ $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 - [Boot Memory Review](docs/BOOT_MEMORY_REVIEW.md)
 - [Memory Ownership Phases](docs/MEMORY_OWNERSHIP_PHASES.md)
 - [Page-Table Plan](docs/PAGE_TABLE_PLAN.md)
+- [Page-Table Access Plan](docs/PAGE_TABLE_ACCESS_PLAN.md)
 - [Exokernel Research Framework](docs/EXOKERNEL_RESEARCH_FRAMEWORK.md)
 - [Code Review](docs/CODE_REVIEW.md)
 - [Portfolio Positioning](docs/PORTFOLIO_POSITIONING.md)

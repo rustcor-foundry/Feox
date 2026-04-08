@@ -16,7 +16,7 @@ is still open.
 
 ## What Is Decided
 
-The bootstrap runtime owns four named higher-half windows. These are defined
+The bootstrap runtime owns five named higher-half windows. These are defined
 as constants in `kernel/feox-xokernel/src/memory.rs` and are part of the
 `BootstrapRuntimeLayout` struct.
 
@@ -46,9 +46,16 @@ as constants in `kernel/feox-xokernel/src/memory.rs` and are part of the
     `mem_map` / `mem_unmap` lane. It is bootstrap-scoped, fixed-size,
     and intentionally separate from any future permanent direct map,
     MMIO layout, or per-process address-space plan.
+
+0xFFFF_9000_0800_0000   BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE
+    Bootstrap page-table access window.
+    This is a small 16 KiB reserved higher-half range intended for future
+    temporary aliases of live page-table frames after the higher-half handoff.
+    It exists to replace raw identity dereference in post-handoff paging work
+    without forcing an immediate permanent direct-map decision.
 ```
 
-These four windows are not yet the permanent kernel virtual layout. They are
+These five windows are not yet the permanent kernel virtual layout. They are
 the bootstrap layout — the minimal higher-half footprint that the transition
 root needs to carry the kernel from the identity-mapped post-switch entry point
 into a stable higher-half `runtime-active` state.
@@ -122,6 +129,14 @@ The current bootstrap `mem_map` / `mem_unmap` lane uses:
 That keeps the first syscall-facing mapping path real without forcing an early
 decision on the permanent direct map or MMIO layout.
 
+### Page-table access note
+
+The page-table access window is also a tactical bootstrap decision.
+
+It does not mean Feox has chosen a permanent direct map. It means the next
+post-handoff paging step now has an explicit reserved address-space target for
+temporary page-table-frame access.
+
 ### 2. Permanent kernel virtual layout
 
 The three bootstrap windows are transition-time only. A permanent kernel
@@ -168,7 +183,7 @@ follow from the decision, not the other way around.
 
 ## Bottom Line
 
-Four windows are now locked in code for the bootstrap lane:
+Five windows are now locked in code for the bootstrap lane:
 
 | Window | Base | Purpose |
 |--------|------|---------|
@@ -176,6 +191,7 @@ Four windows are now locked in code for the bootstrap lane:
 | Stack window | `0xFFFF_9000_0200_0000` | Bootstrap transition stack |
 | Data window | `0xFFFF_9000_0300_0000` | Runtime state data page |
 | Bootstrap VM window | `0xFFFF_9000_0400_0000` | First capability-backed `mem_map` arena |
+| Page-table access window | `0xFFFF_9000_0800_0000` | Future temporary aliases for live page-table frames |
 
 Everything above that — direct map, permanent kernel layout, user split, MMIO
 windows — is still open and should be decided before the layout grows.

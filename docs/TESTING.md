@@ -99,3 +99,7 @@ behavior is noisy or inconsistent.
 
 For CI, `tools/run-qemu-smoke.ps1` uses the same harness in bounded mode and
 asserts that the boot log reaches the configured success marker.
+
+The current known gap after that smoke lane is documented in
+`docs/PAGE_TABLE_ACCESS_PLAN.md`: live post-handoff use of the bootstrap VM
+helpers still needs an explicit page-table access model.
