@@ -40,6 +40,8 @@ the workstation and the CI runner.
 
 See `docs/CI_RUNNER_SETUP.md` for the explicit `lx-ws01` runner contract and
 expected Linux package/tool posture.
+Use `docs/CI_TRIAGE.md` as the first-response checklist when a Feox CI lane
+fails on that runner.
 
 ## Manual Bootstrap Rail
 

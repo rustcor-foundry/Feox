@@ -103,8 +103,25 @@ jobs:
       - name: Confirm PowerShell is available
         run: pwsh --version
 
+      - name: Print runner tool versions
+        run: |
+          rustc --version
+          cargo --version
+          qemu-system-x86_64 --version || true
+          pwsh --version
+
       - name: Check x86_64 boot-host prerequisites
         run: pwsh -File ./tools/check-host.ps1 -Architecture x86_64
+
+      - name: Print resolved firmware paths
+        run: |
+          echo "FEOX_QEMU=${FEOX_QEMU:-<unset>}"
+          echo "FEOX_OVMF_CODE=${FEOX_OVMF_CODE:-<unset>}"
+          echo "FEOX_OVMF_VARS=${FEOX_OVMF_VARS:-<unset>}"
+          ls -la /usr/share/OVMF || true
+          ls -la /usr/share/edk2/x64 || true
+          ls -la /usr/share/edk2-ovmf/x64 || true
+          ls -la /usr/share/qemu || true
 
       - name: Run bounded x86_64 QEMU smoke boot
         run: pwsh -File ./tools/run-qemu-smoke.ps1 -Architecture x86_64 -TimeoutSeconds 20 -SuccessMarker "stage: runtime service idle"
