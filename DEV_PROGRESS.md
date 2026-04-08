@@ -22,6 +22,7 @@ This document is the running development record for Feox.
 - wired bootstrap capability minting for discovered memory regions and extended the syscall path with working `cap_list` and `cap_release` handling
 - extended A-04 with a bootstrap resource registry, delegation tree, cascade release, and first `cap_delegate` syscall handling
 - extended A-04 again with shared `CapRequest` / `PageFlags` ABI, allocatable physical-memory resources, bootstrap `cap_request` handling for physical pages, and end-to-end syscall coverage
+- added `kernel/feox-xokernel/src/vm.rs` with the first capability-backed 4 KiB map helper, so verified physical-memory capabilities now drive a real page-table install in host tests
 - added test-only capability-state locking so shared bootstrap globals stay isolated across parallel unit tests
 - re-verified `cargo test`, `cargo kernel`, and `cargo loader`
 - updated `README.md`, `docs/CURRENT_STATUS.md`, and `docs/WORKSTATION_ENTRY.md` so the repo no longer points at a missing `STATUS.md`
@@ -156,5 +157,5 @@ This document is the running development record for Feox.
 
 ## Next Focus
 
-- **Capability-backed memory operations**: route the new physical-page `cap_request` results into real map/unmap work so verified capabilities gate VM actions
+- **Live memory mapping lane**: wire the new capability-backed 4 KiB map helper into bootstrap `mem_map` / `mem_unmap` operations with retained VM state and syscall exposure
 - decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices

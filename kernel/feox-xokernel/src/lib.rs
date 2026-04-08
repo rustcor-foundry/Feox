@@ -11,6 +11,7 @@ pub mod console;
 pub mod memory;
 pub mod paging;
 pub mod runtime_context;
+pub mod vm;
 
 pub use feox_asi as asi;
 #[cfg(feature = "runtime")]

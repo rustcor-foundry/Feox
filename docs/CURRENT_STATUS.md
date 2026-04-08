@@ -11,7 +11,7 @@ Last updated: 2026-04-07
 
 ## What Is True Right Now
 
-- `cargo test` passes — 72 tests across all crates
+- `cargo test` passes — 74 tests across all crates
 - `cargo kernel` passes
 - `cargo loader` passes
 - `tools/stage-efi.ps1` succeeds and produces a staged EFI tree under `target/feox-efi`
@@ -35,7 +35,7 @@ Last updated: 2026-04-07
 - **A-01**: `feox-nvme` replaced `Vec` with const-generic `InflightMap<const N>`; crate is now fully `no_std`
 - **A-02**: `feox-async` now has `RunQueue`, `TaskHeader` with type-erased poll, `TaskCell<F>`, `SingleCoreExecutor`
 - **A-03**: x86_64 ASI transport now installs `SYSCALL` / `SYSRET`, programs `IA32_STAR` / `IA32_LSTAR` / `IA32_FMASK`, carries a dedicated syscall stack, and dispatches typed ASI opcodes through shared `feox-asi` syscall and batch types
-- **A-04**: bootstrap capability layer now has a 256-slot table, a registered physical-memory resource registry, a delegation tree with cascade release, working `cap_request` for physical pages, and first `cap_list` / `cap_delegate` / `cap_release` syscall handling
+- **A-04**: bootstrap capability layer now has a 256-slot table, a registered physical-memory resource registry, a delegation tree with cascade release, working `cap_request` for physical pages, first capability-backed 4 KiB map helper coverage, and first `cap_list` / `cap_delegate` / `cap_release` syscall handling
 - **A-05**: `PageTableEdges` frame-tree sidecar records every intermediate allocation for future reclaim
 
 ### Deferred (next sessions)
@@ -56,7 +56,7 @@ Last updated: 2026-04-07
 
 - the retained runtime still idles after the command queue drains — broader subsystem bring-up not yet started
 - virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows)
-- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population, and no capability-checked virtual memory mapping path yet
+- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population, and no live syscall-facing virtual memory mapping path yet
 
 ## Recommended Entry Points
 
@@ -71,5 +71,5 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Capability-backed memory operations** — turn the new `cap_request` physical-page lane into a real map/unmap path so requested capabilities gate actual VM work
+1. **Live memory mapping lane** — wire the new capability-backed 4 KiB map helper into a real bootstrap `mem_map` / `mem_unmap` entry path with retained VM state
 2. **Virtual address layout** — lock the direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`
