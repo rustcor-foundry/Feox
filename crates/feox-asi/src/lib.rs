@@ -171,6 +171,100 @@ pub enum BatchError {
     InvalidBatch,
 }
 
+/// Fixed-size inline string for bootstrap IPC names and similar identifiers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct AsiString {
+    /// Number of bytes currently used in `bytes`.
+    pub len: u8,
+    /// Inline storage.
+    pub bytes: [u8; 63],
+}
+
+impl AsiString {
+    /// Empty inline string.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            len: 0,
+            bytes: [0; 63],
+        }
+    }
+}
+
+impl Default for AsiString {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Physical-page allocation flags used by `cap_request`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct PageFlags(pub u32);
+
+impl PageFlags {
+    /// Request 2 MiB huge pages.
+    pub const HUGE_2M: Self = Self(1 << 0);
+    /// Request 1 GiB huge pages.
+    pub const HUGE_1G: Self = Self(1 << 1);
+    /// Request physically contiguous pages.
+    pub const CONTIGUOUS: Self = Self(1 << 2);
+
+    /// Empty page flags.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Returns whether `self` contains all bits in `other`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+/// Typed request payload for `cap_request`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub enum CapRequest {
+    /// Access to a PCI BAR.
+    DeviceBar {
+        /// PCI location.
+        pci_addr: PciAddress,
+        /// BAR index.
+        bar_index: u8,
+    },
+    /// A contiguous DMA-safe physical allocation.
+    DmaPool {
+        /// Requested size in bytes.
+        size_bytes: usize,
+        /// Required alignment.
+        alignment: usize,
+        /// Device allowed to access the pool.
+        device: PciAddress,
+    },
+    /// Ownership of one MSI-X vector.
+    MsixVector {
+        /// PCI location.
+        pci_addr: PciAddress,
+        /// Vector number.
+        vector: u16,
+    },
+    /// A range of physical pages.
+    PhysicalPages {
+        /// Number of 4 KiB pages requested.
+        num_pages: usize,
+        /// Allocation flags.
+        flags: PageFlags,
+    },
+    /// An on-demand IPC endpoint.
+    IpcEndpoint {
+        /// Endpoint name.
+        name: AsiString,
+    },
+}
+
 /// Arguments for `cap_delegate`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
