@@ -349,6 +349,32 @@ pub struct MappedRegion {
     pub flags: MapFlags,
 }
 
+/// Arguments for `mem_vtop`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct MemVtoPArgs {
+    /// Capability expected to own the translated address.
+    pub handle: CapHandle,
+    /// Virtual address to resolve.
+    pub virtual_address: u64,
+    /// Writable output location for the resolved physical address.
+    pub out_physical_address: *mut PhysicalAddress,
+}
+
+/// Arguments for `mem_vtop_batch`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct MemVtoPBatchArgs {
+    /// Capability expected to own all translated addresses.
+    pub handle: CapHandle,
+    /// Input virtual-address array.
+    pub virtual_addresses: *const u64,
+    /// Output physical-address array.
+    pub physical_addresses: *mut PhysicalAddress,
+    /// Number of elements in both arrays.
+    pub count: usize,
+}
+
 /// Memory-mapping syscall error codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u64)]
@@ -365,6 +391,10 @@ pub enum MemError {
     AlignmentViolation = 4,
     /// Offset plus length exceeded the resource bounds.
     OffsetOutOfRange = 5,
+    /// The supplied capability cannot be used for address translation.
+    NotDmaCapable = 6,
+    /// The supplied virtual address is not part of the capability-backed mapping set.
+    AddressNotMapped = 7,
 }
 
 /// Capability resource type granted by the kernel.
@@ -554,7 +584,7 @@ pub struct CapHandle {
 mod tests {
     use super::{
         AsiOp, BatchOp, CapInfo, CapPermissions, CoreId, CoreSet, MapFlags, MemMapArgs,
-        MappedRegion, PhysicalAddress, SyscallResult,
+        MemVtoPArgs, MappedRegion, PhysicalAddress, SyscallResult,
     };
     use core::mem::size_of;
 
@@ -583,6 +613,7 @@ mod tests {
         assert_eq!(size_of::<CapInfo>(), 36);
         assert_eq!(size_of::<MappedRegion>(), 24);
         assert_eq!(size_of::<MemMapArgs>(), 40);
+        assert_eq!(size_of::<MemVtoPArgs>(), 24);
     }
 
     #[test]

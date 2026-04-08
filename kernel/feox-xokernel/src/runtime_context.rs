@@ -437,6 +437,30 @@ pub fn remove_vm_mapping(region: MappedRegion) -> Option<BootstrapVmMapping> {
     }
 }
 
+/// Finds the retained bootstrap VM mapping that owns `virtual_address` for the
+/// supplied capability handle.
+#[must_use]
+pub fn find_vm_mapping_for_address(
+    handle: CapHandle,
+    virtual_address: u64,
+) -> Option<BootstrapVmMapping> {
+    assert_context_claimed();
+    unsafe {
+        let mut index = 0usize;
+        while index < BOOTSTRAP_VM_MAPPING_CAPACITY {
+            if let Some(mapping) = BOOTSTRAP_VM_MAPPINGS[index] {
+                let start = mapping.region.base;
+                let end = mapping.region.base.saturating_add(mapping.region.length_bytes);
+                if mapping.handle == handle && virtual_address >= start && virtual_address < end {
+                    return Some(mapping);
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
 /// Finds the first non-overlapping page-aligned region inside the bootstrap VM
 /// window that can satisfy `length_bytes`.
 #[must_use]
@@ -487,7 +511,7 @@ pub fn allocate_vm_region(
 }
 
 #[cfg(test)]
-fn reset_for_tests() {
+pub(crate) fn reset_for_tests() {
     // Ensure the context is claimed before the reset so that subsequent
     // store/enqueue/push calls pass the assert_context_claimed guard.
     claim_bootstrap_context(CoreId(0));
@@ -512,11 +536,12 @@ fn reset_for_tests() {
 mod tests {
     use super::{
         BootstrapVmMapping, claim_bootstrap_context, dequeue_command, enqueue_command, events,
-        push_event, ready_summary, record_vm_mapping, remove_vm_mapping, reset_for_tests,
-        runtime_readiness, service, service_heartbeat, service_report, store_ready_summary,
-        store_runtime_readiness, store_service, store_service_heartbeat, store_service_report,
-        vm_mappings, RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand,
-        RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
+        find_vm_mapping_for_address, push_event, ready_summary, record_vm_mapping,
+        remove_vm_mapping, reset_for_tests, runtime_readiness, service, service_heartbeat,
+        service_report, store_ready_summary, store_runtime_readiness, store_service,
+        store_service_heartbeat, store_service_report, vm_mappings, RuntimeReadinessState,
+        RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
+        RuntimeServiceReport, RuntimeServiceState,
     };
     use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
@@ -745,5 +770,42 @@ mod tests {
         assert!(vm_mappings().iter().flatten().any(|entry| *entry == mapping));
         assert_eq!(remove_vm_mapping(mapping.region), Some(mapping));
         assert_eq!(remove_vm_mapping(mapping.region), None);
+    }
+
+    #[test]
+    fn bootstrap_vm_lookup_matches_handle_and_address() {
+        reset_for_tests();
+        let mapping = BootstrapVmMapping {
+            region: MappedRegion {
+                base: 0xFFFF_9000_0400_0000,
+                length_bytes: 0x3000,
+                flags: MapFlags::READ,
+            },
+            handle: CapHandle {
+                id: 9,
+                generation: 2,
+            },
+            offset_bytes: 0x2000,
+        };
+
+        assert_eq!(record_vm_mapping(mapping), Ok(()));
+        assert_eq!(
+            find_vm_mapping_for_address(mapping.handle, mapping.region.base + 0x1000),
+            Some(mapping)
+        );
+        assert_eq!(
+            find_vm_mapping_for_address(
+                CapHandle {
+                    id: 9,
+                    generation: 3,
+                },
+                mapping.region.base + 0x1000,
+            ),
+            None
+        );
+        assert_eq!(
+            find_vm_mapping_for_address(mapping.handle, mapping.region.base + mapping.region.length_bytes),
+            None
+        );
     }
 }

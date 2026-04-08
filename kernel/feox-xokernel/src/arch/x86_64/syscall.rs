@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use feox_asi::{
     AsiOp, BatchOp, CapDelegateArgs, CapHandle, CapInfo, CapRequest, MemError, MemMapArgs,
-    MappedRegion,
+    MemVtoPArgs, MemVtoPBatchArgs, MappedRegion, PhysicalAddress,
 };
 
 #[cfg(target_os = "none")]
@@ -148,6 +148,8 @@ extern "C" fn feox_syscall_dispatch(
         AsiOp::CapRelease => dispatch_cap_release(args_ptr, args_len, out_value),
         AsiOp::MemMap => dispatch_mem_map(args_ptr, args_len, out_value),
         AsiOp::MemUnmap => dispatch_mem_unmap(args_ptr, args_len, out_value),
+        AsiOp::MemVtoP => dispatch_mem_vtop(args_ptr, args_len, out_value),
+        AsiOp::MemVtoPBatch => dispatch_mem_vtop_batch(args_ptr, args_len, out_value),
         AsiOp::ProcYield => {
             push_event_if_ready("asi-proc-yield");
             write_out(out_value, 0);
@@ -314,6 +316,55 @@ fn dispatch_mem_unmap(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -
     }
 }
 
+fn dispatch_mem_vtop(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<MemVtoPArgs>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+
+    let args = unsafe {
+        // SAFETY: length is checked against `MemVtoPArgs` and the pointer is non-null.
+        *(args_ptr.cast::<MemVtoPArgs>())
+    };
+
+    match crate::vm::mem_vtop_bootstrap(args) {
+        Ok(physical_address) => {
+            write_physical_address(args.out_physical_address, physical_address);
+            push_event_if_ready("asi-mem-vtop");
+            write_out(out_value, physical_address.0);
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_mem_error(error.as_mem_error())
+        }
+    }
+}
+
+fn dispatch_mem_vtop_batch(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<MemVtoPBatchArgs>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+
+    let args = unsafe {
+        // SAFETY: length is checked against `MemVtoPBatchArgs` and the pointer is non-null.
+        *(args_ptr.cast::<MemVtoPBatchArgs>())
+    };
+
+    match crate::vm::mem_vtop_batch_bootstrap(args) {
+        Ok(count) => {
+            push_event_if_ready("asi-mem-vtop-batch");
+            write_out(out_value, count as u64);
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_mem_error(error.as_mem_error())
+        }
+    }
+}
+
 fn dispatch_batch(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
     if args_len == 0 || args_ptr.is_null() {
         write_out(out_value, 0);
@@ -445,6 +496,49 @@ fn dispatch_batch_op(op: BatchOp, out_value: &mut u64) -> u64 {
                 }
             }
         }
+        AsiOp::MemVtoP => {
+            if op.args.is_null() || op.args_len != size_of::<MemVtoPArgs>() {
+                *out_value = 0;
+                return SYSCALL_ERR_INVALID_ARGS;
+            }
+            let args = unsafe {
+                // SAFETY: batch validation checked pointer non-null and exact size.
+                *(op.args.cast::<MemVtoPArgs>())
+            };
+            match crate::vm::mem_vtop_bootstrap(args) {
+                Ok(physical_address) => {
+                    write_physical_address(args.out_physical_address, physical_address);
+                    push_event_if_ready("asi-mem-vtop");
+                    *out_value = physical_address.0;
+                    SYSCALL_OK
+                }
+                Err(error) => {
+                    *out_value = 0;
+                    syscall_mem_error(error.as_mem_error())
+                }
+            }
+        }
+        AsiOp::MemVtoPBatch => {
+            if op.args.is_null() || op.args_len != size_of::<MemVtoPBatchArgs>() {
+                *out_value = 0;
+                return SYSCALL_ERR_INVALID_ARGS;
+            }
+            let args = unsafe {
+                // SAFETY: batch validation checked pointer non-null and exact size.
+                *(op.args.cast::<MemVtoPBatchArgs>())
+            };
+            match crate::vm::mem_vtop_batch_bootstrap(args) {
+                Ok(count) => {
+                    push_event_if_ready("asi-mem-vtop-batch");
+                    *out_value = count as u64;
+                    SYSCALL_OK
+                }
+                Err(error) => {
+                    *out_value = 0;
+                    syscall_mem_error(error.as_mem_error())
+                }
+            }
+        }
         AsiOp::CapRelease => {
             if op.args.is_null() || op.args_len != size_of::<CapHandle>() {
                 *out_value = 0;
@@ -504,6 +598,15 @@ fn write_mapped_region(out_region: *mut MappedRegion, region: MappedRegion) {
     }
 }
 
+fn write_physical_address(out_physical_address: *mut PhysicalAddress, physical_address: PhysicalAddress) {
+    if !out_physical_address.is_null() {
+        unsafe {
+            // SAFETY: the caller owns the output slot, and null is explicitly allowed.
+            *out_physical_address = physical_address;
+        }
+    }
+}
+
 fn syscall_cap_error(error: feox_asi::CapError) -> u64 {
     SYSCALL_CAP_ERROR_BASE + error as u64
 }
@@ -521,8 +624,9 @@ mod tests {
     };
     use core::mem::size_of;
     use feox_asi::{
-        AsiOp, BatchOp, CapDelegateArgs, CapError, CapHandle, CapInfo, CapRequest, CoreId,
-        MapFlags, MemError, MemMapArgs, PageFlags, PhysicalAddress, ProcessId,
+        AsiOp, BatchOp, CapDelegateArgs, CapError, CapHandle, CapInfo, CapPermissions,
+        CapRequest, CoreId, MapFlags, MemError, MemMapArgs, MemVtoPArgs, PageFlags,
+        PhysicalAddress, ProcessId,
         SyscallResult,
     };
 
@@ -782,5 +886,40 @@ mod tests {
             &mut out,
         );
         assert_eq!(code, super::SYSCALL_MEM_ERROR_BASE + MemError::InvalidFlags as u64);
+    }
+
+    #[test]
+    fn mem_vtop_reports_unmapped_address() {
+        let _guard = crate::capability::acquire_test_lock();
+        init();
+        crate::runtime_context::claim_bootstrap_context(CoreId(0));
+        crate::capability::init_bootstrap_process(ProcessId(0));
+        let resource_id =
+            crate::capability::register_bootstrap_memory_resource(PhysicalAddress(0x2000), 0x2000)
+                .expect("resource");
+        let handle = crate::capability::mint_bootstrap_root_capability(
+            resource_id,
+            CapPermissions::READ,
+        );
+        let handle = handle.expect("handle");
+        let mut physical = PhysicalAddress(0);
+        let args = MemVtoPArgs {
+            handle,
+            virtual_address: crate::memory::BOOTSTRAP_VM_WINDOW_BASE,
+            out_physical_address: &mut physical,
+        };
+        let mut out = 0;
+        let code = feox_syscall_dispatch(
+            AsiOp::MemVtoP as u64,
+            (&raw const args).cast(),
+            size_of::<MemVtoPArgs>() as u64,
+            &mut out,
+        );
+        assert_eq!(
+            code,
+            super::SYSCALL_MEM_ERROR_BASE + MemError::AddressNotMapped as u64
+        );
+        assert_eq!(out, 0);
+        assert_eq!(physical, PhysicalAddress(0));
     }
 }
