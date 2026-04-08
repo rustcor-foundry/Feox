@@ -59,6 +59,7 @@ Last updated: 2026-04-08
 - the retained runtime still idles after the command queue drains — broader subsystem bring-up not yet started
 - permanent virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows)
 - the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population beyond physical memory, and the memory lane is still bootstrap-window-only rather than a real per-process VM subsystem
+- the new bootstrap VM lane is proven in host tests and syscall/unit coverage, but live post-handoff use still depends on page-table-access assumptions that are not yet hardened for the higher-half runtime path
 
 ## Recommended Entry Points
 

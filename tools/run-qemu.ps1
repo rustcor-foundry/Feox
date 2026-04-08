@@ -249,6 +249,11 @@ try {
             throw "QEMU exited with status $($process.ExitCode)."
         }
 
+        # Give the debug-console and stdio redirects a brief moment to flush
+        # after a bounded stop so success-marker checks do not race the final
+        # log write on slower hosts.
+        Start-Sleep -Milliseconds 750
+
         $logSources = @()
         if (Test-Path $debugLog) {
             $logSources += Get-Content $debugLog -Raw
