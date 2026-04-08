@@ -19,6 +19,9 @@ This document is the running development record for Feox.
 - added bootstrap `mem_map` / `mem_unmap` helpers in `kernel/feox-xokernel/src/vm.rs` for physical-memory capabilities inside the retained bootstrap VM window
 - wired the x86_64 ASI syscall lane to handle `MemMap` and `MemUnmap`, including batch-path support and first syscall tests
 - taught the transition-root build path to prebuild the bootstrap VM window page-table structures before the higher-half handoff
+- extended the shared ASI memory ABI with `MemVtoPArgs` and `MemVtoPBatchArgs`
+- added retained bootstrap mapping lookup by handle and virtual address, then wired bootstrap `mem_vtop` / `mem_vtop_batch` helpers and x86_64 syscall dispatch support
+- added host-safe positive tests for bootstrap virtual-to-physical translation and exposed the retained-runtime test reset path so shared bootstrap state stays isolated
 
 ### 2026-04-07
 
