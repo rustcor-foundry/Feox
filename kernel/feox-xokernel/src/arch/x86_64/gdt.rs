@@ -7,14 +7,26 @@ use core::ptr::addr_of;
 const GDT_NULL: u64 = 0;
 const GDT_KERNEL_CODE: u64 = 0x00AF_9A00_0000_FFFF;
 const GDT_KERNEL_DATA: u64 = 0x00CF_9200_0000_FFFF;
+const GDT_USER_DATA: u64 = 0x00CF_F200_0000_FFFF;
+const GDT_USER_CODE: u64 = 0x00AF_FA00_0000_FFFF;
 
-/// GDT layout: null | kernel code | kernel data | TSS low | TSS high.
-static mut GDT: [u64; 5] = [GDT_NULL, GDT_KERNEL_CODE, GDT_KERNEL_DATA, 0, 0];
+/// GDT layout: null | kernel code | kernel data | user data | user code | TSS low | TSS high.
+static mut GDT: [u64; 7] = [
+    GDT_NULL,
+    GDT_KERNEL_CODE,
+    GDT_KERNEL_DATA,
+    GDT_USER_DATA,
+    GDT_USER_CODE,
+    0,
+    0,
+];
 
 const KERNEL_CODE_SELECTOR: u16 = 0x08;
 const KERNEL_DATA_SELECTOR: u16 = 0x10;
-/// Selector for the 64-bit TSS descriptor at GDT[3] (offset 0x18).
-const TSS_SELECTOR: u16 = 0x18;
+const USER_DATA_SELECTOR: u16 = 0x18 | 0x3;
+const USER_CODE_SELECTOR: u16 = 0x20 | 0x3;
+/// Selector for the 64-bit TSS descriptor at GDT[5] (offset 0x28).
+const TSS_SELECTOR: u16 = 0x28;
 
 // ---------------------------------------------------------------------------
 // IST stacks
@@ -91,9 +103,40 @@ pub const fn kernel_code_selector() -> u16 {
     KERNEL_CODE_SELECTOR
 }
 
+/// Returns the selector for the kernel data segment.
+#[must_use]
+pub const fn kernel_data_selector() -> u16 {
+    KERNEL_DATA_SELECTOR
+}
+
+/// Returns the selector for the user data segment with ring-3 RPL.
+#[must_use]
+pub const fn user_data_selector() -> u16 {
+    USER_DATA_SELECTOR
+}
+
+/// Returns the selector for the user code segment with ring-3 RPL.
+#[must_use]
+pub const fn user_code_selector() -> u16 {
+    USER_CODE_SELECTOR
+}
+
+/// Returns the IA32_STAR high-half base selector used by `SYSRET`.
+///
+/// In 64-bit mode `SYSRET` derives:
+///
+/// - `SS = STAR[63:48] + 8`
+/// - `CS = STAR[63:48] + 16`
+///
+/// so the programmed value is the user data selector minus 8.
+#[must_use]
+pub const fn syscall_sysret_base_selector() -> u16 {
+    USER_DATA_SELECTOR - 0x8
+}
+
 fn descriptor_for_base(base: u64) -> DescriptorTablePointer {
     DescriptorTablePointer {
-        limit: (size_of::<[u64; 5]>() - 1) as u16,
+        limit: (size_of::<[u64; 7]>() - 1) as u16,
         base,
     }
 }
@@ -138,6 +181,13 @@ pub unsafe fn reload_with_base(base: u64) {
     unsafe { load_descriptor_table(base) }
 }
 
+/// Installs the ring-0 privilege stack used after a ring-3 entry.
+pub fn set_privilege_stack0(stack_top: u64) {
+    unsafe {
+        TSS.rsp[0] = stack_top;
+    }
+}
+
 /// Loads the bootstrap GDT, installs IST stacks in the TSS, loads the TSS
 /// descriptor, and initializes the Task Register.
 pub fn init() {
@@ -151,8 +201,8 @@ pub fn init() {
         // Build and install the 128-bit TSS descriptor into the GDT.
         let tss_base = addr_of!(TSS) as u64;
         let (low, high) = tss_descriptor(tss_base);
-        GDT[3] = low;
-        GDT[4] = high;
+        GDT[5] = low;
+        GDT[6] = high;
 
         load_descriptor_table(table_base());
 
@@ -174,5 +224,13 @@ mod tests {
     #[test]
     fn tss_is_104_bytes() {
         assert_eq!(size_of::<Tss>(), 104);
+    }
+
+    #[test]
+    fn syscall_sysret_selectors_match_user_segments() {
+        assert_eq!(super::kernel_data_selector(), 0x10);
+        assert_eq!(super::user_data_selector(), 0x1b);
+        assert_eq!(super::user_code_selector(), 0x23);
+        assert_eq!(super::syscall_sysret_base_selector(), 0x13);
     }
 }

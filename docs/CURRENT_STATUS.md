@@ -1,6 +1,6 @@
 # Feox Current Status
 
-Last updated: 2026-04-05
+Last updated: 2026-04-07
 
 ## Posture
 
@@ -11,12 +11,12 @@ Last updated: 2026-04-05
 
 ## What Is True Right Now
 
-- `cargo test` passes — 47 tests across all crates
+- `cargo test` passes — 70 tests across all crates
 - `cargo kernel` passes
 - `cargo loader` passes
 - `tools/stage-efi.ps1` succeeds and produces a staged EFI tree under `target/feox-efi`
 - the x86 host boot rail is working on this workstation end-to-end (QEMU launch, OVMF, loader, kernel handoff, retained runtime-active loop)
-- the full code review pass from `docs/CODE_REVIEW.md` is complete — all 21 findings resolved or explicitly deferred
+- the full code review pass from `docs/CODE_REVIEW.md` is complete — all findings are now either resolved in code or intentionally deferred as later architecture work
 
 ### Security and correctness hardening (from code review)
 
@@ -34,18 +34,21 @@ Last updated: 2026-04-05
 - **P-02**: PRESENT|WRITABLE intermediate-entry policy documented as bootstrap-only in `ensure_child_table`
 - **A-01**: `feox-nvme` replaced `Vec` with const-generic `InflightMap<const N>`; crate is now fully `no_std`
 - **A-02**: `feox-async` now has `RunQueue`, `TaskHeader` with type-erased poll, `TaskCell<F>`, `SingleCoreExecutor`
+- **A-03**: x86_64 ASI transport now installs `SYSCALL` / `SYSRET`, programs `IA32_STAR` / `IA32_LSTAR` / `IA32_FMASK`, carries a dedicated syscall stack, and dispatches typed ASI opcodes through shared `feox-asi` syscall and batch types
+- **A-04**: bootstrap capability layer now has a 256-slot table, a registered physical-memory resource registry, a delegation tree with cascade release, and first `cap_list` / `cap_delegate` / `cap_release` syscall handling
 - **A-05**: `PageTableEdges` frame-tree sidecar records every intermediate allocation for future reclaim
 
 ### Deferred (next sessions)
 
-- **A-03**: ASI `SYSCALL`/`SYSRET` stub and ring-3 entry point
-- **A-04**: Capability table structure
+- full capability system follow-through: capability-checked memory/device operations and multi-process capability ownership beyond the bootstrap process
 
 ## Current Strengths
 
 - clear crate separation: boot ABI, async runtime, NVMe primitives, loader, kernel bootstrap
 - all code review safety and correctness gaps resolved before new feature work
 - end-to-end QEMU boot trace through higher-half handoff, exception validation, and retained runtime
+- real x86_64 ASI syscall transport with ring-3 selectors, STAR/LSTAR/FMASK setup, and first typed dispatch path
+- first kernel capability authority lane with stale-handle detection, registered resources, delegation links, and bootstrap capability enumeration
 - fixed-capacity, allocator-free data structures on all hot paths (executor, NVMe, paging, runtime state)
 - explicit ownership model with claim guards and typed reservation categories
 
@@ -53,7 +56,7 @@ Last updated: 2026-04-05
 
 - the retained runtime still idles after the command queue drains — broader subsystem bring-up not yet started
 - virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows)
-- the syscall entry path (A-03) is the next hard prerequisite before any userspace work can proceed
+- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population, and no capability-checked memory-mapping path yet
 
 ## Recommended Entry Points
 
@@ -68,5 +71,5 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **A-03** — add the `SYSCALL`/`SYSRET` stub and a ring-3 kernel entry point in `arch::x86_64`
+1. **Capability-checked operations** — route `cap_request` / memory operations through the new registry so capability verification gates real kernel actions
 2. **Virtual address layout** — lock the direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`

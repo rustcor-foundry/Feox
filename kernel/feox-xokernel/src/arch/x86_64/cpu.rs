@@ -14,7 +14,7 @@ const EFER_NXE: u64 = 1 << 11;
 /// The caller must ensure `msr` is a valid MSR address for the current
 /// processor and that reading it does not produce side effects that violate
 /// kernel invariants.
-unsafe fn rdmsr(msr: u32) -> u64 {
+pub(crate) unsafe fn rdmsr(msr: u32) -> u64 {
     let lo: u32;
     let hi: u32;
     unsafe {
@@ -35,7 +35,7 @@ unsafe fn rdmsr(msr: u32) -> u64 {
 ///
 /// The caller must ensure `msr` is a valid writable MSR address and that the
 /// supplied value is within the legal range for that register.
-unsafe fn wrmsr(msr: u32, value: u64) {
+pub(crate) unsafe fn wrmsr(msr: u32, value: u64) {
     let lo = value as u32;
     let hi = (value >> 32) as u32;
     unsafe {

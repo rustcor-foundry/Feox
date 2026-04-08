@@ -6,9 +6,24 @@ This document is the running development record for Feox.
 
 - update this file with each meaningful checkpoint or commit
 - keep entries implementation-focused
-- use `STATUS.md` for the current overall posture and milestone summary
+- use `docs/CURRENT_STATUS.md` for the current overall posture and milestone summary
 
 ## Entries
+
+### 2026-04-07
+
+- closed A-03 by adding shared ASI syscall transport types to `feox-asi`: `PhysicalAddress`, `PciAddress`, `ProcessId`, `ThreadId`, `CoreSet`, `AsiOp`, `SyscallResult`, `BatchOp`, and `BatchError`
+- expanded the x86_64 GDT with ring-3 code/data segments and exposed selectors needed for `SYSCALL` / `SYSRET`
+- added `kernel/feox-xokernel/src/arch/x86_64/syscall.rs` with real `IA32_STAR` / `IA32_LSTAR` / `IA32_FMASK` setup, a dedicated syscall stack, and a minimal `SYSCALL` entry stub
+- wired `arch::early_init()` to install the syscall transport after GDT/IDT, NXE, and CR4 security-bit setup
+- added the first typed syscall dispatcher with raw-opcode validation, `ProcYield` as a minimal success path, and working `AsiBatch` validation plus per-op result reporting
+- started A-04 with shared `CapType`, `CapPermissions`, `CapError`, and `CapInfo` metadata in `feox-asi`
+- added `kernel/feox-xokernel/src/capability.rs` with a 256-slot bootstrap capability table, 64-byte `CapSlot`s, generation-checked handle verification, root-cap minting, `cap_list`, and `cap_release`
+- wired bootstrap capability minting for discovered memory regions and extended the syscall path with working `cap_list` and `cap_release` handling
+- extended A-04 with a bootstrap resource registry, delegation tree, cascade release, and first `cap_delegate` syscall handling
+- added test-only capability-state locking so shared bootstrap globals stay isolated across parallel unit tests
+- re-verified `cargo test`, `cargo kernel`, and `cargo loader`
+- updated `README.md`, `docs/CURRENT_STATUS.md`, and `docs/WORKSTATION_ENTRY.md` so the repo no longer points at a missing `STATUS.md`
 
 ### 2026-03-25
 
@@ -140,5 +155,5 @@ This document is the running development record for Feox.
 
 ## Next Focus
 
-- **A-03**: add the ASI syscall entry path (SYSCALL/SYSRET stub + ring-3 entry point)
+- **Capability-checked operations**: route `cap_request` and later memory/device syscalls through the resource registry so verified capabilities gate real kernel actions
 - decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices

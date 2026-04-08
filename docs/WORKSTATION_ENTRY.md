@@ -87,5 +87,4 @@ A successful run shows:
 - [README.md](../README.md)
 - [docs/CURRENT_STATUS.md](CURRENT_STATUS.md)
 - [docs/TESTING.md](TESTING.md)
-- [STATUS.md](../STATUS.md)
 - [DEV_PROGRESS.md](../DEV_PROGRESS.md)
