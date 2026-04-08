@@ -24,6 +24,7 @@ This document is the running development record for Feox.
 - added host-safe positive tests for bootstrap virtual-to-physical translation and exposed the retained-runtime test reset path so shared bootstrap state stays isolated
 - expanded `.gitea/workflows/ci.yml` so `lx-ws01` now runs host tests, real target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
 - taught `tools/check-host.ps1` and `tools/run-qemu.ps1` to discover common Linux QEMU and OVMF paths, then added `tools/run-qemu-smoke.ps1` as the normal bounded CI boot wrapper
+- attempted a live bootstrap VM self-test in the higher-half runtime path and confirmed the current VM helpers still rely on page-table-access assumptions that are safe in host tests but not yet hardened for live post-handoff use; reverted that probe and documented the limitation explicitly
 
 ### 2026-04-07
 
