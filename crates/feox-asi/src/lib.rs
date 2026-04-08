@@ -277,6 +277,96 @@ pub struct CapDelegateArgs {
     pub mask: CapPermissions,
 }
 
+/// Mapping permissions and cache-policy hints for `mem_map`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct MapFlags(pub u32);
+
+impl MapFlags {
+    /// Page is readable.
+    pub const READ: Self = Self(1 << 0);
+    /// Page is writable.
+    pub const WRITE: Self = Self(1 << 1);
+    /// Page is executable.
+    pub const EXEC: Self = Self(1 << 2);
+    /// Disable caching for MMIO-like mappings.
+    pub const UNCACHEABLE: Self = Self(1 << 3);
+    /// Enable write-combining for MMIO-like mappings.
+    pub const WRITE_COMBINE: Self = Self(1 << 4);
+
+    /// Empty mapping flags.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// Returns whether `self` contains all bits in `other`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+}
+
+impl core::ops::BitOr for MapFlags {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+impl core::ops::BitOrAssign for MapFlags {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// Arguments for `mem_map`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct MemMapArgs {
+    /// Capability backing the mapping.
+    pub handle: CapHandle,
+    /// Byte offset into the capability resource.
+    pub offset_bytes: u64,
+    /// Length of the requested mapping in bytes.
+    pub length_bytes: u64,
+    /// Requested mapping flags.
+    pub flags: MapFlags,
+    /// Writable output location for the mapped-region result.
+    pub out_region: *mut MappedRegion,
+}
+
+/// Result of a successful `mem_map`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct MappedRegion {
+    /// Virtual base address of the mapping.
+    pub base: u64,
+    /// Length of the mapping in bytes.
+    pub length_bytes: u64,
+    /// Flags applied to the mapping.
+    pub flags: MapFlags,
+}
+
+/// Memory-mapping syscall error codes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum MemError {
+    /// The supplied capability was invalid, stale, or the wrong type.
+    InvalidCapability = 0,
+    /// The mapping flags were not supported by the current bootstrap lane.
+    InvalidFlags = 1,
+    /// No virtual address space was available in the bootstrap VM window.
+    OutOfVirtualSpace = 2,
+    /// No kernel-owned page-table capacity remained for the request.
+    OutOfPhysicalMemory = 3,
+    /// Offset or length violated the current alignment rules.
+    AlignmentViolation = 4,
+    /// Offset plus length exceeded the resource bounds.
+    OffsetOutOfRange = 5,
+}
+
 /// Capability resource type granted by the kernel.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
@@ -463,7 +553,8 @@ pub struct CapHandle {
 #[cfg(test)]
 mod tests {
     use super::{
-        AsiOp, BatchOp, CapInfo, CapPermissions, CoreId, CoreSet, PhysicalAddress, SyscallResult,
+        AsiOp, BatchOp, CapInfo, CapPermissions, CoreId, CoreSet, MapFlags, MemMapArgs,
+        MappedRegion, PhysicalAddress, SyscallResult,
     };
     use core::mem::size_of;
 
@@ -490,6 +581,8 @@ mod tests {
         assert_eq!(size_of::<CoreId>(), 4);
         assert_eq!(size_of::<CoreSet>(), 32);
         assert_eq!(size_of::<CapInfo>(), 36);
+        assert_eq!(size_of::<MappedRegion>(), 24);
+        assert_eq!(size_of::<MemMapArgs>(), 40);
     }
 
     #[test]
@@ -498,5 +591,13 @@ mod tests {
         permissions |= CapPermissions::REVOKE;
         assert!(permissions.contains(CapPermissions::READ));
         assert!(permissions.contains(CapPermissions::WRITE | CapPermissions::REVOKE));
+    }
+
+    #[test]
+    fn map_flags_compose_as_a_bitset() {
+        let mut flags = MapFlags::READ | MapFlags::WRITE;
+        flags |= MapFlags::UNCACHEABLE;
+        assert!(flags.contains(MapFlags::READ));
+        assert!(flags.contains(MapFlags::WRITE | MapFlags::UNCACHEABLE));
     }
 }

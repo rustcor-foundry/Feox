@@ -10,6 +10,16 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-04-08
+
+- locked a bootstrap capability-backed VM window at `0xFFFF_9000_0400_0000` with a fixed 64 MiB bootstrap-only mapping arena in `memory.rs` and `docs/VIRTUAL_ADDRESS_LAYOUT.md`
+- added shared ASI memory-mapping ABI types to `feox-asi`: `MapFlags`, `MemMapArgs`, `MappedRegion`, and `MemError`
+- extended `paging::PageTableRoot` with `prepare_4k_pages_with` so the bootstrap path can prebuild the first VM window without installing leaf mappings
+- added retained bootstrap VM mapping records to `runtime_context.rs`
+- added bootstrap `mem_map` / `mem_unmap` helpers in `kernel/feox-xokernel/src/vm.rs` for physical-memory capabilities inside the retained bootstrap VM window
+- wired the x86_64 ASI syscall lane to handle `MemMap` and `MemUnmap`, including batch-path support and first syscall tests
+- taught the transition-root build path to prebuild the bootstrap VM window page-table structures before the higher-half handoff
+
 ### 2026-04-07
 
 - closed A-03 by adding shared ASI syscall transport types to `feox-asi`: `PhysicalAddress`, `PciAddress`, `ProcessId`, `ThreadId`, `CoreSet`, `AsiOp`, `SyscallResult`, `BatchOp`, and `BatchError`

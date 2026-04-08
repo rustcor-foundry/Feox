@@ -1,6 +1,6 @@
 # Feox Current Status
 
-Last updated: 2026-04-07
+Last updated: 2026-04-08
 
 ## Posture
 
@@ -36,6 +36,7 @@ Last updated: 2026-04-07
 - **A-02**: `feox-async` now has `RunQueue`, `TaskHeader` with type-erased poll, `TaskCell<F>`, `SingleCoreExecutor`
 - **A-03**: x86_64 ASI transport now installs `SYSCALL` / `SYSRET`, programs `IA32_STAR` / `IA32_LSTAR` / `IA32_FMASK`, carries a dedicated syscall stack, and dispatches typed ASI opcodes through shared `feox-asi` syscall and batch types
 - **A-04**: bootstrap capability layer now has a 256-slot table, a registered physical-memory resource registry, a delegation tree with cascade release, working `cap_request` for physical pages, first capability-backed 4 KiB map helper coverage, and first `cap_list` / `cap_delegate` / `cap_release` syscall handling
+- **A-04b**: bootstrap ASI memory lane now has shared `MemMap` ABI types, a fixed 64 MiB bootstrap VM window, retained bootstrap mapping records, and first bootstrap-scoped `mem_map` / `mem_unmap` syscall handling for physical-memory capabilities
 - **A-05**: `PageTableEdges` frame-tree sidecar records every intermediate allocation for future reclaim
 
 ### Deferred (next sessions)
@@ -55,8 +56,8 @@ Last updated: 2026-04-07
 ## Current Risks
 
 - the retained runtime still idles after the command queue drains — broader subsystem bring-up not yet started
-- virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows)
-- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population, and no live syscall-facing virtual memory mapping path yet
+- permanent virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows)
+- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population beyond physical memory, and the new `mem_map` lane is still bootstrap-window-only rather than a real per-process VM subsystem
 
 ## Recommended Entry Points
 
@@ -71,5 +72,5 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Live memory mapping lane** — wire the new capability-backed 4 KiB map helper into a real bootstrap `mem_map` / `mem_unmap` entry path with retained VM state
-2. **Virtual address layout** — lock the direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`
+1. **Bootstrap VM hardening** — validate the new bootstrap `mem_map` / `mem_unmap` lane under QEMU and decide how page-table-access mappings should evolve beyond the current bootstrap assumptions
+2. **Virtual address layout** — lock the permanent direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`

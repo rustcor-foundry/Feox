@@ -2,7 +2,7 @@
 #![allow(clippy::undocumented_unsafe_blocks)]
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use feox_asi::CoreId;
+use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
 /// Sentinel value meaning no core has claimed the context yet.
 const CONTEXT_OWNER_NONE: u32 = u32::MAX;
@@ -112,6 +112,9 @@ const BOOTSTRAP_EVENT_CAPACITY: usize = 8;
 static mut BOOTSTRAP_EVENTS: [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] =
     [None; BOOTSTRAP_EVENT_CAPACITY];
 static mut BOOTSTRAP_EVENT_COUNT: usize = 0;
+const BOOTSTRAP_VM_MAPPING_CAPACITY: usize = 64;
+static mut BOOTSTRAP_VM_MAPPINGS: [Option<BootstrapVmMapping>; BOOTSTRAP_VM_MAPPING_CAPACITY] =
+    [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
 
 /// Retained bootstrap record for the core that owns the current runtime slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +186,17 @@ pub struct RuntimeReadySummary {
     pub kernel_pages_mapped: u64,
     /// Ready-state event count visible at publish time.
     pub retained_events: u64,
+}
+
+/// One retained bootstrap VM mapping owned by the bootstrap runtime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BootstrapVmMapping {
+    /// Region returned to the bootstrap caller.
+    pub region: MappedRegion,
+    /// Capability that backed the mapping.
+    pub handle: CapHandle,
+    /// Offset into the capability resource at map time.
+    pub offset_bytes: u64,
 }
 
 /// Minimal retained command set for the first runtime service loop.
@@ -381,6 +395,97 @@ pub fn events() -> [Option<&'static str>; BOOTSTRAP_EVENT_CAPACITY] {
     }
 }
 
+/// Returns the retained bootstrap VM mappings in slot order.
+#[must_use]
+pub fn vm_mappings() -> [Option<BootstrapVmMapping>; BOOTSTRAP_VM_MAPPING_CAPACITY] {
+    unsafe { BOOTSTRAP_VM_MAPPINGS }
+}
+
+/// Records one retained bootstrap VM mapping.
+pub fn record_vm_mapping(mapping: BootstrapVmMapping) -> Result<(), BootstrapVmMapping> {
+    assert_context_claimed();
+    unsafe {
+        let mut index = 0usize;
+        while index < BOOTSTRAP_VM_MAPPING_CAPACITY {
+            if BOOTSTRAP_VM_MAPPINGS[index].is_none() {
+                BOOTSTRAP_VM_MAPPINGS[index] = Some(mapping);
+                return Ok(());
+            }
+            index += 1;
+        }
+    }
+    Err(mapping)
+}
+
+/// Removes and returns the retained VM mapping matching `region`.
+#[must_use]
+pub fn remove_vm_mapping(region: MappedRegion) -> Option<BootstrapVmMapping> {
+    assert_context_claimed();
+    unsafe {
+        let mut index = 0usize;
+        while index < BOOTSTRAP_VM_MAPPING_CAPACITY {
+            if let Some(mapping) = BOOTSTRAP_VM_MAPPINGS[index]
+                && mapping.region.base == region.base
+                && mapping.region.length_bytes == region.length_bytes
+            {
+                BOOTSTRAP_VM_MAPPINGS[index] = None;
+                return Some(mapping);
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+/// Finds the first non-overlapping page-aligned region inside the bootstrap VM
+/// window that can satisfy `length_bytes`.
+#[must_use]
+pub fn allocate_vm_region(
+    window_base: u64,
+    window_size: u64,
+    length_bytes: u64,
+    flags: MapFlags,
+) -> Option<MappedRegion> {
+    assert_context_claimed();
+    if length_bytes == 0 {
+        return None;
+    }
+
+    let window_end = window_base.checked_add(window_size)?;
+    let mut candidate = window_base;
+    while candidate.checked_add(length_bytes)? <= window_end {
+        let candidate_end = candidate.checked_add(length_bytes)?;
+        let mut overlapped = false;
+        let mut next_candidate = candidate_end;
+        unsafe {
+            let mut index = 0usize;
+            while index < BOOTSTRAP_VM_MAPPING_CAPACITY {
+                if let Some(mapping) = BOOTSTRAP_VM_MAPPINGS[index] {
+                    let mapping_start = mapping.region.base;
+                    let mapping_end =
+                        mapping.region.base.saturating_add(mapping.region.length_bytes);
+                    if candidate < mapping_end && candidate_end > mapping_start {
+                        overlapped = true;
+                        next_candidate = next_candidate.max(mapping_end);
+                    }
+                }
+                index += 1;
+            }
+        }
+
+        if !overlapped {
+            return Some(MappedRegion {
+                base: candidate,
+                length_bytes,
+                flags,
+            });
+        }
+        candidate = next_candidate;
+    }
+
+    None
+}
+
 #[cfg(test)]
 fn reset_for_tests() {
     // Ensure the context is claimed before the reset so that subsequent
@@ -399,19 +504,21 @@ fn reset_for_tests() {
         BOOTSTRAP_COMMAND_LEN = 0;
         BOOTSTRAP_EVENTS = [None; BOOTSTRAP_EVENT_CAPACITY];
         BOOTSTRAP_EVENT_COUNT = 0;
+        BOOTSTRAP_VM_MAPPINGS = [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_bootstrap_context, dequeue_command, enqueue_command, events, push_event,
-        ready_summary, reset_for_tests, runtime_readiness, service, service_heartbeat,
-        service_report, store_ready_summary, store_runtime_readiness, store_service,
-        store_service_heartbeat, store_service_report, RuntimeReadinessState, RuntimeReadySummary,
-        RuntimeServiceCommand, RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
+        BootstrapVmMapping, claim_bootstrap_context, dequeue_command, enqueue_command, events,
+        push_event, ready_summary, record_vm_mapping, remove_vm_mapping, reset_for_tests,
+        runtime_readiness, service, service_heartbeat, service_report, store_ready_summary,
+        store_runtime_readiness, store_service, store_service_heartbeat, store_service_report,
+        vm_mappings, RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand,
+        RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
     };
-    use feox_asi::CoreId;
+    use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
     #[test]
     fn runtime_service_state_round_trips() {
@@ -616,5 +723,27 @@ mod tests {
                 Some("event-9"),
             ]
         );
+    }
+
+    #[test]
+    fn bootstrap_vm_mapping_round_trips_and_removes_by_region() {
+        reset_for_tests();
+        let mapping = BootstrapVmMapping {
+            region: MappedRegion {
+                base: 0xFFFF_9000_0400_0000,
+                length_bytes: 0x2000,
+                flags: MapFlags::READ | MapFlags::WRITE,
+            },
+            handle: CapHandle {
+                id: 7,
+                generation: 3,
+            },
+            offset_bytes: 0x1000,
+        };
+
+        assert_eq!(record_vm_mapping(mapping), Ok(()));
+        assert!(vm_mappings().iter().flatten().any(|entry| *entry == mapping));
+        assert_eq!(remove_vm_mapping(mapping.region), Some(mapping));
+        assert_eq!(remove_vm_mapping(mapping.region), None);
     }
 }

@@ -1,9 +1,15 @@
 //! Bootstrap virtual-memory helpers built on capability verification.
 
 use crate::capability;
-use crate::memory::{PAGE_SIZE, PhysicalAddress, PhysicalFrame, VirtualAddress};
-use crate::paging::{Map4kError, PageTableEntry, PageTableFrameAllocator, PageTableFrameMutSource, PageTableRoot};
-use feox_asi::{CapError, CapHandle, CapPermissions, CapType};
+use crate::memory::{self, PAGE_SIZE, PhysicalAddress, PhysicalFrame, VirtualAddress};
+use crate::paging::{
+    Map4kError, PageTableEntry, PageTableFrameAllocator, PageTableFrameMutSource, PageTableRoot,
+    Unmap4kError,
+};
+use crate::runtime_context::{self, BootstrapVmMapping};
+use feox_asi::{
+    CapError, CapHandle, CapPermissions, CapType, MapFlags, MemError, MemMapArgs, MappedRegion,
+};
 
 /// Errors produced while mapping a bootstrap capability into a page table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +33,80 @@ impl From<CapError> for BootstrapMapError {
 impl From<Map4kError> for BootstrapMapError {
     fn from(value: Map4kError) -> Self {
         Self::Paging(value)
+    }
+}
+
+/// Errors produced by the bootstrap `mem_map` / `mem_unmap` path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootstrapVmError {
+    /// The supplied capability was invalid, stale, or lacked permission.
+    Capability(CapError),
+    /// The supplied handle referred to an unsupported capability type.
+    UnsupportedCapabilityType(CapType),
+    /// Mapping flags were not supported by the current bootstrap VM lane.
+    InvalidFlags,
+    /// Offset or length were not page aligned.
+    AlignmentViolation,
+    /// Offset plus length exceeded the capability-backed resource bounds.
+    OffsetOutOfRange,
+    /// No free virtual region remained in the bootstrap VM window.
+    OutOfVirtualSpace,
+    /// No free retained mapping slot remained.
+    OutOfMappingSlots,
+    /// The paging layer rejected the mapping change.
+    Paging(Map4kError),
+    /// The requested mapping was not currently active.
+    MappingNotFound,
+}
+
+impl From<CapError> for BootstrapVmError {
+    fn from(value: CapError) -> Self {
+        Self::Capability(value)
+    }
+}
+
+impl From<Map4kError> for BootstrapVmError {
+    fn from(value: Map4kError) -> Self {
+        Self::Paging(value)
+    }
+}
+
+impl From<BootstrapMapError> for BootstrapVmError {
+    fn from(value: BootstrapMapError) -> Self {
+        match value {
+            BootstrapMapError::Capability(error) => Self::Capability(error),
+            BootstrapMapError::UnsupportedCapabilityType(kind) => {
+                Self::UnsupportedCapabilityType(kind)
+            }
+            BootstrapMapError::PageOutOfRange => Self::OffsetOutOfRange,
+            BootstrapMapError::Paging(error) => Self::Paging(error),
+        }
+    }
+}
+
+impl BootstrapVmError {
+    /// Converts the bootstrap VM error into the shared ASI memory error space.
+    #[must_use]
+    pub const fn as_mem_error(self) -> MemError {
+        match self {
+            Self::Capability(_)
+            | Self::UnsupportedCapabilityType(_)
+            | Self::MappingNotFound => MemError::InvalidCapability,
+            Self::InvalidFlags => MemError::InvalidFlags,
+            Self::AlignmentViolation => MemError::AlignmentViolation,
+            Self::OffsetOutOfRange => MemError::OffsetOutOfRange,
+            Self::OutOfVirtualSpace | Self::OutOfMappingSlots => MemError::OutOfVirtualSpace,
+            Self::Paging(Map4kError::OutOfTableFrames) => MemError::OutOfPhysicalMemory,
+            Self::Paging(_) => MemError::InvalidCapability,
+        }
+    }
+}
+
+fn unmap_paging_error(error: Unmap4kError) -> BootstrapVmError {
+    match error {
+        Unmap4kError::MissingTableFrame(_) | Unmap4kError::UnsupportedHugePage { .. } => {
+            BootstrapVmError::MappingNotFound
+        }
     }
 }
 
@@ -79,21 +159,137 @@ pub fn map_bootstrap_physical_capability_4k(
     Ok(())
 }
 
+/// Validates whether the current bootstrap lane can honor the supplied map flags.
+fn validate_bootstrap_map_flags(flags: MapFlags) -> Result<(), BootstrapVmError> {
+    if !flags.contains(MapFlags::READ) {
+        return Err(BootstrapVmError::InvalidFlags);
+    }
+
+    let supported = MapFlags::READ | MapFlags::WRITE;
+    if (flags.0 & !supported.0) != 0 {
+        return Err(BootstrapVmError::InvalidFlags);
+    }
+
+    Ok(())
+}
+
+/// Maps a capability-backed region into the retained bootstrap VM window.
+pub fn mem_map_bootstrap(
+    args: MemMapArgs,
+) -> Result<MappedRegion, BootstrapVmError> {
+    validate_bootstrap_map_flags(args.flags)?;
+    if args.length_bytes == 0
+        || args.offset_bytes % PAGE_SIZE != 0
+        || args.length_bytes % PAGE_SIZE != 0
+    {
+        return Err(BootstrapVmError::AlignmentViolation);
+    }
+
+    let capability = capability::verify_bootstrap_handle(args.handle, CapPermissions::READ)?;
+    if capability.cap_type != CapType::PhysicalMemory {
+        return Err(BootstrapVmError::UnsupportedCapabilityType(
+            capability.cap_type,
+        ));
+    }
+    let resource = capability::resource(capability.resource_id)
+        .ok_or(BootstrapVmError::Capability(CapError::ResourceNotFound))?;
+    if args.offset_bytes.saturating_add(args.length_bytes) > resource.size_bytes {
+        return Err(BootstrapVmError::OffsetOutOfRange);
+    }
+
+    let layout = memory::BootstrapRuntimeLayout::new();
+    let region = runtime_context::allocate_vm_region(
+        layout.vm_window_base().as_u64(),
+        layout.vm_window_size(),
+        args.length_bytes,
+        args.flags,
+    )
+    .ok_or(BootstrapVmError::OutOfVirtualSpace)?;
+
+    let root = PageTableRoot::active();
+    let mut live_page_tables = crate::paging::BootstrapIdentityMappedPageTables;
+    struct NoopAllocator;
+    impl PageTableFrameAllocator for NoopAllocator {
+        fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
+            None
+        }
+    }
+    let mut allocator = NoopAllocator;
+    let writable = args.flags.contains(MapFlags::WRITE);
+    let page_count = args.length_bytes / PAGE_SIZE;
+    let offset_pages = args.offset_bytes / PAGE_SIZE;
+
+    let mut page = 0u64;
+    while page < page_count {
+        let virtual_address =
+            VirtualAddress::new(region.base + (page * PAGE_SIZE));
+        map_bootstrap_physical_capability_4k(
+            root,
+            &mut live_page_tables,
+            &mut allocator,
+            args.handle,
+            virtual_address,
+            (offset_pages + page) as usize,
+            writable,
+            false,
+        )?;
+        page += 1;
+    }
+
+    runtime_context::record_vm_mapping(BootstrapVmMapping {
+        region,
+        handle: args.handle,
+        offset_bytes: args.offset_bytes,
+    })
+    .map_err(|_| BootstrapVmError::OutOfMappingSlots)?;
+    crate::runtime_context::push_event("bootstrap-mem-map");
+    Ok(region)
+}
+
+/// Removes a retained bootstrap VM mapping.
+pub fn mem_unmap_bootstrap(region: MappedRegion) -> Result<(), BootstrapVmError> {
+    if region.length_bytes == 0 || region.length_bytes % PAGE_SIZE != 0 {
+        return Err(BootstrapVmError::AlignmentViolation);
+    }
+
+    let Some(active) = runtime_context::remove_vm_mapping(region) else {
+        return Err(BootstrapVmError::MappingNotFound);
+    };
+
+    let root = PageTableRoot::active();
+    let mut live_page_tables = crate::paging::BootstrapIdentityMappedPageTables;
+    let page_count = active.region.length_bytes / PAGE_SIZE;
+    let mut page = 0u64;
+    while page < page_count {
+        let virtual_address = VirtualAddress::new(active.region.base + (page * PAGE_SIZE));
+        let _ = root
+            .unmap_4k_with(&mut live_page_tables, virtual_address)
+            .map_err(unmap_paging_error)?;
+        page += 1;
+    }
+    crate::runtime_context::push_event("bootstrap-mem-unmap");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapMapError, map_bootstrap_physical_capability_4k};
+    use super::{
+        BootstrapMapError, BootstrapVmError, map_bootstrap_physical_capability_4k,
+        mem_map_bootstrap, mem_unmap_bootstrap,
+    };
     use crate::capability::{
         acquire_test_lock, init_bootstrap_process, mint_bootstrap_root_capability,
         register_bootstrap_memory_resource_with_kind, request_bootstrap_capability,
     };
-    use crate::memory::{PAGE_SIZE, PhysicalAddress, PhysicalFrame, VirtualAddress};
+    use crate::memory::{self, PAGE_SIZE, PhysicalAddress, PhysicalFrame, VirtualAddress};
     use crate::paging::{
         PAGE_TABLE_ENTRY_COUNT, PageTableFrameAllocator, PageTableFrameMutSource,
         PageTableFrameSource, PageTableRoot,
     };
+    use crate::runtime_context::claim_bootstrap_context;
     use feox_asi::{
-        CapError, CapPermissions, CapRequest, PageFlags, PhysicalAddress as AsiPhysicalAddress,
-        ProcessId,
+        CapError, CapHandle, CapPermissions, CapRequest, CoreId, MapFlags, MemMapArgs,
+        MappedRegion, PageFlags, PhysicalAddress as AsiPhysicalAddress, ProcessId,
     };
 
     struct FakePageTables {
@@ -253,5 +449,35 @@ mod tests {
             error,
             BootstrapMapError::Capability(CapError::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn bootstrap_mem_map_rejects_unsupported_flags() {
+        let _guard = acquire_test_lock();
+        claim_bootstrap_context(CoreId(0));
+        let error = mem_map_bootstrap(MemMapArgs {
+            handle: CapHandle::default(),
+            offset_bytes: 0,
+            length_bytes: PAGE_SIZE,
+            flags: MapFlags::READ | MapFlags::UNCACHEABLE,
+            out_region: core::ptr::null_mut(),
+        })
+        .expect_err("unsupported flags should be rejected");
+
+        assert_eq!(error, BootstrapVmError::InvalidFlags);
+    }
+
+    #[test]
+    fn bootstrap_mem_unmap_rejects_unknown_region() {
+        let _guard = acquire_test_lock();
+        claim_bootstrap_context(CoreId(0));
+        let error = mem_unmap_bootstrap(MappedRegion {
+            base: memory::BOOTSTRAP_VM_WINDOW_BASE,
+            length_bytes: PAGE_SIZE,
+            flags: MapFlags::READ,
+        })
+        .expect_err("unknown mapping should be rejected");
+
+        assert_eq!(error, BootstrapVmError::MappingNotFound);
     }
 }

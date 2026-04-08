@@ -33,7 +33,7 @@ It owns the lowest-level lane in the family:
 - `kernel/` contains the bare-metal kernel crate and linker script
 - `loader/` contains the thin UEFI loader
 - `tools/` contains EFI staging and QEMU launch helpers
-- `docs/` contains workstation entry, testing, and current-status docs
+- `docs/` contains workstation entry, status, testing, planning, and architecture docs
 - root design docs capture the deeper architecture and research direction
 
 ## What It Is
@@ -82,6 +82,46 @@ powershell -ExecutionPolicy Bypass -File .\tools\stage-efi.ps1
 ```
 
 Those are the real entrypoints for validating the current bootstrap lane.
+
+## First Documentation Sweep
+
+If you are picking up Feox fresh, read the docs in this order before going
+deeper into the code:
+
+### 1. Current posture and operator rail
+
+- [docs/WORKSTATION_ENTRY.md](docs/WORKSTATION_ENTRY.md)
+- [docs/CURRENT_STATUS.md](docs/CURRENT_STATUS.md)
+- [docs/TESTING.md](docs/TESTING.md)
+- [DEV_PROGRESS.md](DEV_PROGRESS.md)
+
+### 2. Current architecture and near-term plan
+
+- [docs/ARCHITECTURE_PRIORITY.md](docs/ARCHITECTURE_PRIORITY.md)
+- [docs/ARCHITECTURE_CHECKLIST.md](docs/ARCHITECTURE_CHECKLIST.md)
+- [docs/BOOTSTRAP_RUNTIME.md](docs/BOOTSTRAP_RUNTIME.md)
+- [docs/VIRTUAL_ADDRESS_LAYOUT.md](docs/VIRTUAL_ADDRESS_LAYOUT.md)
+- [docs/MEMORY_OWNERSHIP_PHASES.md](docs/MEMORY_OWNERSHIP_PHASES.md)
+- [docs/PAGE_TABLE_PLAN.md](docs/PAGE_TABLE_PLAN.md)
+- [docs/BOOT_MEMORY_REVIEW.md](docs/BOOT_MEMORY_REVIEW.md)
+- [docs/ARM64_PORT_PLAN.md](docs/ARM64_PORT_PLAN.md)
+
+### 3. Deeper design and reference docs
+
+- [docs/CODE_REVIEW.md](docs/CODE_REVIEW.md)
+- [docs/EXOKERNEL_RESEARCH_FRAMEWORK.md](docs/EXOKERNEL_RESEARCH_FRAMEWORK.md)
+- [ASI-SPEC.md](ASI-SPEC.md)
+- [CAPABILITY-SYSTEM.md](CAPABILITY-SYSTEM.md)
+- [ASYNC-RUNTIME.md](ASYNC-RUNTIME.md)
+- [NVME-DRIVER.md](NVME-DRIVER.md)
+- [docs/PORTFOLIO_POSITIONING.md](docs/PORTFOLIO_POSITIONING.md)
+- [docs/SHARED_PRODUCT_DOCTRINE.md](docs/SHARED_PRODUCT_DOCTRINE.md)
+
+That sweep is meant to answer three questions in order:
+
+- what works right now
+- what the architecture is trying to become next
+- which deeper specs and reviews shape implementation decisions
 
 ## Current Bootstrap Status
 
@@ -203,6 +243,9 @@ $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 ## Source-Of-Truth Docs
 
 - [Current Status](docs/CURRENT_STATUS.md)
+- [Workstation Entry](docs/WORKSTATION_ENTRY.md)
+- [Testing](docs/TESTING.md)
+- [Development Progress](DEV_PROGRESS.md)
 - [Architecture Priority](docs/ARCHITECTURE_PRIORITY.md)
 - [Architecture Checklist](docs/ARCHITECTURE_CHECKLIST.md)
 - [Bootstrap Runtime](docs/BOOTSTRAP_RUNTIME.md)
@@ -215,9 +258,6 @@ $env:FEOX_OVMF_VARS = 'C:\Program Files\qemu\share\OVMF_VARS.fd'
 - [Code Review](docs/CODE_REVIEW.md)
 - [Portfolio Positioning](docs/PORTFOLIO_POSITIONING.md)
 - [Shared Product Doctrine](docs/SHARED_PRODUCT_DOCTRINE.md)
-- [Workstation Entry](docs/WORKSTATION_ENTRY.md)
-- [Testing](docs/TESTING.md)
-- [Development Progress](DEV_PROGRESS.md)
 - [ASI Spec](ASI-SPEC.md)
 - [Async Runtime Notes](ASYNC-RUNTIME.md)
 - [Capability System](CAPABILITY-SYSTEM.md)
