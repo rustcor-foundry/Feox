@@ -66,6 +66,8 @@ most for a low-level runtime:
   delegation tree, with first `cap_delegate` coverage
 - bootstrap `cap_request` can now mint physical-page capabilities from
   allocatable memory resources through the x86_64 syscall lane
+- verified physical-memory capabilities can now drive a real 4 KiB mapping
+  through the bootstrap paging layer in tests
 
 ## Workstation Entry
 
