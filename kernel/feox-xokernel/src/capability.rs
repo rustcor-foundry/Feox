@@ -8,7 +8,8 @@ use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use crate::memory::MemoryRegionKind;
 use feox_asi::{
-    CapError, CapHandle, CapInfo, CapPermissions, CapType, PhysicalAddress, ProcessId,
+    CapError, CapHandle, CapInfo, CapPermissions, CapRequest, CapType, PageFlags, PhysicalAddress,
+    ProcessId,
 };
 
 /// Maximum capabilities available to the bootstrap process.
@@ -55,6 +56,10 @@ pub struct ResourceView {
     pub owner: Option<ProcessId>,
     /// Number of active capabilities referencing this resource.
     pub active_cap_count: u32,
+    /// Whether this resource may satisfy page-allocation requests.
+    pub allocatable: bool,
+    /// Bytes already consumed from this resource.
+    pub allocated_bytes: u64,
 }
 
 /// One live capability view returned by verification.
@@ -109,6 +114,8 @@ struct ResourceEntry {
     cap_type: CapType,
     base: PhysicalAddress,
     size_bytes: u64,
+    allocatable: bool,
+    allocated_bytes: u64,
     owner: Option<ProcessId>,
     root_delegation: DelegationNodeId,
     active_cap_count: AtomicU32,
@@ -121,6 +128,8 @@ impl ResourceEntry {
             cap_type: CapType::PhysicalMemory,
             base: PhysicalAddress(0),
             size_bytes: 0,
+            allocatable: false,
+            allocated_bytes: 0,
             owner: None,
             root_delegation: DelegationNodeId(NO_NODE_ID),
             active_cap_count: AtomicU32::new(0),
@@ -365,6 +374,7 @@ fn register_resource(
     cap_type: CapType,
     base: PhysicalAddress,
     size_bytes: u64,
+    allocatable: bool,
 ) -> Result<ResourceId, CapError> {
     let index = resource_count();
     if index >= MAX_RESOURCES {
@@ -376,6 +386,8 @@ fn register_resource(
     entry.cap_type = cap_type;
     entry.base = base;
     entry.size_bytes = size_bytes;
+    entry.allocatable = allocatable;
+    entry.allocated_bytes = 0;
     entry.owner = None;
     entry.root_delegation = DelegationNodeId(NO_NODE_ID);
     entry.active_cap_count.store(0, Ordering::Relaxed);
@@ -555,7 +567,16 @@ pub fn init_bootstrap_process(owner: ProcessId) {
 
 /// Registers one physical-memory resource for the bootstrap registry.
 pub fn register_bootstrap_memory_resource(base: PhysicalAddress, size_bytes: u64) -> Result<ResourceId, CapError> {
-    register_resource(CapType::PhysicalMemory, base, size_bytes)
+    register_resource(CapType::PhysicalMemory, base, size_bytes, false)
+}
+
+/// Registers one physical-memory resource and marks whether it may hand out bootstrap allocations.
+pub fn register_bootstrap_memory_resource_with_kind(
+    base: PhysicalAddress,
+    size_bytes: u64,
+    allocatable: bool,
+) -> Result<ResourceId, CapError> {
+    register_resource(CapType::PhysicalMemory, base, size_bytes, allocatable)
 }
 
 /// Seeds the registry from the boot memory map and returns the number of registered resources.
@@ -565,9 +586,10 @@ pub fn seed_bootstrap_resources_from_handoff(
     let mut registered = 0usize;
     for region in regions {
         if matches!(region.kind, MemoryRegionKind::Usable | MemoryRegionKind::Kernel) {
-            register_bootstrap_memory_resource(
+            register_bootstrap_memory_resource_with_kind(
                 PhysicalAddress(region.start.as_u64()),
                 region.end.as_u64().saturating_sub(region.start.as_u64()),
+                matches!(region.kind, MemoryRegionKind::Usable),
             )?;
             registered += 1;
         }
@@ -607,6 +629,8 @@ pub fn resource(id: ResourceId) -> Option<ResourceView> {
         size_bytes: entry.size_bytes,
         owner: entry.owner,
         active_cap_count: entry.active_cap_count.load(Ordering::Acquire),
+        allocatable: entry.allocatable,
+        allocated_bytes: entry.allocated_bytes,
     })
 }
 
@@ -616,6 +640,70 @@ pub fn mint_bootstrap_root_capability(
     permissions: CapPermissions,
 ) -> Result<CapHandle, CapError> {
     mint_slot_for_resource(resource_id, permissions, None, DelegationNodeId(NO_NODE_ID), owner())
+}
+
+fn align_up(value: u64, alignment: u64) -> u64 {
+    if alignment <= 1 {
+        value
+    } else {
+        let remainder = value % alignment;
+        if remainder == 0 {
+            value
+        } else {
+            value + (alignment - remainder)
+        }
+    }
+}
+
+/// Fulfills the first bootstrap `cap_request` slice.
+pub fn request_bootstrap_capability(request: &CapRequest) -> Result<CapHandle, CapError> {
+    match *request {
+        CapRequest::PhysicalPages { num_pages, flags } => request_physical_pages(num_pages, flags),
+        _ => Err(CapError::ResourceNotFound),
+    }
+}
+
+fn request_physical_pages(num_pages: usize, flags: PageFlags) -> Result<CapHandle, CapError> {
+    if num_pages == 0 {
+        return Err(CapError::OutOfMemory);
+    }
+    if flags.contains(PageFlags::HUGE_2M) || flags.contains(PageFlags::HUGE_1G) {
+        return Err(CapError::ResourceNotFound);
+    }
+
+    let requested_bytes = (num_pages as u64).saturating_mul(crate::memory::PAGE_SIZE);
+    let alignment = if flags.contains(PageFlags::CONTIGUOUS) {
+        crate::memory::PAGE_SIZE
+    } else {
+        1
+    };
+
+    let mut index = 0usize;
+    while index < resource_count() {
+        let entry = &mut resources_mut()[index];
+        if entry.state.load(Ordering::Acquire) == RESOURCE_ACTIVE
+            && entry.cap_type == CapType::PhysicalMemory
+            && entry.allocatable
+        {
+            let start = align_up(entry.allocated_bytes, alignment);
+            if start.saturating_add(requested_bytes) <= entry.size_bytes {
+                let child_base = entry.base.0.saturating_add(start);
+                entry.allocated_bytes = start.saturating_add(requested_bytes);
+                let child = register_resource(
+                    CapType::PhysicalMemory,
+                    PhysicalAddress(child_base),
+                    requested_bytes,
+                    false,
+                )?;
+                return mint_bootstrap_root_capability(
+                    child,
+                    CapPermissions::READ | CapPermissions::WRITE | CapPermissions::REVOKE,
+                );
+            }
+        }
+        index += 1;
+    }
+    Err(CapError::OutOfMemory)
 }
 
 /// Verifies a handle against the bootstrap capability table.
@@ -672,10 +760,11 @@ mod tests {
         CapSlot, CapabilityTable, MAX_CAPS_PER_PROCESS, acquire_test_lock, active_count,
         delegate_bootstrap_handle, init_bootstrap_process, list_bootstrap_capabilities,
         mint_bootstrap_root_capability, register_bootstrap_memory_resource,
-        release_bootstrap_handle, resource, resource_count_public, verify_bootstrap_handle,
+        register_bootstrap_memory_resource_with_kind, release_bootstrap_handle, resource,
+        request_bootstrap_capability, resource_count_public, verify_bootstrap_handle,
     };
     use core::mem::size_of;
-    use feox_asi::{CapError, CapPermissions, PhysicalAddress, ProcessId};
+    use feox_asi::{CapError, CapPermissions, CapRequest, PageFlags, PhysicalAddress, ProcessId};
 
     #[test]
     fn cap_slot_stays_cache_line_sized() {
@@ -803,5 +892,53 @@ mod tests {
             Err(CapError::GenerationMismatch)
         );
         assert_eq!(resource(resource_id).expect("resource").active_cap_count, 0);
+    }
+
+    #[test]
+    fn physical_page_request_consumes_allocatable_resource() {
+        let _guard = acquire_test_lock();
+        init_bootstrap_process(ProcessId(0));
+        let root = register_bootstrap_memory_resource_with_kind(
+            PhysicalAddress(0x8000),
+            crate::memory::PAGE_SIZE * 4,
+            true,
+        )
+        .expect("allocatable resource");
+
+        let first = request_bootstrap_capability(&CapRequest::PhysicalPages {
+            num_pages: 2,
+            flags: PageFlags::CONTIGUOUS,
+        })
+        .expect("first request");
+        let second = request_bootstrap_capability(&CapRequest::PhysicalPages {
+            num_pages: 1,
+            flags: PageFlags::empty(),
+        })
+        .expect("second request");
+
+        let first_view =
+            verify_bootstrap_handle(first, CapPermissions::READ).expect("first handle verifies");
+        let second_view =
+            verify_bootstrap_handle(second, CapPermissions::READ).expect("second handle verifies");
+
+        let first_resource = resource(first_view.resource_id).expect("first child resource");
+        let second_resource = resource(second_view.resource_id).expect("second child resource");
+        let root_resource = resource(root).expect("root resource");
+
+        assert_eq!(first_resource.base, PhysicalAddress(0x8000));
+        assert_eq!(first_resource.size_bytes, crate::memory::PAGE_SIZE * 2);
+        assert_eq!(
+            second_resource.base,
+            PhysicalAddress(0x8000 + crate::memory::PAGE_SIZE * 2)
+        );
+        assert_eq!(second_resource.size_bytes, crate::memory::PAGE_SIZE);
+        assert_eq!(root_resource.allocated_bytes, crate::memory::PAGE_SIZE * 3);
+        assert_eq!(
+            request_bootstrap_capability(&CapRequest::PhysicalPages {
+                num_pages: 2,
+                flags: PageFlags::empty(),
+            }),
+            Err(CapError::OutOfMemory)
+        );
     }
 }

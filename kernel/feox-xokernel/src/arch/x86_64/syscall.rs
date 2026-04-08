@@ -6,7 +6,7 @@ use core::mem::size_of;
 use core::ptr::{addr_of, slice_from_raw_parts_mut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use feox_asi::{AsiOp, BatchOp, CapDelegateArgs, CapHandle, CapInfo};
+use feox_asi::{AsiOp, BatchOp, CapDelegateArgs, CapHandle, CapInfo, CapRequest};
 
 #[cfg(target_os = "none")]
 use super::cpu;
@@ -138,6 +138,7 @@ extern "C" fn feox_syscall_dispatch(
     };
 
     match opcode {
+        AsiOp::CapRequest => dispatch_cap_request(args_ptr, args_len, out_value),
         AsiOp::CapList => dispatch_cap_list(args_ptr.cast_mut(), args_len, out_value),
         AsiOp::CapDelegate => dispatch_cap_delegate(args_ptr, args_len, out_value),
         AsiOp::CapRelease => dispatch_cap_release(args_ptr, args_len, out_value),
@@ -151,6 +152,33 @@ extern "C" fn feox_syscall_dispatch(
             push_event_if_ready("asi-op-unsupported");
             write_out(out_value, 0);
             SYSCALL_ERR_UNSUPPORTED
+        }
+    }
+}
+
+fn dispatch_cap_request(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<CapRequest>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+
+    let request = unsafe {
+        // SAFETY: length is checked against `CapRequest` and the pointer is non-null.
+        *(args_ptr.cast::<CapRequest>())
+    };
+
+    match crate::capability::request_bootstrap_capability(&request) {
+        Ok(handle) => {
+            push_event_if_ready("asi-cap-request");
+            write_out(
+                out_value,
+                ((handle.generation as u64) << 32) | u64::from(handle.id),
+            );
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_cap_error(error)
         }
     }
 }
@@ -272,6 +300,27 @@ fn dispatch_batch_op(op: BatchOp, out_value: &mut u64) -> u64 {
             *out_value = 0;
             SYSCALL_ERR_INVALID_ARGS
         }
+        AsiOp::CapRequest => {
+            if op.args.is_null() || op.args_len != size_of::<CapRequest>() {
+                *out_value = 0;
+                return SYSCALL_ERR_INVALID_ARGS;
+            }
+            let request = unsafe {
+                // SAFETY: batch validation checked pointer non-null and exact size.
+                *(op.args.cast::<CapRequest>())
+            };
+            match crate::capability::request_bootstrap_capability(&request) {
+                Ok(handle) => {
+                    push_event_if_ready("asi-cap-request");
+                    *out_value = ((handle.generation as u64) << 32) | u64::from(handle.id);
+                    SYSCALL_OK
+                }
+                Err(error) => {
+                    *out_value = 0;
+                    syscall_cap_error(error)
+                }
+            }
+        }
         AsiOp::CapList => {
             *out_value = 0;
             SYSCALL_ERR_INVALID_ARGS
@@ -361,8 +410,8 @@ mod tests {
     };
     use core::mem::size_of;
     use feox_asi::{
-        AsiOp, BatchOp, CapDelegateArgs, CapError, CapHandle, CapInfo, PhysicalAddress,
-        ProcessId, SyscallResult,
+        AsiOp, BatchOp, CapDelegateArgs, CapError, CapHandle, CapInfo, CapRequest, PageFlags,
+        PhysicalAddress, ProcessId, SyscallResult,
     };
 
     #[test]
@@ -495,6 +544,40 @@ mod tests {
         assert_eq!(code, SYSCALL_OK);
         assert_eq!(total, 1);
         assert_eq!(infos[0].handle.id, 0);
+    }
+
+    #[test]
+    fn cap_request_returns_new_physical_memory_handle() {
+        let _guard = crate::capability::acquire_test_lock();
+        init();
+        crate::capability::init_bootstrap_process(ProcessId(0));
+        crate::capability::register_bootstrap_memory_resource_with_kind(
+            PhysicalAddress(0x8000),
+            0x4000,
+            true,
+        )
+        .expect("resource");
+        let request = CapRequest::PhysicalPages {
+            num_pages: 2,
+            flags: PageFlags::CONTIGUOUS,
+        };
+
+        let mut packed = 0;
+        let code = feox_syscall_dispatch(
+            AsiOp::CapRequest as u64,
+            (&raw const request).cast(),
+            size_of::<CapRequest>() as u64,
+            &mut packed,
+        );
+        assert_eq!(code, SYSCALL_OK);
+
+        let handle = CapHandle {
+            id: packed as u32,
+            generation: (packed >> 32) as u32,
+        };
+        let view = crate::capability::verify_bootstrap_handle(handle, feox_asi::CapPermissions::READ)
+            .expect("requested handle");
+        assert_eq!(view.cap_type, feox_asi::CapType::PhysicalMemory);
     }
 
     #[test]

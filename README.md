@@ -64,6 +64,8 @@ most for a low-level runtime:
   handles and initial `cap_list` / `cap_release` syscall coverage
 - bootstrap capabilities are now backed by a real resource registry and
   delegation tree, with first `cap_delegate` coverage
+- bootstrap `cap_request` can now mint physical-page capabilities from
+  allocatable memory resources through the x86_64 syscall lane
 
 ## Workstation Entry
 
