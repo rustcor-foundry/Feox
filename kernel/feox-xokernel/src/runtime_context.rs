@@ -1,6 +1,7 @@
 //! Retained bootstrap runtime context shared across early kernel paths.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
+use crate::memory::PAGE_SIZE;
 use core::sync::atomic::{AtomicU32, Ordering};
 use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
@@ -115,6 +116,10 @@ static mut BOOTSTRAP_EVENT_COUNT: usize = 0;
 const BOOTSTRAP_VM_MAPPING_CAPACITY: usize = 64;
 static mut BOOTSTRAP_VM_MAPPINGS: [Option<BootstrapVmMapping>; BOOTSTRAP_VM_MAPPING_CAPACITY] =
     [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
+const BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY: usize = 4;
+static mut BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS:
+    [Option<BootstrapPageTableAccessSlot>; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY] =
+    [None; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY];
 
 /// Retained bootstrap record for the core that owns the current runtime slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +202,17 @@ pub struct BootstrapVmMapping {
     pub handle: CapHandle,
     /// Offset into the capability resource at map time.
     pub offset_bytes: u64,
+}
+
+/// One retained bootstrap page-table access slot reservation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BootstrapPageTableAccessSlot {
+    /// Slot number inside the dedicated page-table access window.
+    pub slot_index: usize,
+    /// Physical base address of the reserved page-table frame.
+    pub frame_base: u64,
+    /// Virtual base address of the slot inside the access window.
+    pub virtual_base: u64,
 }
 
 /// Minimal retained command set for the first runtime service loop.
@@ -461,6 +477,67 @@ pub fn find_vm_mapping_for_address(
     }
 }
 
+/// Returns the retained page-table access slots in slot order.
+#[must_use]
+pub fn page_table_access_slots(
+) -> [Option<BootstrapPageTableAccessSlot>; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY] {
+    unsafe { BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS }
+}
+
+/// Acquires one retained page-table access slot for `frame_base`.
+///
+/// Reuses an existing slot if the same frame is already reserved.
+#[must_use]
+pub fn acquire_page_table_access_slot(
+    window_base: u64,
+    frame_base: u64,
+) -> Option<BootstrapPageTableAccessSlot> {
+    assert_context_claimed();
+    unsafe {
+        let mut index = 0usize;
+        while index < BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY {
+            if let Some(slot) = BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index]
+                && slot.frame_base == frame_base
+            {
+                return Some(slot);
+            }
+            index += 1;
+        }
+
+        index = 0;
+        while index < BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY {
+            if BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index].is_none() {
+                let slot = BootstrapPageTableAccessSlot {
+                    slot_index: index,
+                    frame_base,
+                    virtual_base: window_base + (index as u64 * PAGE_SIZE),
+                };
+                BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index] = Some(slot);
+                return Some(slot);
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+/// Releases the retained page-table access slot matching `slot`.
+#[must_use]
+pub fn release_page_table_access_slot(slot: BootstrapPageTableAccessSlot) -> bool {
+    assert_context_claimed();
+    unsafe {
+        if slot.slot_index >= BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY {
+            return false;
+        }
+        let active = BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[slot.slot_index];
+        if active == Some(slot) {
+            BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[slot.slot_index] = None;
+            return true;
+        }
+        false
+    }
+}
+
 /// Finds the first non-overlapping page-aligned region inside the bootstrap VM
 /// window that can satisfy `length_bytes`.
 #[must_use]
@@ -529,19 +606,22 @@ pub(crate) fn reset_for_tests() {
         BOOTSTRAP_EVENTS = [None; BOOTSTRAP_EVENT_CAPACITY];
         BOOTSTRAP_EVENT_COUNT = 0;
         BOOTSTRAP_VM_MAPPINGS = [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
+        BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS = [None; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY];
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapVmMapping, claim_bootstrap_context, dequeue_command, enqueue_command, events,
-        find_vm_mapping_for_address, push_event, ready_summary, record_vm_mapping,
-        remove_vm_mapping, reset_for_tests, runtime_readiness, service, service_heartbeat,
-        service_report, store_ready_summary, store_runtime_readiness, store_service,
-        store_service_heartbeat, store_service_report, vm_mappings, RuntimeReadinessState,
+        BootstrapPageTableAccessSlot, BootstrapVmMapping, RuntimeReadinessState,
         RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
-        RuntimeServiceReport, RuntimeServiceState,
+        RuntimeServiceReport, RuntimeServiceState, acquire_page_table_access_slot,
+        claim_bootstrap_context, dequeue_command, enqueue_command, events,
+        find_vm_mapping_for_address, page_table_access_slots, push_event, ready_summary,
+        record_vm_mapping, release_page_table_access_slot, remove_vm_mapping, reset_for_tests,
+        runtime_readiness, service, service_heartbeat, service_report, store_ready_summary,
+        store_runtime_readiness, store_service, store_service_heartbeat,
+        store_service_report, vm_mappings,
     };
     use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
@@ -807,5 +887,31 @@ mod tests {
             find_vm_mapping_for_address(mapping.handle, mapping.region.base + mapping.region.length_bytes),
             None
         );
+    }
+
+    #[test]
+    fn bootstrap_page_table_access_slots_allocate_reuse_and_release() {
+        reset_for_tests();
+        let first = acquire_page_table_access_slot(0xFFFF_9000_0800_0000, 0x2000)
+            .expect("first slot should allocate");
+        let reused = acquire_page_table_access_slot(0xFFFF_9000_0800_0000, 0x2000)
+            .expect("same frame should reuse slot");
+        let second = acquire_page_table_access_slot(0xFFFF_9000_0800_0000, 0x3000)
+            .expect("second slot should allocate");
+
+        assert_eq!(first, reused);
+        assert_eq!(
+            first,
+            BootstrapPageTableAccessSlot {
+                slot_index: 0,
+                frame_base: 0x2000,
+                virtual_base: 0xFFFF_9000_0800_0000,
+            }
+        );
+        assert_eq!(second.slot_index, 1);
+        assert!(page_table_access_slots().iter().flatten().any(|slot| *slot == first));
+        assert!(release_page_table_access_slot(first));
+        assert!(!release_page_table_access_slot(first));
+        assert!(page_table_access_slots().iter().flatten().all(|slot| *slot != first));
     }
 }

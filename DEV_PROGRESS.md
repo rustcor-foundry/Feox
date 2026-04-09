@@ -27,6 +27,8 @@ This document is the running development record for Feox.
 - attempted a live bootstrap VM self-test in the higher-half runtime path and confirmed the current VM helpers still rely on page-table-access assumptions that are safe in host tests but not yet hardened for live post-handoff use; reverted that probe and documented the limitation explicitly
 - added `docs/PAGE_TABLE_ACCESS_PLAN.md` to define the next narrow design step: a bootstrap page-table access window for live higher-half paging operations without committing to a permanent direct map yet
 - reserved a 16 KiB bootstrap page-table access window at `0xFFFF_9000_0800_0000` in `memory.rs` and `docs/VIRTUAL_ADDRESS_LAYOUT.md` so the next implementation slice has an explicit live paging access target
+- taught the transition-root builder in `boot.rs` to prebuild the reserved page-table access window alongside the bootstrap VM window so the live accessor layer has address-space scaffolding ready before the higher-half handoff
+- added retained page-table access slot bookkeeping in `runtime_context.rs` and a first `BootstrapPageTableAccessWindow` helper in `paging.rs` so live higher-half page-table-frame aliases now have an explicit reservation model before the VM callers are switched over
 
 ### 2026-04-07
 

@@ -57,9 +57,10 @@ Last updated: 2026-04-08
 ## Current Risks
 
 - the retained runtime still idles after the command queue drains — broader subsystem bring-up not yet started
-- permanent virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows), though the bootstrap layout now reserves a dedicated page-table access window for the next live paging pass
+- permanent virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows), though the bootstrap layout now reserves and prebuilds a dedicated page-table access window for the next live paging pass
 - the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population beyond physical memory, and the memory lane is still bootstrap-window-only rather than a real per-process VM subsystem
 - the new bootstrap VM lane is proven in host tests and syscall/unit coverage, but live post-handoff use still depends on page-table-access assumptions that are not yet hardened for the higher-half runtime path
+- the transition root now prebuilds both the bootstrap VM window and the reserved page-table access window, and `paging.rs` now has a retained-slot-backed accessor helper for that window, but the live bootstrap VM callers still have not been switched off `BootstrapIdentityMappedPageTables`
 
 ## Recommended Entry Points
 
@@ -74,7 +75,7 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Bootstrap VM hardening** — validate the widened bootstrap memory lane under QEMU, especially `mem_vtop` / `mem_vtop_batch`, and decide how page-table-access mappings should evolve beyond the current bootstrap assumptions
+1. **Bootstrap VM hardening** — switch the live bootstrap VM callers in `vm.rs` from `BootstrapIdentityMappedPageTables` to the new page-table access helper, then reattempt bounded QEMU validation for `mem_map` / `mem_vtop` / `mem_vtop_batch`
 2. **Virtual address layout** — lock the permanent direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`
 
 The next concrete design document for item 1 is `docs/PAGE_TABLE_ACCESS_PLAN.md`.
