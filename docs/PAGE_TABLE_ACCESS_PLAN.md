@@ -182,6 +182,33 @@ Keep `BootstrapIdentityMappedPageTables` only for:
 5. reattempt the live runtime self-test
 6. only after that, broaden the smoke lane to assert the VM self-test marker
 
+## Latest Finding
+
+A follow-up live self-test narrowed the remaining blocker further:
+
+- the failure happens on the **first attempt to reserve an alias for the
+  active root frame itself**
+- a newer prototype now successfully installs the access-window control
+  self-map and can write visible PTEs for dynamic alias slots
+- but the first live write through the aliased active root frame still faults
+  immediately after those slot PTEs are installed
+- that means the blocker is now narrower than "no access-window foothold",
+  but broader than "the slot PTE was never written"
+
+So the next implementation step is not "retry the same source more carefully."
+It is to provide one **non-identity foothold** for the page-table access
+window itself.
+
+The most promising narrow answer is:
+
+- retain or permanently expose the page-table frame that backs the access
+  window's own leaf PTEs
+- use that control page to install slot mappings for arbitrary page-table
+  frames after handoff
+- then validate one access strategy that can safely dereference those newly
+  installed aliases in the retained runtime before switching the live
+  `mem_map` / `mem_unmap` / `mem_vtop` callers over
+
 ## Validation Target
 
 The next successful validation should be:

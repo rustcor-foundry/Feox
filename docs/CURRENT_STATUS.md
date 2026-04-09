@@ -61,6 +61,7 @@ Last updated: 2026-04-08
 - the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population beyond physical memory, and the memory lane is still bootstrap-window-only rather than a real per-process VM subsystem
 - the new bootstrap VM lane is proven in host tests and syscall/unit coverage, but live post-handoff use still depends on page-table-access assumptions that are not yet hardened for the higher-half runtime path
 - the transition root now prebuilds both the bootstrap VM window and the reserved page-table access window, and `paging.rs` now has a retained-slot-backed accessor helper for that window, but the live bootstrap VM callers still have not been switched off `BootstrapIdentityMappedPageTables`
+- the latest live self-test narrowed the remaining blocker further: the access-window control self-map and dynamic slot PTE installs now succeed, but the first live write through the aliased active root frame still page-faults, so the new source prototype remains out of the live `mem_map` path for now
 
 ## Recommended Entry Points
 
@@ -75,7 +76,7 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Bootstrap VM hardening** — switch the live bootstrap VM callers in `vm.rs` from `BootstrapIdentityMappedPageTables` to the new page-table access helper, then reattempt bounded QEMU validation for `mem_map` / `mem_vtop` / `mem_vtop_batch`
+1. **Bootstrap VM hardening** — validate one safe dereference strategy for access-window aliases after their PTEs are installed, then retry the live caller cutover from `BootstrapIdentityMappedPageTables` in `mem_map` / `mem_unmap` / `mem_vtop`
 2. **Virtual address layout** — lock the permanent direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`
 
 The next concrete design document for item 1 is `docs/PAGE_TABLE_ACCESS_PLAN.md`.
