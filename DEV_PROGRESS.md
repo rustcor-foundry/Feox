@@ -29,6 +29,8 @@ This document is the running development record for Feox.
 - reserved a 16 KiB bootstrap page-table access window at `0xFFFF_9000_0800_0000` in `memory.rs` and `docs/VIRTUAL_ADDRESS_LAYOUT.md` so the next implementation slice has an explicit live paging access target
 - taught the transition-root builder in `boot.rs` to prebuild the reserved page-table access window alongside the bootstrap VM window so the live accessor layer has address-space scaffolding ready before the higher-half handoff
 - added retained page-table access slot bookkeeping in `runtime_context.rs` and a first `BootstrapPageTableAccessWindow` helper in `paging.rs` so live higher-half page-table-frame aliases now have an explicit reservation model before the VM callers are switched over
+- reattempted a live bootstrap VM self-test and narrowed the remaining blocker: the first post-handoff alias of the active root frame still faults because the reservation prototype needs one non-identity foothold for the access window's own control page before live `mem_map` can stop depending on bootstrap identity access
+- extended that prototype by self-mapping the access-window control PT page during transition-root construction and confirmed in QEMU that the runtime can install dynamic slot PTEs after handoff, but the first live write through the aliased root frame still page-faults, so the new access source remains a prototype rather than the default live VM path
 
 ### 2026-04-07
 

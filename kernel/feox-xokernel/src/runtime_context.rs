@@ -116,7 +116,7 @@ static mut BOOTSTRAP_EVENT_COUNT: usize = 0;
 const BOOTSTRAP_VM_MAPPING_CAPACITY: usize = 64;
 static mut BOOTSTRAP_VM_MAPPINGS: [Option<BootstrapVmMapping>; BOOTSTRAP_VM_MAPPING_CAPACITY] =
     [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
-const BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY: usize = 4;
+const BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY: usize = 3;
 static mut BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS:
     [Option<BootstrapPageTableAccessSlot>; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY] =
     [None; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY];
@@ -510,7 +510,10 @@ pub fn acquire_page_table_access_slot(
                 let slot = BootstrapPageTableAccessSlot {
                     slot_index: index,
                     frame_base,
-                    virtual_base: window_base + (index as u64 * PAGE_SIZE),
+                    // Slot 0 in the access window is reserved as the permanent
+                    // self-map of the control PT page. Dynamic aliases start
+                    // at the second 4 KiB slot.
+                    virtual_base: window_base + ((index as u64 + 1) * PAGE_SIZE),
                 };
                 BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index] = Some(slot);
                 return Some(slot);
@@ -905,7 +908,7 @@ mod tests {
             BootstrapPageTableAccessSlot {
                 slot_index: 0,
                 frame_base: 0x2000,
-                virtual_base: 0xFFFF_9000_0800_0000,
+                virtual_base: 0xFFFF_9000_0800_1000,
             }
         );
         assert_eq!(second.slot_index, 1);

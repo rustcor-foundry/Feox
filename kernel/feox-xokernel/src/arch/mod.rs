@@ -11,7 +11,7 @@ mod selected {
     pub use super::x86_64::{
         cpu::{
             disable_interrupts, enable_cr4_security_bits, enable_nxe, hlt_loop, invalidate_page,
-            read_cr3, read_rsp, switch_page_table_root_and_jump, switch_stack_and_jump,
+            read_cr3, read_rsp, reload_current_page_table_root, switch_page_table_root_and_jump, switch_stack_and_jump,
             trigger_breakpoint,
         },
         debugcon, gdt, idt, panic, serial, syscall,
@@ -88,6 +88,11 @@ pub unsafe fn reload_descriptor_tables(gdt_base: u64, idt_base: u64, idt_handler
 /// Invalidates the TLB entry for a single virtual address on the current core.
 pub fn invalidate_page(virt: u64) {
     selected::invalidate_page(virt);
+}
+
+/// Reloads the current page-table root to force a full local TLB flush.
+pub fn reload_current_page_table_root() {
+    selected::reload_current_page_table_root();
 }
 
 /// Raises a controlled software breakpoint through the active IDT.

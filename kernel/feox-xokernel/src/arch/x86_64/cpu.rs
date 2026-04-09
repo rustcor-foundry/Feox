@@ -235,6 +235,16 @@ pub fn invalidate_page(virt_addr: u64) {
     }
 }
 
+/// Reloads CR3 with its current value, forcing a full local TLB flush.
+pub fn reload_current_page_table_root() {
+    let current = read_cr3();
+    unsafe {
+        // SAFETY: reloading CR3 with the current root is a privileged but
+        // architecturally valid way to flush the local TLB.
+        asm!("mov cr3, {}", in(reg) current, options(nostack, preserves_flags));
+    }
+}
+
 /// Raises a software breakpoint exception on the current core.
 pub fn trigger_breakpoint() {
     // SAFETY: this intentionally raises vector 3 so the bootstrap exception

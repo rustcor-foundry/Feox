@@ -1050,6 +1050,34 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             {
                                 map_result = Err("transition_page_table_access_window_prepare_failed");
                             }
+                            if map_result.is_ok() {
+                                let control_flags =
+                                    (1_u64 << 1) | paging::PageTableEntry::FLAG_NO_EXECUTE;
+                                match page_root.leaf_table_frame_with(
+                                    &live_page_tables,
+                                    runtime_layout.page_table_access_window_base(),
+                                ) {
+                                    Ok(Some(access_window_pt_frame)) => {
+                                        if page_root
+                                            .map_4k_with(
+                                                &mut live_page_tables,
+                                                &mut paging_allocator,
+                                                runtime_layout.page_table_access_window_base(),
+                                                access_window_pt_frame,
+                                                control_flags,
+                                            )
+                                            .is_err()
+                                        {
+                                            map_result =
+                                                Err("transition_page_table_access_control_map_failed");
+                                        }
+                                    }
+                                    _ => {
+                                        map_result =
+                                            Err("transition_page_table_access_control_unavailable");
+                                    }
+                                }
+                            }
                             map_result
                         } else {
                             Err("transition_root_not_identity_mapped")

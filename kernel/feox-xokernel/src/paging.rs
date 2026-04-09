@@ -7,6 +7,7 @@ use crate::memory::{
     FrameAllocator, PAGE_SIZE, PhysicalAddress, PhysicalFrame, ReservationKind, VirtualAddress,
     active_page_table_root,
 };
+use core::cell::UnsafeCell;
 
 /// Number of entries in one `x86_64` page table.
 pub const PAGE_TABLE_ENTRY_COUNT: usize = 512;
@@ -238,6 +239,31 @@ impl PageTableRoot {
             ),
             entry: p1,
         }))
+    }
+
+    /// Returns the leaf PT frame that governs the supplied 4 KiB virtual
+    /// address, if all intermediate tables exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PageWalkError`] when a required table frame is unavailable or
+    /// when a huge-page entry is encountered before the leaf PT.
+    pub fn leaf_table_frame_with(
+        self,
+        source: &impl PageTableFrameSource,
+        virtual_address: VirtualAddress,
+    ) -> Result<Option<PhysicalFrame>, PageWalkError> {
+        let indices = virtual_address.page_table_indices();
+        let Some(p4) = read_entry(source, self.frame, indices.p4, PageWalkLevel::Pml4)? else {
+            return Ok(None);
+        };
+        let Some(p3) = read_entry(source, p4.frame(), indices.p3, PageWalkLevel::Pdpt)? else {
+            return Ok(None);
+        };
+        let Some(p2) = read_entry(source, p3.frame(), indices.p2, PageWalkLevel::Pd)? else {
+            return Ok(None);
+        };
+        Ok(Some(p2.frame()))
     }
 
     /// Installs a 4 KiB mapping, allocating missing intermediate tables.
@@ -614,38 +640,27 @@ impl BootstrapPageTableAccessWindow {
 
         #[cfg(target_os = "none")]
         {
-            let virtual_address = VirtualAddress::new(slot.virtual_base);
-            let mut source = BootstrapIdentityMappedPageTables;
-            let mut allocator = NoopPageTableFrameAllocator;
-            match self.root.map_4k_with(
-                &mut source,
-                &mut allocator,
-                virtual_address,
-                frame,
-                PageTableEntry::FLAG_WRITABLE | PageTableEntry::FLAG_NO_EXECUTE,
-            ) {
-                Ok(()) => {}
-                Err(Map4kError::AlreadyMapped(_)) => {
-                    let translation = self
-                        .root
-                        .translate_with(&source, virtual_address)
-                        .map_err(PageTableAccessError::Walk)?
-                        .ok_or(PageTableAccessError::Map(Map4kError::MissingTableFrame(
-                            self.root.frame(),
-                        )))?;
-                    let observed_frame = PhysicalFrame::containing(translation.physical_address);
-                    if observed_frame != frame {
-                        let _ = crate::runtime_context::release_page_table_access_slot(slot);
-                        return Err(PageTableAccessError::MappingMismatch {
-                            expected_frame: frame,
-                            observed_frame,
-                        });
-                    }
-                }
-                Err(error) => {
+            let entry_index = VirtualAddress::new(slot.virtual_base).page_table_indices().p1 as usize;
+            let control = bootstrap_page_table_access_control_table_mut(self.window_base)
+                .ok_or(PageTableAccessError::Map(Map4kError::MissingTableFrame(self.root.frame())))?;
+            let existing = PageTableEntry::from_raw(control[entry_index]);
+            if existing.is_present() {
+                let observed_frame = existing.frame();
+                if observed_frame != frame {
                     let _ = crate::runtime_context::release_page_table_access_slot(slot);
-                    return Err(PageTableAccessError::Map(error));
+                    return Err(PageTableAccessError::MappingMismatch {
+                        expected_frame: frame,
+                        observed_frame,
+                    });
                 }
+            } else {
+                control[entry_index] = PageTableEntry::present(
+                    frame,
+                    PageTableEntry::FLAG_WRITABLE | PageTableEntry::FLAG_NO_EXECUTE,
+                )
+                .raw();
+                crate::arch::invalidate_page(slot.virtual_base);
+                crate::arch::reload_current_page_table_root();
             }
         }
 
@@ -690,11 +705,15 @@ impl BootstrapPageTableAccessReservation {
     pub fn release(self) -> Result<(), PageTableAccessError> {
         #[cfg(target_os = "none")]
         {
-            let mut source = BootstrapIdentityMappedPageTables;
-            let _ = self
-                .root
-                .unmap_4k_with(&mut source, self.virtual_address())
-                .map_err(PageTableAccessError::Unmap)?;
+            let entry_index = self.virtual_address().page_table_indices().p1 as usize;
+            let control = bootstrap_page_table_access_control_table_mut(
+                self.slot.virtual_base.saturating_sub(PAGE_SIZE),
+            )
+            .ok_or(PageTableAccessError::Unmap(Unmap4kError::MissingTableFrame(
+                self.root.frame(),
+            )))?;
+            control[entry_index] = 0;
+            crate::arch::invalidate_page(self.virtual_address().as_u64());
         }
 
         if crate::runtime_context::release_page_table_access_slot(self.slot) {
@@ -705,12 +724,137 @@ impl BootstrapPageTableAccessReservation {
     }
 }
 
-#[cfg(target_os = "none")]
-struct NoopPageTableFrameAllocator;
+/// Page-table frame source backed by the bootstrap page-table access window.
+///
+/// Slot 0 of the window is a permanent self-map of the control PT page. The
+/// remaining retained slots are used as temporary aliases for live page-table
+/// frames after the higher-half handoff.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+#[derive(Debug)]
+pub struct BootstrapPageTableAccessSource {
+    window: BootstrapPageTableAccessWindow,
+    reservations: UnsafeCell<[Option<BootstrapPageTableAccessReservation>; 3]>,
+}
 
-#[cfg(target_os = "none")]
-impl PageTableFrameAllocator for NoopPageTableFrameAllocator {
-    fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
+impl BootstrapPageTableAccessSource {
+    /// Creates a source backed by one explicit access window helper.
+    #[must_use]
+    pub const fn new(window: BootstrapPageTableAccessWindow) -> Self {
+        Self {
+            window,
+            reservations: UnsafeCell::new([None; 3]),
+        }
+    }
+
+    /// Creates a source for the currently active root and bootstrap access
+    /// window.
+    #[must_use]
+    pub fn active() -> Self {
+        Self::new(BootstrapPageTableAccessWindow::active())
+    }
+
+    fn reservation_for(&self, frame: PhysicalFrame) -> Option<BootstrapPageTableAccessReservation> {
+        let frame_base = frame.start_address().as_u64();
+        let reservations = unsafe { &mut *self.reservations.get() };
+        let mut index = 0usize;
+        while index < reservations.len() {
+            if let Some(reservation) = reservations[index]
+                && reservation.frame().start_address().as_u64() == frame_base
+            {
+                return Some(reservation);
+            }
+            index += 1;
+        }
+
+        index = 0;
+        while index < reservations.len() {
+            if reservations[index].is_none() {
+                let reservation = self.window.reserve(frame).ok()?;
+                reservations[index] = Some(reservation);
+                return Some(reservation);
+            }
+            index += 1;
+        }
+        None
+    }
+}
+
+impl Drop for BootstrapPageTableAccessSource {
+    fn drop(&mut self) {
+        let reservations = unsafe { &mut *self.reservations.get() };
+        let mut index = 0usize;
+        while index < reservations.len() {
+            if let Some(reservation) = reservations[index].take() {
+                let _ = reservation.release();
+            }
+            index += 1;
+        }
+    }
+}
+
+impl PageTableFrameSource for BootstrapPageTableAccessSource {
+    fn table(&self, frame: PhysicalFrame) -> Option<&[u64; PAGE_TABLE_ENTRY_COUNT]> {
+        let reservation = self.reservation_for(frame)?;
+        #[cfg(target_os = "none")]
+        {
+            let address = reservation.virtual_address().as_u64();
+            debug_assert_eq!(address & 0xFFF, 0);
+            let table = unsafe {
+                &*(core::ptr::with_exposed_provenance::<[u64; PAGE_TABLE_ENTRY_COUNT]>(
+                    address as usize,
+                ))
+            };
+            Some(table)
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = reservation;
+            None
+        }
+    }
+}
+
+impl PageTableFrameMutSource for BootstrapPageTableAccessSource {
+    fn table_mut(&mut self, frame: PhysicalFrame) -> Option<&mut [u64; PAGE_TABLE_ENTRY_COUNT]> {
+        let reservation = self.reservation_for(frame)?;
+        #[cfg(target_os = "none")]
+        {
+            let address = reservation.virtual_address().as_u64();
+            debug_assert_eq!(address & 0xFFF, 0);
+            let table = unsafe {
+                &mut *(core::ptr::with_exposed_provenance_mut::<[u64; PAGE_TABLE_ENTRY_COUNT]>(
+                    address as usize,
+                ))
+            };
+            Some(table)
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = reservation;
+            None
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+fn bootstrap_page_table_access_control_table_mut(
+    window_base: u64,
+) -> Option<&'static mut [u64; PAGE_TABLE_ENTRY_COUNT]> {
+    #[cfg(target_os = "none")]
+    {
+        if window_base == 0 {
+            return None;
+        }
+        let table = unsafe {
+            &mut *(core::ptr::with_exposed_provenance_mut::<[u64; PAGE_TABLE_ENTRY_COUNT]>(
+                window_base as usize,
+            ))
+        };
+        Some(table)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = window_base;
         None
     }
 }
@@ -1149,11 +1293,11 @@ mod tests {
 
         assert_eq!(
             first.virtual_address().as_u64(),
-            BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE
+            BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE + PAGE_SIZE
         );
         assert_eq!(
             second.virtual_address().as_u64(),
-            BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE + PAGE_SIZE
+            BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE + (2 * PAGE_SIZE)
         );
         assert_eq!(first.frame(), first_frame);
         assert_eq!(second.frame(), second_frame);
@@ -1178,7 +1322,7 @@ mod tests {
         );
 
         let mut index = 0u64;
-        while index < 4 {
+        while index < 3 {
             let frame =
                 PhysicalFrame::containing(PhysicalAddress::new(0x0030_0000 + index * PAGE_SIZE));
             window.reserve(frame).expect("slot should reserve");
