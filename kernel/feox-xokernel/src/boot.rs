@@ -1038,6 +1038,18 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             {
                                 map_result = Err("transition_vm_window_prepare_failed");
                             }
+                            if map_result.is_ok()
+                                && page_root
+                                    .prepare_4k_pages_with(
+                                        &mut live_page_tables,
+                                        &mut paging_allocator,
+                                        runtime_layout.page_table_access_window_base(),
+                                        runtime_layout.page_table_access_window_size(),
+                                    )
+                                    .is_err()
+                            {
+                                map_result = Err("transition_page_table_access_window_prepare_failed");
+                            }
                             map_result
                         } else {
                             Err("transition_root_not_identity_mapped")
