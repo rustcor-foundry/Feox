@@ -1,0 +1,114 @@
+name: ai-cpu-review
+
+on:
+  workflow_dispatch:
+    inputs:
+      purpose:
+        description: Review purpose
+        required: false
+        default: manual review
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  local-strong-review:
+    runs-on: [self-hosted, lx-ai1, ai-control]
+    env:
+      WSKY_API_URL: http://127.0.0.1:8787
+      WSKY_PY: /opt/wsky-ai-control/.venv/bin/python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show host identity
+        run: |
+          echo "runner=$(hostname)"
+          echo "pwd=$PWD"
+
+      - name: Detect repo slug
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          remote = subprocess.check_output(['git', 'config', '--get', 'remote.origin.url'], text=True).strip()
+          slug = remote.rsplit(':', 1)[-1].rsplit('/', 2)[-2:]
+          slug = '/'.join(slug).removesuffix('.git')
+          print(slug)
+          open('repo-slug.txt', 'w', encoding='utf-8').write(slug + '\n')
+          PY
+
+      - name: Build review purpose
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_PURPOSE: ${{ github.event.inputs.purpose }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$PR_NUMBER" ]; then
+            PURPOSE="PR #$PR_NUMBER review"
+          else
+            PURPOSE="${REVIEW_PURPOSE:-manual review}"
+          fi
+          printf '%s\n' "$PURPOSE" > review-purpose.txt
+
+      - name: Control-plane preflight
+        run: |
+          "$WSKY_PY" -m wsky_ai_control.cli doctor --json
+
+      - name: Create tracked review session
+        run: |
+          REPO_SLUG="$(cat repo-slug.txt)"
+          PURPOSE="$(cat review-purpose.txt)"
+          "$WSKY_PY" -m wsky_ai_control.cli start-task \
+            --path "$PWD" \
+            --purpose "$REPO_SLUG $PURPOSE" \
+            --model-route local-strong \
+            --json > review-session.json
+          python3 - <<'PY'
+          import json
+          payload = json.load(open('review-session.json', 'r', encoding='utf-8'))
+          open('review-session-id.txt', 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
+          PY
+
+      - name: Mark review progress
+        run: |
+          SESSION_ID="$(cat review-session-id.txt)"
+          REPO_SLUG="$(cat repo-slug.txt)"
+          PURPOSE="$(cat review-purpose.txt)"
+          "$WSKY_PY" -m wsky_ai_control.cli append-session-history \
+            --session-id "$SESSION_ID" \
+            --role event \
+            --content "$REPO_SLUG review workflow reached lx-ai1 for: $PURPOSE."
+
+      - name: Capture review diff summary
+        if: always()
+        run: |
+          if [ ! -f review-session-id.txt ]; then
+            exit 0
+          fi
+          SESSION_ID="$(cat review-session-id.txt)"
+          "$WSKY_PY" -m wsky_ai_control.cli capture-session-diff \
+            --session-id "$SESSION_ID" \
+            --path "$PWD" \
+            --json > review-diff-summary.json || true
+
+      - name: Finalize review session
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ ! -f review-session-id.txt ]; then
+            exit 0
+          fi
+          SESSION_ID="$(cat review-session-id.txt)"
+          REPO_SLUG="$(cat repo-slug.txt)"
+          PURPOSE="$(cat review-purpose.txt)"
+          FINAL_STATUS="failed"
+          if [ "$JOB_STATUS" = "success" ]; then
+            FINAL_STATUS="completed"
+          fi
+          printf 'job=%s\nhost=%s\nrepo=%s\npurpose=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" "$PURPOSE" > review-session.log
+          "$WSKY_PY" -m wsky_ai_control.cli report-session \
+            --session-id "$SESSION_ID" \
+            --role event \
+            --content "$REPO_SLUG review workflow finished with job status: $JOB_STATUS." \
+            --log-path review-session.log \
+            --status "$FINAL_STATUS"
