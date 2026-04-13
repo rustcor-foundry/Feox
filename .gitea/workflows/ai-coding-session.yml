@@ -26,6 +26,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare workflow temp dir
+        shell: bash
+        run: |
+          WORKFLOW_TMP="$(mktemp -d)"
+          printf 'WORKFLOW_TMP=%s\n' "$WORKFLOW_TMP" >> "$GITHUB_ENV"
+
       - name: Show host identity
         run: |
           echo "runner=$(hostname)"
@@ -47,29 +53,29 @@ jobs:
             --path "$PWD" \
             --purpose "$PURPOSE" \
             --model-route "$MODEL_ROUTE" \
-            -- bash -lc "$CODING_COMMAND" | tee runner-output.txt
+            -- bash -lc "$CODING_COMMAND" | tee "$WORKFLOW_TMP/runner-output.txt"
           rc=${PIPESTATUS[0]}
-          echo "$rc" > runner-exit-code.txt
-          awk -F= '/^session_id=/{print $2}' runner-output.txt | tail -n1 > session-id.txt
+          echo "$rc" > "$WORKFLOW_TMP/runner-exit-code.txt"
+          awk -F= '/^session_id=/{print $2}' "$WORKFLOW_TMP/runner-output.txt" | tail -n1 > "$WORKFLOW_TMP/session-id.txt"
           exit 0
 
       - name: Capture session diff
         if: always()
         shell: bash
         run: |
-          if [ ! -s session-id.txt ]; then
+          if [ ! -s "$WORKFLOW_TMP/session-id.txt" ]; then
             exit 0
           fi
-          SESSION_ID="$(cat session-id.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/session-id.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli capture-session-diff \
             --session-id "$SESSION_ID" \
             --path "$PWD" \
-            --json > session-diff.json || true
-          cat session-diff.json || true
+            --json > "$WORKFLOW_TMP/session-diff.json" || true
+          cat "$WORKFLOW_TMP/session-diff.json" || true
 
       - name: Finish with command status
         if: always()
         shell: bash
         run: |
-          rc="$(cat runner-exit-code.txt)"
+          rc="$(cat "$WORKFLOW_TMP/runner-exit-code.txt")"
           exit "$rc"

@@ -20,6 +20,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare workflow temp dir
+        shell: bash
+        run: |
+          WORKFLOW_TMP="$(mktemp -d)"
+          printf 'WORKFLOW_TMP=%s\n' "$WORKFLOW_TMP" >> "$GITHUB_ENV"
+
       - name: Show host identity
         run: |
           echo "runner=$(hostname)"
@@ -33,7 +39,8 @@ jobs:
           slug = remote.rsplit(':', 1)[-1].rsplit('/', 2)[-2:]
           slug = '/'.join(slug).removesuffix('.git')
           print(slug)
-          open('repo-slug.txt', 'w', encoding='utf-8').write(slug + '\n')
+          import os
+          open(os.path.join(os.environ['WORKFLOW_TMP'], 'repo-slug.txt'), 'w', encoding='utf-8').write(slug + '\n')
           PY
 
       - name: Build review purpose
@@ -47,7 +54,7 @@ jobs:
           else
             PURPOSE="${REVIEW_PURPOSE:-manual review}"
           fi
-          printf '%s\n' "$PURPOSE" > review-purpose.txt
+          printf '%s\n' "$PURPOSE" > "$WORKFLOW_TMP/review-purpose.txt"
 
       - name: Control-plane preflight
         run: |
@@ -55,24 +62,25 @@ jobs:
 
       - name: Create tracked review session
         run: |
-          REPO_SLUG="$(cat repo-slug.txt)"
-          PURPOSE="$(cat review-purpose.txt)"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
+          PURPOSE="$(cat "$WORKFLOW_TMP/review-purpose.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli start-task \
             --path "$PWD" \
             --purpose "$REPO_SLUG $PURPOSE" \
             --model-route local-strong \
-            --json > review-session.json
+            --json > "$WORKFLOW_TMP/review-session.json"
           python3 - <<'PY'
+          import os
           import json
-          payload = json.load(open('review-session.json', 'r', encoding='utf-8'))
-          open('review-session-id.txt', 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
+          payload = json.load(open(os.path.join(os.environ['WORKFLOW_TMP'], 'review-session.json'), 'r', encoding='utf-8'))
+          open(os.path.join(os.environ['WORKFLOW_TMP'], 'review-session-id.txt'), 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
           PY
 
       - name: Mark review progress
         run: |
-          SESSION_ID="$(cat review-session-id.txt)"
-          REPO_SLUG="$(cat repo-slug.txt)"
-          PURPOSE="$(cat review-purpose.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/review-session-id.txt")"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
+          PURPOSE="$(cat "$WORKFLOW_TMP/review-purpose.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli append-session-history \
             --session-id "$SESSION_ID" \
             --role event \
@@ -81,34 +89,34 @@ jobs:
       - name: Capture review diff summary
         if: always()
         run: |
-          if [ ! -f review-session-id.txt ]; then
+          if [ ! -f "$WORKFLOW_TMP/review-session-id.txt" ]; then
             exit 0
           fi
-          SESSION_ID="$(cat review-session-id.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/review-session-id.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli capture-session-diff \
             --session-id "$SESSION_ID" \
             --path "$PWD" \
-            --json > review-diff-summary.json || true
+            --json > "$WORKFLOW_TMP/review-diff-summary.json" || true
 
       - name: Finalize review session
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
-          if [ ! -f review-session-id.txt ]; then
+          if [ ! -f "$WORKFLOW_TMP/review-session-id.txt" ]; then
             exit 0
           fi
-          SESSION_ID="$(cat review-session-id.txt)"
-          REPO_SLUG="$(cat repo-slug.txt)"
-          PURPOSE="$(cat review-purpose.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/review-session-id.txt")"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
+          PURPOSE="$(cat "$WORKFLOW_TMP/review-purpose.txt")"
           FINAL_STATUS="failed"
           if [ "$JOB_STATUS" = "success" ]; then
             FINAL_STATUS="completed"
           fi
-          printf 'job=%s\nhost=%s\nrepo=%s\npurpose=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" "$PURPOSE" > review-session.log
+          printf 'job=%s\nhost=%s\nrepo=%s\npurpose=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" "$PURPOSE" > "$WORKFLOW_TMP/review-session.log"
           "$WSKY_PY" -m wsky_ai_control.cli report-session \
             --session-id "$SESSION_ID" \
             --role event \
             --content "$REPO_SLUG review workflow finished with job status: $JOB_STATUS." \
-            --log-path review-session.log \
+            --log-path "$WORKFLOW_TMP/review-session.log" \
             --status "$FINAL_STATUS"
