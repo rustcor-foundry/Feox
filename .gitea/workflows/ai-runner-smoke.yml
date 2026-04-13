@@ -13,6 +13,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare workflow temp dir
+        shell: bash
+        run: |
+          WORKFLOW_TMP="$(mktemp -d)"
+          printf 'WORKFLOW_TMP=%s\n' "$WORKFLOW_TMP" >> "$GITHUB_ENV"
+
       - name: Show host identity
         run: |
           echo "runner=$(hostname)"
@@ -21,12 +27,13 @@ jobs:
       - name: Detect repo slug
         run: |
           python3 - <<'PY'
+          import os
           import subprocess
           remote = subprocess.check_output(['git', 'config', '--get', 'remote.origin.url'], text=True).strip()
           slug = remote.rsplit(':', 1)[-1].rsplit('/', 2)[-2:]
           slug = '/'.join(slug).removesuffix('.git')
           print(slug)
-          open('repo-slug.txt', 'w', encoding='utf-8').write(slug + '\n')
+          open(os.path.join(os.environ['WORKFLOW_TMP'], 'repo-slug.txt'), 'w', encoding='utf-8').write(slug + '\n')
           PY
 
       - name: Control-plane preflight
@@ -35,22 +42,23 @@ jobs:
 
       - name: Create tracked CPU smoke session
         run: |
-          REPO_SLUG="$(cat repo-slug.txt)"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli start-task \
             --path "$PWD" \
             --purpose "$REPO_SLUG CPU smoke workflow" \
             --model-route local-strong \
-            --json > cpu-session.json
+            --json > "$WORKFLOW_TMP/cpu-session.json"
           python3 - <<'PY'
           import json
-          payload = json.load(open('cpu-session.json', 'r', encoding='utf-8'))
-          open('cpu-session-id.txt', 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
+          import os
+          payload = json.load(open(os.path.join(os.environ['WORKFLOW_TMP'], 'cpu-session.json'), 'r', encoding='utf-8'))
+          open(os.path.join(os.environ['WORKFLOW_TMP'], 'cpu-session-id.txt'), 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
           PY
 
       - name: Mark CPU smoke session
         run: |
-          SESSION_ID="$(cat cpu-session-id.txt)"
-          REPO_SLUG="$(cat repo-slug.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/cpu-session-id.txt")"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli append-session-history \
             --session-id "$SESSION_ID" \
             --role event \
@@ -61,21 +69,21 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
-          if [ ! -f cpu-session-id.txt ]; then
+          if [ ! -f "$WORKFLOW_TMP/cpu-session-id.txt" ]; then
             exit 0
           fi
-          SESSION_ID="$(cat cpu-session-id.txt)"
-          REPO_SLUG="$(cat repo-slug.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/cpu-session-id.txt")"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
           FINAL_STATUS="failed"
           if [ "$JOB_STATUS" = "success" ]; then
             FINAL_STATUS="completed"
           fi
-          printf 'job=%s\nhost=%s\nrepo=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" > cpu-session.log
+          printf 'job=%s\nhost=%s\nrepo=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" > "$WORKFLOW_TMP/cpu-session.log"
           "$WSKY_PY" -m wsky_ai_control.cli report-session \
             --session-id "$SESSION_ID" \
             --role event \
             --content "$REPO_SLUG CPU smoke finished with job status: $JOB_STATUS." \
-            --log-path cpu-session.log \
+            --log-path "$WORKFLOW_TMP/cpu-session.log" \
             --status "$FINAL_STATUS"
 
   gpu-utility-smoke:
@@ -87,6 +95,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare workflow temp dir
+        shell: bash
+        run: |
+          WORKFLOW_TMP="$(mktemp -d)"
+          printf 'WORKFLOW_TMP=%s\n' "$WORKFLOW_TMP" >> "$GITHUB_ENV"
+
       - name: Show host identity
         run: |
           echo "runner=$(hostname)"
@@ -95,12 +109,13 @@ jobs:
       - name: Detect repo slug
         run: |
           python3 - <<'PY'
+          import os
           import subprocess
           remote = subprocess.check_output(['git', 'config', '--get', 'remote.origin.url'], text=True).strip()
           slug = remote.rsplit(':', 1)[-1].rsplit('/', 2)[-2:]
           slug = '/'.join(slug).removesuffix('.git')
           print(slug)
-          open('repo-slug.txt', 'w', encoding='utf-8').write(slug + '\n')
+          open(os.path.join(os.environ['WORKFLOW_TMP'], 'repo-slug.txt'), 'w', encoding='utf-8').write(slug + '\n')
           PY
 
       - name: GPU service preflight
@@ -111,22 +126,23 @@ jobs:
 
       - name: Create tracked GPU smoke session
         run: |
-          REPO_SLUG="$(cat repo-slug.txt)"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli start-task \
             --path "$PWD" \
             --purpose "$REPO_SLUG GPU smoke workflow" \
             --model-route local-fast \
-            --json > gpu-session.json
+            --json > "$WORKFLOW_TMP/gpu-session.json"
           python3 - <<'PY'
           import json
-          payload = json.load(open('gpu-session.json', 'r', encoding='utf-8'))
-          open('gpu-session-id.txt', 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
+          import os
+          payload = json.load(open(os.path.join(os.environ['WORKFLOW_TMP'], 'gpu-session.json'), 'r', encoding='utf-8'))
+          open(os.path.join(os.environ['WORKFLOW_TMP'], 'gpu-session-id.txt'), 'w', encoding='utf-8').write(payload['session']['id'] + '\n')
           PY
 
       - name: Mark GPU smoke session
         run: |
-          SESSION_ID="$(cat gpu-session-id.txt)"
-          REPO_SLUG="$(cat repo-slug.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/gpu-session-id.txt")"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
           "$WSKY_PY" -m wsky_ai_control.cli append-session-history \
             --session-id "$SESSION_ID" \
             --role event \
@@ -137,19 +153,19 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
-          if [ ! -f gpu-session-id.txt ]; then
+          if [ ! -f "$WORKFLOW_TMP/gpu-session-id.txt" ]; then
             exit 0
           fi
-          SESSION_ID="$(cat gpu-session-id.txt)"
-          REPO_SLUG="$(cat repo-slug.txt)"
+          SESSION_ID="$(cat "$WORKFLOW_TMP/gpu-session-id.txt")"
+          REPO_SLUG="$(cat "$WORKFLOW_TMP/repo-slug.txt")"
           FINAL_STATUS="failed"
           if [ "$JOB_STATUS" = "success" ]; then
             FINAL_STATUS="completed"
           fi
-          printf 'job=%s\nhost=%s\nrepo=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" > gpu-session.log
+          printf 'job=%s\nhost=%s\nrepo=%s\n' "$JOB_STATUS" "$(hostname)" "$REPO_SLUG" > "$WORKFLOW_TMP/gpu-session.log"
           "$WSKY_PY" -m wsky_ai_control.cli report-session \
             --session-id "$SESSION_ID" \
             --role event \
             --content "$REPO_SLUG GPU smoke finished with job status: $JOB_STATUS." \
-            --log-path gpu-session.log \
+            --log-path "$WORKFLOW_TMP/gpu-session.log" \
             --status "$FINAL_STATUS"
