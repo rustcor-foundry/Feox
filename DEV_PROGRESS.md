@@ -10,6 +10,31 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-22 (per-core slot mapped at PER_CORE_BASE)
+
+- added `memory::PER_CORE_PREBUILT_PER_CORE_SIZE = 2 MiB`. Sized for
+  one core's PerCoreData footprint plus headroom for IST/TSS/GDT
+  once those move per-core
+- transition root construction now calls `prepare_4k_pages_with(
+  PER_CORE_BASE, PER_CORE_PREBUILT_PER_CORE_SIZE)` alongside the
+  existing MMIO prebuild. Allocates PML4/PDPT/PD/PT chains for core
+  0's stride so post-handoff leaf inserts don't need a frame
+  allocator. Failure produces a new transition_per_core_prebuild_failed
+  error
+- `per_core::initialize_core0` now uses
+  `map_bootstrap_physical_capability_4k` to install the freshly
+  allocated PhysicalPages cap at `PER_CORE_BASE` (writable,
+  non-user, NX). `PerCoreData::self_ptr` is written to
+  `PER_CORE_BASE`, and `IA32_GS_BASE` is loaded with the same
+  address — so `gs:[0]` returns the locked VA, not the direct-map
+  alias. Host build still falls back to the direct-map alias so
+  cargo test compiles without page tables
+- run_per_core_probe trace now reports
+  `self_ptr=0xffffe00000000000` (was `0xffffc0000000XXXX`)
+- only core 0's stride is prebuilt; secondary cores need their own
+  prebuild plus AP boot + per-core GS_BASE load (next focus)
+- 93 host tests pass; cargo kernel and cargo loader clean
+
 ### 2026-05-22 (per-core data area for core 0)
 
 - new `kernel/feox-xokernel/src/per_core.rs` module:

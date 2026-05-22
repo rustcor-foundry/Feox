@@ -76,13 +76,12 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Per-core slot mapping + SMP bring-up** — single-core per-CPU data
-   exists for core 0 (see "what is true now" below) but it currently
-   lives at the direct-map alias of its backing page, not at the
-   locked virtual slot `0xFFFF_E000_0000_0000` (1 TiB × 32 cores).
-   Future work: prebuild the per-core PML4 intermediates so each core
-   sees its own data at a stable VA, then bring up secondary cores
-   with their own GS_BASE.
+1. **SMP bring-up of secondary cores** — core 0's per-CPU block is
+   now installed at the locked virtual slot `0xFFFF_E000_0000_0000`,
+   but only core 0's stride is prebuilt in the transition root.
+   Bringing up secondary cores requires prebuilding their strides
+   (`PER_CORE_BASE + core_id * PER_CORE_STRIDE`), wiring AP boot
+   (INIT/SIPI), and loading each core's own GS_BASE.
 2. **Multi-device / multi-namespace block layer** — the current
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
@@ -96,11 +95,14 @@ Use those before deeper kernel or loader changes.
    `docs/STORAGE_ABI.md`.
 
 Per-core data exists for core 0 (`crate::per_core::PerCoreData` with
-`self_ptr` / `magic` / `core_id` / `_reserved`). `IA32_GS_BASE` points
-at the area's kernel direct-map alias, so kernel code reaches its own
+`self_ptr` / `magic` / `core_id` / `_reserved`). The page is mapped at
+the locked virtual slot `PER_CORE_BASE` (`0xFFFF_E000_0000_0000`)
+using PML4/PDPT/PD/PT intermediates prebuilt during transition root
+construction (`PER_CORE_PREBUILT_PER_CORE_SIZE = 2 MiB`).
+`IA32_GS_BASE` points at that slot so kernel code reaches its own
 per-CPU block via a `gs:[0]` load through `crate::per_core::current()`.
 Validated on every boot by `run_per_core_probe` (magic, core_id, and
-GS round-trip checks).
+GS round-trip checks — `self_ptr` reads `0xFFFF_E000_0000_0000`).
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the

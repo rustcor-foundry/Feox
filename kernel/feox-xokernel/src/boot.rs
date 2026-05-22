@@ -2240,6 +2240,25 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             {
                                 map_result = Err("transition_mmio_prebuild_failed");
                             }
+                            // Prebuild core 0's per-core slot intermediates
+                            // so per_core::initialize_core0 can install the
+                            // leaf PerCoreData mapping at PER_CORE_BASE
+                            // post-handoff without a frame allocator. Only
+                            // core 0's stride is prebuilt today; secondary
+                            // cores will need their own prebuild when SMP
+                            // bring-up lands.
+                            if map_result.is_ok()
+                                && page_root
+                                    .prepare_4k_pages_with(
+                                        &mut live_page_tables,
+                                        &mut paging_allocator,
+                                        memory::VirtualAddress::new(memory::PER_CORE_BASE),
+                                        memory::PER_CORE_PREBUILT_PER_CORE_SIZE,
+                                    )
+                                    .is_err()
+                            {
+                                map_result = Err("transition_per_core_prebuild_failed");
+                            }
                             map_result
                         } else {
                             Err("transition_root_not_identity_mapped")
