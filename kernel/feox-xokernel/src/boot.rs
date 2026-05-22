@@ -883,11 +883,35 @@ fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
     // AsiOp::StoragePoll the same way a ring-3 caller would. The block
     // layer is still up (shutdown happens after the I/O queue teardown
     // below) so the submission table sees a live device.
-    if let Some((abi_phys, abi_virt)) = alloc_dma_page() {
+    // Request a fresh PhysicalPages capability for the self-test
+    // buffer. v1 takes a `buffer: CapHandle, buffer_offset: u64` instead
+    // of a raw phys, so we need the cap handle directly (not just the
+    // phys that `alloc_dma_page` exposes).
+    let abi_buffer_cap = request_bootstrap_capability(&CapRequest::PhysicalPages {
+        num_pages: 1,
+        flags: PageFlags::CONTIGUOUS,
+    });
+    if let Ok(buffer_handle) = abi_buffer_cap {
+        // Look up the backing phys + virt for our own buffer verification
+        // (the kernel side will translate via cap_to_phys_base, but the
+        // self-test needs a kernel-visible alias to decode the bytes).
+        let buffer_view =
+            verify_bootstrap_handle(buffer_handle, CapPermissions::READ | CapPermissions::WRITE)
+                .expect("storage-abi-probe: verify own buffer handle");
+        let buffer_res = resource(buffer_view.resource_id)
+            .expect("storage-abi-probe: lookup buffer resource");
+        let abi_phys = buffer_res.base.0;
+        let abi_virt = DIRECT_MAP_BASE.wrapping_add(abi_phys) as *mut u8;
+        unsafe {
+            // SAFETY: virt aliases the freshly minted physical page; no
+            // other live pointer references it.
+            core::ptr::write_bytes(abi_virt, 0, 4096);
+        }
         crate::kprintln!(
-            "storage-abi-probe: buffer phys={:#018x} virt={:p}",
-            abi_phys,
-            abi_virt
+            "storage-abi-probe: buffer cap={{id={}, gen={}}} phys={:#018x}",
+            buffer_handle.id,
+            buffer_handle.generation,
+            abi_phys
         );
         let submit_args = feox_asi::StorageSubmitReadArgs {
             device: feox_asi::CapHandle {
@@ -898,7 +922,8 @@ fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
             lba: 0,
             block_count: 1,
             _reserved: 0,
-            buffer_phys: feox_asi::PhysicalAddress(abi_phys),
+            buffer: buffer_handle,
+            buffer_offset: 0,
         };
         let mut submit_out: u64 = 0;
         let submit_code = crate::arch::x86_64::syscall::feox_syscall_dispatch(
@@ -964,7 +989,7 @@ fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
             }
         }
     } else {
-        crate::kprintln!("storage-abi-probe: alloc failed");
+        crate::kprintln!("storage-abi-probe: capability request failed");
     }
 
     // ---- Tear down I/O queues (SQ before CQ per spec) ----

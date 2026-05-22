@@ -645,11 +645,32 @@ fn dispatch_storage_submit_read(args_ptr: *const u8, args_len: u64, out_value: *
         // the pointer is non-null.
         *(args_ptr.cast::<StorageSubmitReadArgs>())
     };
-    // v0 accepts any `device` capability without inspection; see
+    // The `device` capability is not yet enforced; PCI enumeration
+    // doesn't mint CapType::StorageDevice handles today. See
     // docs/STORAGE_ABI.md "Capability story (bootstrap vs. v1)".
     let _ = args.device;
-    match crate::block::storage_submit_read(args.nsid, args.lba, args.block_count, args.buffer_phys.0)
-    {
+    // Translate the buffer capability to a physical address. The
+    // capability must be a PhysicalMemory (or future DmaPool) resource
+    // with READ + WRITE permissions, and `buffer_offset + 4096` must
+    // fit inside the capability's backing resource.
+    let buffer_phys = match crate::capability::cap_to_phys_base(
+        args.buffer,
+        feox_asi::CapPermissions::READ | feox_asi::CapPermissions::WRITE,
+    ) {
+        Ok((base, size)) => {
+            const READ_PAGE: u64 = 4096;
+            if args.buffer_offset.saturating_add(READ_PAGE) > size {
+                write_out(out_value, 0);
+                return syscall_storage_error(feox_asi::StorageError::InvalidCapability);
+            }
+            base.0.saturating_add(args.buffer_offset)
+        }
+        Err(_) => {
+            write_out(out_value, 0);
+            return syscall_storage_error(feox_asi::StorageError::InvalidCapability);
+        }
+    };
+    match crate::block::storage_submit_read(args.nsid, args.lba, args.block_count, buffer_phys) {
         Ok(token) => {
             push_event_if_ready("asi-storage-submit-read");
             write_out(out_value, token.0);
