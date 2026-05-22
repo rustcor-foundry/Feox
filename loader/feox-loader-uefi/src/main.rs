@@ -143,10 +143,32 @@ fn boot_kernel() -> Result<(), LoadError> {
     let rsdp_phys = find_rsdp_address();
     loader_logln!("feox-loader: rsdp_phys={:#018x}", rsdp_phys);
 
+    // Reserve a 4 KiB page below 1 MiB for the AP boot trampoline.
+    // SIPI vectors address sub-1-MiB physical memory, so the kernel
+    // can't allocate this through its normal capability path (which
+    // only sees Usable RAM above the BIOS area).
+    let ap_trampoline_phys = allocate_ap_trampoline_frame();
+    loader_logln!(
+        "feox-loader: ap_trampoline_phys={:#018x}",
+        ap_trampoline_phys
+    );
+
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     BOOT_SERVICES_ACTIVE.store(false, Ordering::Relaxed);
-    let boot_info = build_boot_info(&memory_map, loaded_kernel, rsdp_phys);
+    let boot_info = build_boot_info(&memory_map, loaded_kernel, rsdp_phys, ap_trampoline_phys);
     jump_to_kernel(loaded_kernel.entry_point, boot_info)
+}
+
+fn allocate_ap_trampoline_frame() -> u64 {
+    use uefi::boot::{AllocateType, allocate_pages};
+    match allocate_pages(
+        AllocateType::MaxAddress(0x100000),
+        MemoryType::LOADER_DATA,
+        1,
+    ) {
+        Ok(ptr) => ptr.as_ptr() as u64,
+        Err(_) => 0,
+    }
 }
 
 fn find_rsdp_address() -> u64 {
@@ -264,6 +286,7 @@ fn build_boot_info(
     memory_map: &MemoryMapOwned,
     kernel: LoadedKernel,
     rsdp_phys: u64,
+    ap_trampoline_phys: u64,
 ) -> *const BootInfo {
     let regions = unsafe { &mut *BOOT_STORAGE.regions.get() };
     let mut count = 0usize;
@@ -290,7 +313,7 @@ fn build_boot_info(
     }
 
     let boot_info = unsafe { &mut *BOOT_STORAGE.info.get() };
-    *boot_info = BootInfo::new(&regions[..count], rsdp_phys);
+    *boot_info = BootInfo::new(&regions[..count], rsdp_phys, ap_trampoline_phys);
     boot_info as *const BootInfo
 }
 

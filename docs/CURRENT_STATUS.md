@@ -76,12 +76,12 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **AP boot (INIT/SIPI + trampoline)** — ACPI MADT discovery is live
-   and all `PER_CORE_MAX_CORES` strides are prebuilt, so the kernel
-   knows which APs the firmware reports and has per-core VA space
-   ready. Launching them requires a 16-bit trampoline at a low phys,
-   INIT/SIPI through the LAPIC, and per-AP entry that loads its own
-   GS_BASE + jumps into a Rust entry point. Larger and arch-heavy.
+1. **AP boot v2: Rust ap_entry** — v1 lands a 16-bit trampoline,
+   sends INIT-SIPI-SIPI through the LAPIC, and confirms one AP runs
+   the trampoline by polling a magic word it writes before halting.
+   v2 extends the trampoline through real -> protected -> long mode,
+   shares the BSP's CR3, loads each AP's own GS_BASE, and jumps to a
+   Rust `ap_entry` that signals alive via a shared atomic. Arch-heavy.
 2. **Multi-device / multi-namespace block layer** — the current
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
@@ -105,12 +105,18 @@ kernel code reaches its own per-CPU block via a `gs:[0]` load through
 `crate::per_core::current()`. Validated on every boot by
 `run_per_core_probe`.
 
-SMP discovery is live: the loader forwards the ACPI RSDP through
-`BootInfo::rsdp_phys` (ABI v2), and `crate::acpi::parse_topology`
-walks RSDP → XSDT → MADT to enumerate Local APIC entries.
-`run_acpi_smp_probe` reports the topology on every boot (with the
-QEMU smoke now launching `-smp 4`, all four APs are visible:
-`apic_id=0..3`, all enabled). APs themselves are not yet started.
+SMP discovery + AP boot v1 are live: the loader forwards the ACPI
+RSDP and a reserved sub-1-MiB trampoline frame through `BootInfo`
+(ABI v3). `crate::acpi::parse_topology` walks RSDP → XSDT → MADT to
+enumerate Local APIC entries. `crate::lapic` maps the LAPIC MMIO and
+exposes `send_init` / `send_startup`. `crate::smp::bring_up_first_ap`
+writes a hand-assembled 14-byte real-mode trampoline to the reserved
+frame, sends INIT-SIPI-SIPI to the first non-BSP LAPIC, and observes
+the AP running by polling a magic word the trampoline writes before
+halting. `run_ap_boot_probe` exercises this on every boot — with
+QEMU `-smp 4`, AP 1 reliably reports alive
+(`ap-boot-probe: AP alive (magic observed)`). The trampoline does
+not yet reach Rust on the AP; that's the next focus.
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the

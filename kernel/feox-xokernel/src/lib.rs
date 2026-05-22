@@ -10,12 +10,14 @@ pub mod block;
 pub mod boot;
 pub mod capability;
 pub mod console;
+pub mod lapic;
 pub mod memory;
 pub mod mmio;
 pub mod paging;
 pub mod pci;
 pub mod per_core;
 pub mod runtime_context;
+pub mod smp;
 pub mod vm;
 
 pub use feox_asi as asi;
