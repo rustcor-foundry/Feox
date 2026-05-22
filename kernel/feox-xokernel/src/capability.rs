@@ -748,6 +748,28 @@ pub fn list_bootstrap_capabilities(out: &mut [CapInfo]) -> (usize, usize) {
     table().list_into(out)
 }
 
+/// Translates a capability handle to its backing physical base address
+/// and length. Used by lanes that need raw physical access (e.g. the
+/// storage ABI's DMA buffer translation).
+///
+/// Accepts `CapType::PhysicalMemory` today and will accept
+/// `CapType::DmaPool` once that resource type is minted. Other types
+/// (DeviceBar, IpcEndpoint, ...) are rejected with
+/// `CapError::PermissionDenied` because they don't name a contiguous
+/// DMA-safe physical range.
+pub fn cap_to_phys_base(
+    handle: CapHandle,
+    required: CapPermissions,
+) -> Result<(PhysicalAddress, u64), CapError> {
+    let view = verify_bootstrap_handle(handle, required)?;
+    match view.cap_type {
+        CapType::PhysicalMemory => {}
+        _ => return Err(CapError::PermissionDenied),
+    }
+    let res = resource(view.resource_id).ok_or(CapError::InvalidHandle)?;
+    Ok((res.base, res.size_bytes))
+}
+
 #[cfg(test)]
 /// Acquires the capability test lock so global bootstrap state is isolated per test.
 pub fn acquire_test_lock() -> std::sync::MutexGuard<'static, ()> {

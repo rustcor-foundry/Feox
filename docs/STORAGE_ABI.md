@@ -34,25 +34,29 @@ shapes below summarize the contract that the kernel-side dispatcher
 relies on.
 
 ```rust
-// 0x0500 StorageSubmitRead
+// 0x0500 StorageSubmitRead (v1 shape; v0 took a raw buffer_phys)
 #[repr(C)]
 pub struct StorageSubmitReadArgs {
-    /// Capability identifying the storage device. In bootstrap this
-    /// is currently a sentinel handle (the kernel only knows about
-    /// one NVMe device); a real device-capability table will replace
-    /// this in v1.
+    /// Capability identifying the storage device. Still accepted as a
+    /// sentinel today; `CapType::StorageDevice` enforcement lands once
+    /// PCI enumeration mints one such cap per controller.
     pub device: CapHandle,
     /// NVMe namespace identifier (1-based).
     pub nsid: u32,
     /// Logical block address to read.
     pub lba: u64,
-    /// Number of logical blocks. v0 must be 1.
+    /// Number of logical blocks. v1 must be 1.
     pub block_count: u16,
     pub _reserved: u16,
-    /// Physical address of the DMA buffer (4 KiB aligned, single page
-    /// for v0). v1 will replace this with a buffer CapHandle + offset
-    /// once `CapRequest::DmaPool` flows end-to-end to user space.
-    pub buffer_phys: PhysicalAddress,
+    /// Capability backing the DMA buffer. v1 accepts
+    /// `CapType::PhysicalMemory`; once `CapRequest::DmaPool` flows
+    /// end-to-end, `CapType::DmaPool` will be accepted alongside it.
+    /// Requires READ + WRITE permissions.
+    pub buffer: CapHandle,
+    /// Byte offset into the buffer capability. The kernel rejects
+    /// submissions when `buffer_offset + 4096` exceeds the
+    /// capability's `size_bytes`.
+    pub buffer_offset: u64,
 }
 
 // Token returned by StorageSubmitRead and consumed by StoragePoll.
@@ -109,27 +113,28 @@ The syscall return-code convention follows the existing ASI pattern:
 `StoragePollResult` (for poll); the completion struct is written
 through the user-supplied `out_completion` pointer.
 
-## Capability story (bootstrap vs. v1)
+## Capability story (v0 / v1 / v2)
 
-For v0 the kernel performs only a shape check on the `device`
-capability — it accepts any `CapHandle` because the bootstrap process
-owns the entire NVMe device. The buffer is named by raw physical
-address because the bootstrap probe already owns kernel-direct-map
-addresses for the buffer page.
+**v0 (initial).** Buffer named by raw `buffer_phys: PhysicalAddress`,
+device cap accepted as any `CapHandle`. Bootstrap-only.
 
-The v1 evolution path is:
+**v1 (current).** Buffer named by `{ buffer: CapHandle, buffer_offset:
+u64 }`; kernel translates via `cap_to_phys_base`, which currently
+accepts `CapType::PhysicalMemory` and is structured to accept
+`CapType::DmaPool` once that resource type is minted. The `device`
+capability is still not enforced — `CapType::StorageDevice` exists as
+an enum variant but PCI enumeration doesn't mint one yet.
 
-1. Add `CapType::StorageDevice` and have PCI enumeration mint one such
-   capability per NVMe controller discovered.
-2. Add `CapType::DmaPool` flow end-to-end (already in `feox-asi` as
-   `CapRequest::DmaPool`) so the user-space buffer is owned by a
-   capability the kernel can translate without trusting a raw `u64`.
-3. Replace `buffer_phys` with `{ buffer: CapHandle, offset_bytes: u64 }`
-   and have the kernel translate via `cap_to_dma_phys`.
+**v2 (planned).** PCI enumeration mints a `CapType::StorageDevice` per
+NVMe controller; the dispatch verifies `args.device` against it.
+`CapType::DmaPool` minting + delegation is wired through `cap_request`
+so user space can request DMA-safe memory directly. The
+`StorageSubmitReadArgs` wire layout stays unchanged across v1 → v2 —
+only the kernel-side accepted CapType set widens.
 
 The wire layout of `StorageSubmitReadArgs` is **not** stable across
-this transition; v0 is bootstrap-only and the field set will change
-once the capability story tightens.
+v0 → v1 (the `buffer_phys` field was replaced). It is intended to be
+stable from v1 forward.
 
 ## Drain semantics
 

@@ -83,12 +83,13 @@ Use those before deeper kernel or loader changes.
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
    handling, and per-queue scheduling.
-3. **Storage ABI v1** — the v0 surface (`StorageSubmitRead` +
-   `StoragePoll`) uses raw `buffer_phys` and a sentinel device cap.
-   v1 swaps both for capability-backed forms (`CapType::StorageDevice`,
-   `CapType::DmaPool` flowed end-to-end) and adds the EventSlot/park
-   variant so callers can sleep instead of spin-polling. See
-   `docs/STORAGE_ABI.md`.
+3. **Storage ABI v2 / EventSlot variant** — v1 swapped the buffer to
+   a capability (`CapHandle + offset`) and accepts `PhysicalMemory`
+   caps via `cap_to_phys_base`. v2 will mint `CapType::StorageDevice`
+   during PCI enumeration and enforce the `device` cap on every
+   submission, wire `CapType::DmaPool` end-to-end through
+   `cap_request`, and add an EventSlot/park variant so callers can
+   sleep instead of spin-polling. See `docs/STORAGE_ABI.md`.
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the
@@ -96,8 +97,10 @@ NVMe submit/drain primitives behind free functions, a long-lived
 `crate::block::drainer_task` pumps completions on every executor pass,
 and the storage ABI lane (`AsiOp::StorageSubmitRead` 0x0500 /
 `AsiOp::StoragePoll` 0x0501) routes submit + poll through the syscall
-dispatch — exercised end-to-end on every boot by the storage-abi
-self-test in `run_nvme_admin_probe`.
+dispatch with v1 capability-backed buffers (the `buffer` field is a
+`CapHandle`, translated via `crate::capability::cap_to_phys_base` to
+a `PhysicalMemory` resource's base address) — exercised end-to-end on
+every boot by the storage-abi self-test in `run_nvme_admin_probe`.
 
 Bootstrap VM hardening, the permanent virtual address layout, the direct
 map, the access-window retirement, broadened live self-test coverage,

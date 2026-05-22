@@ -418,6 +418,8 @@ pub enum CapType {
     MsixVector = 3,
     /// An IPC endpoint.
     IpcEndpoint = 4,
+    /// A storage device exposed through the storage ABI lane.
+    StorageDevice = 5,
 }
 
 /// Capability permission bitset.
@@ -597,8 +599,10 @@ pub struct StorageToken(pub u64);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(C)]
 pub struct StorageSubmitReadArgs {
-    /// Capability identifying the storage device. v0 accepts any
-    /// handle because the bootstrap process owns the only device.
+    /// Capability identifying the storage device. v1 still accepts any
+    /// handle because the bootstrap process owns the only device;
+    /// `CapType::StorageDevice` enforcement lands once PCI enumeration
+    /// mints one such capability per controller.
     pub device: CapHandle,
     /// NVMe namespace identifier (1-based).
     pub nsid: u32,
@@ -608,9 +612,14 @@ pub struct StorageSubmitReadArgs {
     pub block_count: u16,
     /// Padding to keep the struct stable across future field additions.
     pub _reserved: u16,
-    /// Physical address of the DMA buffer. v0 takes a raw phys to
-    /// match the bootstrap probe; v1 will use a buffer CapHandle.
-    pub buffer_phys: PhysicalAddress,
+    /// Capability backing the DMA buffer. The kernel translates this
+    /// to a physical address via `cap_to_phys_base`. Must be a
+    /// `CapType::PhysicalMemory` (or future `CapType::DmaPool`)
+    /// capability with READ + WRITE permissions.
+    pub buffer: CapHandle,
+    /// Byte offset into the buffer capability. Must keep
+    /// `buffer_offset + 4096` within the capability's `size_bytes`.
+    pub buffer_offset: u64,
 }
 
 /// Arguments for `StoragePoll` (0x0501).
@@ -704,9 +713,9 @@ mod tests {
     fn storage_abi_types_keep_expected_sizes() {
         assert_eq!(size_of::<StorageToken>(), 8);
         // device(8) + nsid(4) + pad(4 for lba align) + lba(8) +
-        // block_count(2) + _reserved(2) + pad(4 for buffer_phys align) +
-        // buffer_phys(8) = 40
-        assert_eq!(size_of::<StorageSubmitReadArgs>(), 40);
+        // block_count(2) + _reserved(2) + buffer(8) + pad(4 for
+        // buffer_offset align) + buffer_offset(8) = 48
+        assert_eq!(size_of::<StorageSubmitReadArgs>(), 48);
         // token(8) + out_completion ptr (8 on 64-bit)
         assert_eq!(size_of::<StoragePollArgs>(), 16);
         assert_eq!(size_of::<StorageCompletion>(), 4);

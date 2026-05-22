@@ -10,6 +10,33 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-21 (storage ABI v1: capability-backed buffer)
+
+- added `CapType::StorageDevice` enum variant to `feox-asi` (marker for
+  future enforcement; PCI enumeration doesn't mint one yet)
+- swapped `StorageSubmitReadArgs::buffer_phys: PhysicalAddress` for
+  `{ buffer: CapHandle, buffer_offset: u64 }` — wire size 40 → 48
+  bytes; v0 was explicitly not stable
+- added `crate::capability::cap_to_phys_base(handle, required_perms) ->
+  Result<(PhysicalAddress, u64), CapError>` that verifies the cap and
+  returns its backing resource's `(base, size_bytes)`. Currently
+  accepts `CapType::PhysicalMemory`; structured to accept
+  `CapType::DmaPool` once that resource type is minted
+- `dispatch_storage_submit_read` now verifies the buffer cap (requires
+  READ + WRITE), checks `buffer_offset + 4096 <= size_bytes`, and
+  computes `buffer_phys = base + buffer_offset` before handing off to
+  `block::storage_submit_read`. Rejects with `InvalidCapability` on
+  any failure
+- `run_nvme_admin_probe` self-test now requests its own
+  `PhysicalPages` capability via `request_bootstrap_capability` (so it
+  holds the handle, not just the phys) and passes
+  `buffer: handle, buffer_offset: 0` through the syscall. Bounded
+  smoke still reports `storage-abi-probe: ready sct=0 sc=0 dnr=0
+  polls=1` and decodes the same `FEOX-NVME-SMOKE-LBA0`
+- updated `docs/STORAGE_ABI.md` with v0 → v1 → v2 evolution and the
+  current v1 args layout
+- 91 host tests pass; `cargo kernel` and `cargo loader` clean
+
 ### 2026-05-21 (storage ABI v0)
 
 - locked the first-cut storage syscall surface in `docs/STORAGE_ABI.md`:
