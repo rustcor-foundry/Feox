@@ -61,6 +61,13 @@ pub const PER_CORE_STRIDE: u64 = 1 << 40;
 /// Maximum number of cores the locked layout reserves space for.
 pub const PER_CORE_MAX_CORES: u64 = 32;
 
+/// Size of the per-core sub-window whose page-table intermediates are
+/// prebuilt during transition root construction. One 2 MiB chunk per
+/// core is enough for the current PerCoreData footprint (one page) and
+/// leaves headroom for IST stacks / TSS / GDT once those move into
+/// per-core memory. Larger uses require expanding this prebuild.
+pub const PER_CORE_PREBUILT_PER_CORE_SIZE: u64 = 2 * 1024 * 1024;
+
 /// Base of the kernel-owned MMIO mapping region.
 pub const MMIO_BASE: u64 = 0xFFFF_F000_0000_0000;
 

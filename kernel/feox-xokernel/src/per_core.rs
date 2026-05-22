@@ -8,20 +8,28 @@
 //!
 //! ## Current scope (single-core bring-up)
 //!
-//! Only core 0 is wired up. The per-core area lives at the page's
-//! direct-map alias (`DIRECT_MAP_BASE + phys`); the locked virtual
-//! slot at [`crate::memory::PER_CORE_BASE`] (`0xFFFF_E000_0000_0000`)
-//! is still reserved but not yet explicitly mapped. The direct-map
-//! alias is a stable kernel-only address, so accessor code is
-//! unaffected — only the eventual "all cores observe per-CPU at the
-//! same VA stride" property is deferred.
+//! Only core 0 is wired up. The per-core area is installed at the
+//! locked virtual slot [`crate::memory::PER_CORE_BASE`]
+//! (`0xFFFF_E000_0000_0000`) using PML4/PDPT/PD/PT intermediates that
+//! were prebuilt during transition root construction (see
+//! `PER_CORE_PREBUILT_PER_CORE_SIZE` in `memory.rs`). Secondary cores
+//! are not yet brought online; each new core will need its own slot
+//! mapped at `PER_CORE_BASE + core_id * PER_CORE_STRIDE`, and the
+//! transition root prebuild only covers core 0 today.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use feox_asi::{CapHandle, CapPermissions, CapRequest, PageFlags};
+use feox_asi::{CapHandle, CapRequest, PageFlags};
+#[cfg(not(target_os = "none"))]
+use feox_asi::CapPermissions;
 
-use crate::capability::{request_bootstrap_capability, resource, verify_bootstrap_handle};
+use crate::capability::request_bootstrap_capability;
+#[cfg(not(target_os = "none"))]
+use crate::capability::{resource, verify_bootstrap_handle};
+#[cfg(not(target_os = "none"))]
 use crate::memory::DIRECT_MAP_BASE;
+#[cfg(target_os = "none")]
+use crate::memory::{PER_CORE_BASE, VirtualAddress};
 
 /// Magic value used to validate a per-core area was initialized
 /// through [`initialize_core0`] and not (e.g.) wandered into by
@@ -65,13 +73,15 @@ static CORE0_BASE: AtomicU64 = AtomicU64::new(0);
 /// Initializes the per-core data area for core 0.
 ///
 /// Allocates one 4 KiB physical page via the bootstrap capability
-/// layer, writes a [`PerCoreData`] at its direct-map alias, and loads
-/// the alias address into `IA32_GS_BASE` so subsequent kernel code can
-/// read its own per-core block via [`current`].
+/// layer, installs it at [`crate::memory::PER_CORE_BASE`] (relying on
+/// the per-core PML4/PDPT/PD/PT intermediates prebuilt during
+/// transition root construction), writes a [`PerCoreData`] through
+/// that virtual address, and loads `IA32_GS_BASE` so subsequent kernel
+/// code can read its own per-core block via [`current`].
 ///
-/// Returns the capability handle backing the page so the caller can
-/// release it during shutdown (release lifecycle is a follow-up; the
-/// page leaks for the rest of the boot today).
+/// Returns the capability handle backing the page. The mapping +
+/// capability are intentionally retained for the rest of the boot
+/// (release lifecycle is a follow-up).
 pub fn initialize_core0() -> Result<CapHandle, &'static str> {
     if CORE0_BASE.load(Ordering::Acquire) != 0 {
         return Err("per_core: core 0 already initialized");
@@ -83,17 +93,55 @@ pub fn initialize_core0() -> Result<CapHandle, &'static str> {
     })
     .map_err(|_| "per_core: PhysicalPages cap request failed")?;
 
-    let view = verify_bootstrap_handle(handle, CapPermissions::READ | CapPermissions::WRITE)
-        .map_err(|_| "per_core: cap verify failed")?;
-    let res =
-        resource(view.resource_id).ok_or("per_core: resource lookup failed for fresh cap")?;
-    let phys = res.base.0;
-    let virt = DIRECT_MAP_BASE.wrapping_add(phys);
+    #[cfg(target_os = "none")]
+    let area_va = {
+        use crate::memory::PhysicalFrame;
+        use crate::paging::{DirectMapPageTables, PageTableFrameAllocator, PageTableRoot};
+        use crate::vm::map_bootstrap_physical_capability_4k;
 
-    let area = virt as *mut PerCoreData;
+        struct NoopAllocator;
+        impl PageTableFrameAllocator for NoopAllocator {
+            fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
+                None
+            }
+        }
+
+        let root = PageTableRoot::active();
+        let mut live = DirectMapPageTables;
+        let mut allocator = NoopAllocator;
+        let target_va = VirtualAddress::new(PER_CORE_BASE);
+        map_bootstrap_physical_capability_4k(
+            root,
+            &mut live,
+            &mut allocator,
+            handle,
+            target_va,
+            0,
+            true,
+            false,
+        )
+        .map_err(|_| "per_core: leaf map at PER_CORE_BASE failed")?;
+        PER_CORE_BASE
+    };
+
+    // Host build doesn't have page tables; fall back to the direct map
+    // alias so the rest of the function can still exercise the struct
+    // layout + atomic record path under cargo test.
+    #[cfg(not(target_os = "none"))]
+    let area_va = {
+        let view = verify_bootstrap_handle(handle, CapPermissions::READ | CapPermissions::WRITE)
+            .map_err(|_| "per_core: cap verify failed")?;
+        let res = resource(view.resource_id)
+            .ok_or("per_core: resource lookup failed for fresh cap")?;
+        DIRECT_MAP_BASE.wrapping_add(res.base.0)
+    };
+
+    let area = area_va as *mut PerCoreData;
     unsafe {
-        // SAFETY: virt aliases the freshly allocated page (kernel-only
-        // direct map); nothing else holds a pointer to it.
+        // SAFETY: bare-metal: PER_CORE_BASE was just mapped writable
+        // above. Host: the direct-map alias of the freshly allocated
+        // page is exclusive. In both cases no other live pointer
+        // references the page.
         core::ptr::write(
             area,
             PerCoreData {
@@ -109,10 +157,10 @@ pub fn initialize_core0() -> Result<CapHandle, &'static str> {
     unsafe {
         // SAFETY: writing IA32_GS_BASE only affects this core's GS
         // base address; it does not invalidate any held references.
-        crate::arch::x86_64::cpu::wrmsr(IA32_GS_BASE, virt);
+        crate::arch::x86_64::cpu::wrmsr(IA32_GS_BASE, area_va);
     }
 
-    CORE0_BASE.store(virt, Ordering::Release);
+    CORE0_BASE.store(area_va, Ordering::Release);
     Ok(handle)
 }
 
