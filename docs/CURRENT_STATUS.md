@@ -83,13 +83,13 @@ Use those before deeper kernel or loader changes.
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
    handling, and per-queue scheduling.
-3. **Storage ABI v2 / EventSlot variant** — v1 swapped the buffer to
-   a capability (`CapHandle + offset`) and accepts `PhysicalMemory`
-   caps via `cap_to_phys_base`. v2 will mint `CapType::StorageDevice`
-   during PCI enumeration and enforce the `device` cap on every
-   submission, wire `CapType::DmaPool` end-to-end through
-   `cap_request`, and add an EventSlot/park variant so callers can
-   sleep instead of spin-polling. See `docs/STORAGE_ABI.md`.
+3. **Storage ABI v3 (DmaPool + EventSlot)** — v2 enforces the device
+   cap; remaining storage work is wiring `CapType::DmaPool` end-to-end
+   through `cap_request` (today buffers must be `PhysicalMemory` caps,
+   which works in bootstrap but doesn't generalize once an IOMMU is
+   in the mix) and adding an EventSlot/park variant so callers can
+   sleep on completion instead of spin-polling. See
+   `docs/STORAGE_ABI.md`.
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the
@@ -97,10 +97,14 @@ NVMe submit/drain primitives behind free functions, a long-lived
 `crate::block::drainer_task` pumps completions on every executor pass,
 and the storage ABI lane (`AsiOp::StorageSubmitRead` 0x0500 /
 `AsiOp::StoragePoll` 0x0501) routes submit + poll through the syscall
-dispatch with v1 capability-backed buffers (the `buffer` field is a
-`CapHandle`, translated via `crate::capability::cap_to_phys_base` to
-a `PhysicalMemory` resource's base address) — exercised end-to-end on
-every boot by the storage-abi self-test in `run_nvme_admin_probe`.
+dispatch with v2 device-cap enforcement (`block::register_device_capability`
+mints a `CapType::StorageDevice` root cap over the controller's BAR;
+`dispatch_storage_submit_read` verifies `args.device` against it) and
+v1 capability-backed buffers (the `buffer` field is a `CapHandle`,
+translated via `crate::capability::cap_to_phys_base` to a
+`PhysicalMemory` resource's base address) — both the positive path
+and a negative path (bogus device cap → `0xFFFF_0500`) are exercised
+on every boot by the storage-abi self-test in `run_nvme_admin_probe`.
 
 Bootstrap VM hardening, the permanent virtual address layout, the direct
 map, the access-window retirement, broadened live self-test coverage,

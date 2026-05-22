@@ -579,6 +579,17 @@ pub fn register_bootstrap_memory_resource_with_kind(
     register_resource(CapType::PhysicalMemory, base, size_bytes, allocatable)
 }
 
+/// Registers one storage device as a resource so the storage ABI lane
+/// can mint a `CapType::StorageDevice` root capability over it. The
+/// base/size pair currently records the controller's BAR mapping for
+/// future introspection; v2 dispatch only checks the `cap_type` tag.
+pub fn register_bootstrap_storage_device_resource(
+    bar_base: PhysicalAddress,
+    bar_size: u64,
+) -> Result<ResourceId, CapError> {
+    register_resource(CapType::StorageDevice, bar_base, bar_size, false)
+}
+
 /// Seeds the registry from the boot memory map and returns the number of registered resources.
 pub fn seed_bootstrap_resources_from_handoff(
     regions: &[crate::bootabi::MemoryRegion],

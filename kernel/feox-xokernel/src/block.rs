@@ -18,8 +18,12 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
+use crate::capability::{
+    mint_bootstrap_root_capability, register_bootstrap_storage_device_resource,
+    release_bootstrap_handle,
+};
 use crate::nvme::{CompletionQueueEntry, ControllerRegisters, SubmissionQueueEntry};
-use feox_asi::{StorageCompletion, StorageError, StorageToken};
+use feox_asi::{CapHandle, CapPermissions, PhysicalAddress, StorageCompletion, StorageError, StorageToken};
 use feox_nvme::{NvmeCompletion, NvmeError, NvmeIoFuture, NvmeQueuePair, NvmeStatus};
 
 /// Errors returned by the block API surface.
@@ -70,6 +74,7 @@ struct BlockDeviceState {
     cq_entries: u16,
     io_qid: u16,
     queue_pair: NvmeQueuePair<8>,
+    device_cap: Option<CapHandle>,
 }
 
 static mut BLOCK_DEVICE: Option<BlockDeviceState> = None;
@@ -101,18 +106,57 @@ pub fn initialize(config: BlockDeviceConfig) -> Result<(), BlockError> {
             cq_entries: config.cq_entries,
             io_qid: config.io_qid,
             queue_pair: NvmeQueuePair::<8>::new(),
+            device_cap: None,
         });
     }
     Ok(())
 }
 
+/// Registers a `CapType::StorageDevice` resource over the controller's
+/// BAR mapping and stores the minted capability on the live block
+/// device. Subsequent storage-ABI submissions can verify `args.device`
+/// against the returned handle. Must be called after [`initialize`].
+pub fn register_device_capability(
+    bar_base: u64,
+    bar_size: u64,
+) -> Result<CapHandle, BlockError> {
+    let state = unsafe { device() }.ok_or(BlockError::NotInitialized)?;
+    if state.device_cap.is_some() {
+        return Err(BlockError::AlreadyInitialized);
+    }
+    let resource = register_bootstrap_storage_device_resource(PhysicalAddress(bar_base), bar_size)
+        .map_err(|_| BlockError::AlreadyInitialized)?;
+    let handle = mint_bootstrap_root_capability(
+        resource,
+        CapPermissions::READ
+            | CapPermissions::WRITE
+            | CapPermissions::DELEGATE
+            | CapPermissions::REVOKE,
+    )
+    .map_err(|_| BlockError::AlreadyInitialized)?;
+    state.device_cap = Some(handle);
+    Ok(handle)
+}
+
+/// Returns the storage device capability minted by
+/// [`register_device_capability`], or `None` if the block device is
+/// down or no device cap has been minted yet.
+#[must_use]
+pub fn storage_device_cap() -> Option<CapHandle> {
+    unsafe { device() }.and_then(|state| state.device_cap)
+}
+
 /// Clears the global block device. Outstanding futures observe the
 /// underlying queue pair as failed via [`feox_nvme::NvmeQueuePair::fail`]
-/// before the state is dropped.
+/// before the state is dropped. If a device capability was minted via
+/// [`register_device_capability`], it is released first.
 pub fn shutdown() {
     unsafe {
         let ptr = &raw mut BLOCK_DEVICE;
         if let Some(state) = (*ptr).as_mut() {
+            if let Some(handle) = state.device_cap.take() {
+                let _ = release_bootstrap_handle(handle);
+            }
             state.queue_pair.fail(NvmeError::DeviceRemoved);
         }
         *ptr = None;
