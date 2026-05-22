@@ -182,53 +182,43 @@ Keep `BootstrapIdentityMappedPageTables` only for:
 5. reattempt the live runtime self-test
 6. only after that, broaden the smoke lane to assert the VM self-test marker
 
-## Latest Finding
+## Retirement (2026-05-21)
 
-A follow-up live self-test narrowed the remaining blocker further:
+The mechanism this document describes is **retired**.
 
-- the failure happens on the **first attempt to reserve an alias for the
-  active root frame itself**
-- a newer prototype now successfully installs the access-window control
-  self-map and can write visible PTEs for dynamic alias slots
-- but the first live write through the aliased active root frame still faults
-  immediately after those slot PTEs are installed
-- that means the blocker is now narrower than "no access-window foothold",
-  but broader than "the slot PTE was never written"
+The bootstrap page-table access window served its purpose: it bridged the
+gap between the bootstrap identity-dereference assumption and a real
+post-handoff source of page-table-frame access. With that bridge in place
+the access-window release-path bug got found and fixed, and the live VM
+lane (`mem_map` / `mem_unmap` / `mem_vtop`) was hardened against the new
+source. Once `DirectMapPageTables` arrived on top of the permanent direct
+map at `0xFFFF_C000_0000_0000`, the access window was strictly redundant
+— a slot-based mechanism doing the same job as a flat offset.
 
-So the next implementation step is not "retry the same source more carefully."
-It is to provide one **non-identity foothold** for the page-table access
-window itself.
+What was removed:
 
-The most promising narrow answer is:
+- `BootstrapPageTableAccessWindow`, `BootstrapPageTableAccessReservation`,
+  `BootstrapPageTableAccessSource`, and `PageTableAccessError` in
+  `paging.rs`
+- `BootstrapPageTableAccessSlot`, the slot static, the slot capacity
+  const, and the `acquire`/`release`/`list` helpers in `runtime_context.rs`
+- the transition-root prepare + control-PT self-map install in `boot.rs`
+- the multi-step access-window probe (Phase A) in `boot.rs`
+- the access-window unit tests (they were also the source of a parallel
+  shared-state race on the slot static)
 
-- retain or permanently expose the page-table frame that backs the access
-  window's own leaf PTEs
-- use that control page to install slot mappings for arbitrary page-table
-  frames after handoff
-- then validate one access strategy that can safely dereference those newly
-  installed aliases in the retained runtime before switching the live
-  `mem_map` / `mem_unmap` / `mem_vtop` callers over
+What was kept:
 
-## Validation Target
+- `BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE` and `_SIZE` constants in
+  `memory.rs` — the 20 KiB virtual range at `0xFFFF_9000_0800_0000` stays
+  reserved in the address-space layout, but no live mappings run through
+  it. If a future tactical mechanism wants exactly this footprint, the
+  slot is ready.
 
-The next successful validation should be:
+The validation target ("higher-half runtime maps one page, translates it,
+and unmaps it cleanly") still holds — the bootstrap self-test in
+`boot.rs` runs that cycle on every boot via `DirectMapPageTables`. See
+`docs/VIRTUAL_ADDRESS_LAYOUT.md` for the current live source.
 
-- higher-half runtime enters normally
-- bootstrap VM self-test requests one page capability
-- `mem_map` succeeds
-- `mem_vtop` succeeds
-- `mem_vtop_batch` succeeds
-- `mem_unmap` succeeds
-- runtime still reaches `stage: runtime service idle`
-
-That is the right proof point before any broader direct-map or per-process VM
-design work.
-
-## Bottom Line
-
-Feox does not need a permanent direct map yet.
-
-It does need one explicit post-handoff rule for page-table-frame access.
-
-The narrowest disciplined answer is a small bootstrap page-table access window
-that replaces raw identity dereference in live higher-half VM operations.
+This document is preserved as historical context for the bug-hunt and
+design path that led to the direct map. It is not the live design.

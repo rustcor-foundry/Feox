@@ -16,7 +16,18 @@ use crate::runtime_context::{
 };
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
 
-const TRANSITION_STACK_PAGES: u64 = 4;
+/// Number of pages in the kernel's bootstrap higher-half stack.
+///
+/// 4 pages (16 KiB) covered everything up through the synchronous NVMe
+/// I/O probe; the async-driven read pushed enough state onto the stack
+/// (executor + task cell + async-block state machine + nested poll
+/// frames) that we hit a double fault inside `core::array::try_from_fn`.
+/// 8 pages (32 KiB) gives the runtime comfortable headroom for now.
+/// Number of pages in the kernel's higher-half runtime stack (used after
+/// the CR3 handoff). 4 pages (16 KiB) covered the synchronous probes;
+/// the async-driven path needs more headroom for the executor + task
+/// cell + future state machine, so we now reserve 8 pages (32 KiB).
+const TRANSITION_STACK_PAGES: u64 = 8;
 
 static mut TRANSITION_ALIAS_STACK_TOP: u64 = 0;
 static mut TRANSITION_ALIAS_ENTRY: u64 = 0;
@@ -308,6 +319,825 @@ extern "C" fn transition_high_stack_entry() -> ! {
     }
     crate::kprintln!("stage: transition handoff complete");
     arch::halt_loop()
+}
+
+#[cfg(target_os = "none")]
+fn run_vm_access_probe() {
+    let active_root = arch::active_page_table_root();
+    let active_root_via_direct = memory::DIRECT_MAP_BASE.wrapping_add(active_root);
+    crate::kprintln!(
+        "vm-probe: start active_root={:#018x} direct_map_alias={:#018x}",
+        active_root,
+        active_root_via_direct
+    );
+
+    // Direct-map sanity: read the first PML4 entry of the active root through
+    // the direct map. If the direct map is not live this faults; if it is,
+    // we get the same value that the page-table walk would return.
+    let pml4_entry_0: u64 =
+        unsafe { core::ptr::read_volatile(active_root_via_direct as *const u64) };
+    crate::kprintln!("vm-probe: direct_map pml4[0]={:#018x}", pml4_entry_0);
+
+    // Exercise the full mem_map / mem_vtop / mem_unmap cycle through the live
+    // VM lane, now backed by DirectMapPageTables. This is the validation
+    // target named in docs/PAGE_TABLE_ACCESS_PLAN.md.
+    run_vm_mem_cycle_probe();
+
+    // Exercise the MMIO zone bring-up: map a known device phys (LAPIC base
+    // is the canonical x86 MMIO sentinel), verify the page-table walk
+    // returns the right phys and that the cache-disable bit is set, then
+    // unmap.
+    run_mmio_cycle_probe();
+
+    // Optional: scan for an NVMe controller, map its BAR0 through the
+    // MMIO lane, and read the CAP+VS registers through it. Prints
+    // "no controller" and continues if PCI has no NVMe device.
+    run_nvme_mmio_probe();
+
+    crate::kprintln!("vm-probe: complete");
+}
+
+#[cfg(target_os = "none")]
+fn run_nvme_mmio_probe() {
+    use crate::memory::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
+    use crate::mmio::{mmio_map_bootstrap, mmio_unmap_bootstrap};
+    use crate::nvme::ControllerRegisters;
+    use crate::paging::{DirectMapPageTables, PageTableRoot};
+    use crate::pci::{PCI_CLASS_NVME, bar64, scan_for_class};
+
+    let device = match scan_for_class(PCI_CLASS_NVME) {
+        Some(device) => device,
+        None => {
+            crate::kprintln!("nvme-mmio-probe: no NVMe controller found");
+            return;
+        }
+    };
+    crate::kprintln!(
+        "nvme-mmio-probe: found {:02x}:{:02x}.{} vid={:#06x} did={:#06x} class={:#08x}",
+        device.bus,
+        device.device,
+        device.function,
+        device.vendor_id,
+        device.device_id,
+        device.class_code
+    );
+
+    let bar_phys = bar64(&device, 0);
+    if bar_phys == 0 {
+        crate::kprintln!("nvme-mmio-probe: BAR0 is zero, controller not configured");
+        return;
+    }
+    crate::kprintln!("nvme-mmio-probe: BAR0 phys={:#018x}", bar_phys);
+
+    // Map the first 8 KiB of the BAR — controller registers (page 0) plus
+    // the admin doorbell page (page 1, offset 0x1000 from BAR base).
+    let region = match mmio_map_bootstrap(
+        PhysicalAddress::new(bar_phys),
+        2 * PAGE_SIZE,
+        true,
+        true,
+    ) {
+        Ok(region) => region,
+        Err(_) => {
+            crate::kprintln!("nvme-mmio-probe: BAR mmio_map failed");
+            return;
+        }
+    };
+    crate::kprintln!(
+        "nvme-mmio-probe: BAR mapped at virt={:#018x}",
+        region.virtual_base
+    );
+
+    // Walk the active root to confirm the mapping leaf reflects what the
+    // MMIO helper installed (phys + UC flags).
+    let root = PageTableRoot::active();
+    let translation = root.translate_with(
+        &DirectMapPageTables,
+        VirtualAddress::new(region.virtual_base),
+    );
+    match translation {
+        Ok(Some(t)) => crate::kprintln!(
+            "nvme-mmio-probe: walk phys={:#018x} cache_disabled={} write_through={}",
+            t.physical_address.as_u64(),
+            t.entry.is_cache_disabled(),
+            t.entry.is_write_through()
+        ),
+        _ => crate::kprintln!("nvme-mmio-probe: walk returned no leaf"),
+    }
+
+    // Read CAP and VS through the controller register reader.
+    let registers = unsafe {
+        // SAFETY: the MMIO mapping we just installed covers BAR0's
+        // first 8 KiB with UC caching. The pointer stays valid until
+        // we unmap below.
+        ControllerRegisters::new(region.virtual_base as *mut u8)
+    };
+    let cap = registers.cap();
+    let vs = registers.vs();
+    crate::kprintln!(
+        "nvme-mmio-probe: CAP={:#018x} mqes={} dstrd={} mpsmin={} mpsmax={}",
+        cap.0,
+        cap.mqes(),
+        cap.dstrd(),
+        cap.mpsmin(),
+        cap.mpsmax()
+    );
+    crate::kprintln!(
+        "nvme-mmio-probe: VS={:#010x} version={}.{}.{}",
+        vs.0,
+        vs.major(),
+        vs.minor(),
+        vs.tertiary()
+    );
+
+    // Push into the admin queue: reset → configure → enable → submit
+    // Identify Controller → poll completion → decode model/serial.
+    // QEMU's NVMe controller advertises DSTRD=0, so the admin doorbell
+    // helpers map directly onto 0x1000/0x1004.
+    if cap.dstrd() != 0 {
+        crate::kprintln!(
+            "nvme-admin-probe: skipped — DSTRD={} not 0 (helpers assume 4-byte doorbells)",
+            cap.dstrd()
+        );
+    } else {
+        run_nvme_admin_probe(registers);
+    }
+
+    if mmio_unmap_bootstrap(region).is_err() {
+        crate::kprintln!("nvme-mmio-probe: BAR mmio_unmap failed");
+        return;
+    }
+    crate::kprintln!("nvme-mmio-probe: full NVMe BAR cycle ok");
+}
+
+#[cfg(target_os = "none")]
+struct NvmeProbeQueueState {
+    sq_tail: u16,
+    cq_head: u16,
+    phase: u8,
+}
+
+#[cfg(target_os = "none")]
+impl NvmeProbeQueueState {
+    const fn new() -> Self {
+        // The controller writes its first CQE with phase = 1 (the host
+        // initialized the queue to zeros, which is phase = 0).
+        Self {
+            sq_tail: 0,
+            cq_head: 0,
+            phase: 1,
+        }
+    }
+}
+
+#[cfg(target_os = "none")]
+fn nvme_submit_and_wait(
+    registers: crate::nvme::ControllerRegisters,
+    sq_virt: *mut crate::nvme::SubmissionQueueEntry,
+    cq_virt: *mut crate::nvme::CompletionQueueEntry,
+    qid: u16,
+    sq_entries: u16,
+    cq_entries: u16,
+    state: &mut NvmeProbeQueueState,
+    entry: crate::nvme::SubmissionQueueEntry,
+    poll_limit: u32,
+) -> Option<crate::nvme::CompletionQueueEntry> {
+    unsafe {
+        // SAFETY: sq_virt is the freshly allocated SQ page (direct map);
+        // we own slot `sq_tail`.
+        let slot = sq_virt.add(usize::from(state.sq_tail));
+        core::ptr::write_volatile(slot, entry);
+    }
+    state.sq_tail = (state.sq_tail + 1) % sq_entries;
+    registers.ring_sq_tail_doorbell(qid, state.sq_tail);
+
+    let mut waited = 0_u32;
+    loop {
+        let cqe = unsafe {
+            // SAFETY: cq_virt is the freshly allocated CQ page (direct map);
+            // the controller writes CQEs into it via DMA.
+            core::ptr::read_volatile(cq_virt.add(usize::from(state.cq_head)))
+        };
+        if cqe.phase() == state.phase {
+            state.cq_head += 1;
+            if state.cq_head >= cq_entries {
+                state.cq_head = 0;
+                state.phase ^= 1;
+            }
+            registers.ring_cq_head_doorbell(qid, state.cq_head);
+            return Some(cqe);
+        }
+        waited += 1;
+        if waited >= poll_limit {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(target_os = "none")]
+fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
+    use crate::capability::{request_bootstrap_capability, resource, verify_bootstrap_handle};
+    use crate::memory::DIRECT_MAP_BASE;
+    use crate::nvme::{CompletionQueueEntry, SubmissionQueueEntry};
+    use feox_asi::{CapPermissions, CapRequest, PageFlags};
+
+    // Bound for CSTS / CQ polling loops. QEMU's NVMe is essentially
+    // instant; this just guards against a wedged controller.
+    const POLL_LIMIT: u32 = 1_000_000;
+    const ADMIN_ENTRIES: u16 = 8;
+    const IO_QUEUE_ID: u16 = 1;
+    const IO_ENTRIES: u16 = 8;
+    const NSID: u32 = 1;
+
+    fn alloc_dma_page() -> Option<(u64, *mut u8)> {
+        let handle = request_bootstrap_capability(&CapRequest::PhysicalPages {
+            num_pages: 1,
+            flags: PageFlags::CONTIGUOUS,
+        })
+        .ok()?;
+        let view =
+            verify_bootstrap_handle(handle, CapPermissions::READ | CapPermissions::WRITE).ok()?;
+        let res = resource(view.resource_id)?;
+        let phys = res.base.0;
+        let virt = DIRECT_MAP_BASE.wrapping_add(phys) as *mut u8;
+        unsafe {
+            // SAFETY: virt is a kernel-only direct-map alias of a freshly
+            // minted physical page; nothing else holds a pointer to it.
+            core::ptr::write_bytes(virt, 0, 4096);
+        }
+        Some((phys, virt))
+    }
+
+    // Allocate every DMA buffer up front: admin SQ/CQ, identify scratch,
+    // I/O SQ/CQ, and the read data buffer.
+    let admin_buffers = (alloc_dma_page(), alloc_dma_page(), alloc_dma_page());
+    let io_buffers = (alloc_dma_page(), alloc_dma_page(), alloc_dma_page());
+    let (
+        Some((admin_sq_phys, admin_sq_virt)),
+        Some((admin_cq_phys, admin_cq_virt)),
+        Some((id_phys, id_virt)),
+    ) = admin_buffers
+    else {
+        crate::kprintln!("nvme-admin-probe: failed to allocate admin buffers");
+        return;
+    };
+    let (
+        Some((io_sq_phys, io_sq_virt)),
+        Some((io_cq_phys, io_cq_virt)),
+        Some((read_phys, read_virt)),
+    ) = io_buffers
+    else {
+        crate::kprintln!("nvme-admin-probe: failed to allocate I/O buffers");
+        return;
+    };
+    crate::kprintln!(
+        "nvme-admin-probe: admin SQ={:#018x} CQ={:#018x} ID={:#018x}",
+        admin_sq_phys,
+        admin_cq_phys,
+        id_phys
+    );
+    crate::kprintln!(
+        "nvme-admin-probe: io SQ={:#018x} CQ={:#018x} read_buf={:#018x}",
+        io_sq_phys,
+        io_cq_phys,
+        read_phys
+    );
+
+    // Reset.
+    registers.set_cc(0);
+    let mut waited = 0_u32;
+    while registers.csts().ready() {
+        waited += 1;
+        if waited >= POLL_LIMIT {
+            crate::kprintln!("nvme-admin-probe: timeout waiting CSTS.RDY=0");
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    crate::kprintln!("nvme-admin-probe: controller reset (CSTS.RDY=0)");
+
+    // Configure admin queues and program CC.
+    registers.set_aqa(ADMIN_ENTRIES, ADMIN_ENTRIES);
+    registers.set_asq(admin_sq_phys);
+    registers.set_acq(admin_cq_phys);
+    // CC bit layout (NVMe 1.4 §3.1.6): IOCQES at bits 23:20, IOSQES at
+    // bits 19:16, AMS at 13:11, MPS at 10:7, CSS at 6:4, EN at bit 0.
+    // QEMU additionally rejects Create I/O CQ if IOSQES != 6 or IOCQES != 4,
+    // returning NVME_MAX_QSIZE_EXCEEDED (a misleading name).
+    let cc_value = (4_u32 << 20) | (6_u32 << 16) | 1; // IOCQES=4, IOSQES=6, EN=1
+    registers.set_cc(cc_value);
+
+    let mut waited = 0_u32;
+    loop {
+        let csts = registers.csts();
+        if csts.fatal() {
+            crate::kprintln!("nvme-admin-probe: CSTS.CFS set, controller failed");
+            return;
+        }
+        if csts.ready() {
+            break;
+        }
+        waited += 1;
+        if waited >= POLL_LIMIT {
+            crate::kprintln!("nvme-admin-probe: timeout waiting CSTS.RDY=1");
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    crate::kprintln!("nvme-admin-probe: controller enabled (CSTS.RDY=1)");
+
+    let admin_sq = admin_sq_virt.cast::<SubmissionQueueEntry>();
+    let admin_cq = admin_cq_virt.cast::<CompletionQueueEntry>();
+    let mut admin = NvmeProbeQueueState::new();
+
+    // ---- Identify Controller ----
+    let cqe = match nvme_submit_and_wait(
+        registers,
+        admin_sq,
+        admin_cq,
+        0,
+        ADMIN_ENTRIES,
+        ADMIN_ENTRIES,
+        &mut admin,
+        SubmissionQueueEntry::identify_controller(id_phys, 1),
+        POLL_LIMIT,
+    ) {
+        Some(cqe) => cqe,
+        None => {
+            crate::kprintln!("nvme-admin-probe: Identify Controller timeout");
+            return;
+        }
+    };
+    if cqe.command_id() != 1 || cqe.status_field() != 0 {
+        crate::kprintln!(
+            "nvme-admin-probe: FAIL Identify cid={} status={:#x}",
+            cqe.command_id(),
+            cqe.status_field()
+        );
+        return;
+    }
+    let id_bytes = unsafe {
+        // SAFETY: id_virt aliases the freshly written identify page.
+        core::slice::from_raw_parts(id_virt as *const u8, 4096)
+    };
+    fn trim_ascii(bytes: &[u8]) -> &str {
+        core::str::from_utf8(bytes)
+            .unwrap_or("?")
+            .trim_end_matches(|c: char| c == ' ' || c == '\0')
+    }
+    crate::kprintln!(
+        "nvme-admin-probe: model='{}' serial='{}' firmware='{}'",
+        trim_ascii(&id_bytes[24..64]),
+        trim_ascii(&id_bytes[4..24]),
+        trim_ascii(&id_bytes[64..72]),
+    );
+
+    // ---- Create I/O Completion Queue ----
+    let cqe = match nvme_submit_and_wait(
+        registers,
+        admin_sq,
+        admin_cq,
+        0,
+        ADMIN_ENTRIES,
+        ADMIN_ENTRIES,
+        &mut admin,
+        SubmissionQueueEntry::create_io_completion_queue(IO_QUEUE_ID, IO_ENTRIES, io_cq_phys, 2),
+        POLL_LIMIT,
+    ) {
+        Some(cqe) => cqe,
+        None => {
+            crate::kprintln!("nvme-admin-probe: Create I/O CQ timeout");
+            return;
+        }
+    };
+    if cqe.status_field() != 0 {
+        crate::kprintln!(
+            "nvme-admin-probe: FAIL Create I/O CQ status={:#x}",
+            cqe.status_field()
+        );
+        return;
+    }
+    crate::kprintln!("nvme-io-probe: created I/O CQ {}", IO_QUEUE_ID);
+
+    // ---- Create I/O Submission Queue ----
+    let cqe = match nvme_submit_and_wait(
+        registers,
+        admin_sq,
+        admin_cq,
+        0,
+        ADMIN_ENTRIES,
+        ADMIN_ENTRIES,
+        &mut admin,
+        SubmissionQueueEntry::create_io_submission_queue(
+            IO_QUEUE_ID,
+            IO_ENTRIES,
+            IO_QUEUE_ID,
+            io_sq_phys,
+            3,
+        ),
+        POLL_LIMIT,
+    ) {
+        Some(cqe) => cqe,
+        None => {
+            crate::kprintln!("nvme-admin-probe: Create I/O SQ timeout");
+            return;
+        }
+    };
+    if cqe.status_field() != 0 {
+        crate::kprintln!(
+            "nvme-admin-probe: FAIL Create I/O SQ status={:#x}",
+            cqe.status_field()
+        );
+        return;
+    }
+    crate::kprintln!("nvme-io-probe: created I/O SQ {}", IO_QUEUE_ID);
+
+    // ---- Submit NVM Read of LBA 0 through the kernel block API ----
+    // The block module owns the live NVMe device state. The boot probe
+    // brings the controller up via the admin queue, then hands the I/O
+    // queues to `block::initialize`; the async task calls `block::read`
+    // and `.await`s its result. The drive loop calls `block::drain` to
+    // pump CQEs (which wake the future via the bound waker dispatcher).
+    if let Err(err) = crate::block::initialize(crate::block::BlockDeviceConfig {
+        registers,
+        sq_virt: io_sq_virt.cast::<SubmissionQueueEntry>(),
+        cq_virt: io_cq_virt.cast::<CompletionQueueEntry>(),
+        sq_entries: IO_ENTRIES,
+        cq_entries: IO_ENTRIES,
+        io_qid: IO_QUEUE_ID,
+    }) {
+        crate::kprintln!("nvme-async-probe: block::initialize err={:?}", err);
+        return;
+    }
+
+    // Spawn the background drainer task on the same executor. It pumps
+    // CQ completions every poll pass and yields back so other tasks can
+    // run. Without it the read task would park forever (the executor
+    // re-enqueues waker fires, but nothing would drain the CQ in the
+    // first place to fire those wakers).
+    let drainer_cell = feox_async::TaskCell::new(feox_asi::CoreId(0));
+    let drainer_header = drainer_cell
+        .spawn(crate::block::drainer_task())
+        .expect("drainer spawn");
+
+    let read_phys_for_task = read_phys;
+    let read_virt_for_task = read_virt;
+    let cell = feox_async::TaskCell::new(feox_asi::CoreId(0));
+    let header = cell
+        .spawn(async move {
+            crate::kprintln!("nvme-async-probe: submitting NVM Read via block::read");
+            let future = match crate::block::read(NSID, 0, read_phys_for_task) {
+                Ok(future) => future,
+                Err(err) => {
+                    crate::kprintln!("nvme-async-probe: submit err={:?}", err);
+                    return;
+                }
+            };
+            let result = future.await;
+            match result {
+                Ok(completion) => {
+                    crate::kprintln!(
+                        "nvme-async-probe: completion cid={} sct={} sc={} dnr={}",
+                        completion.cid,
+                        completion.status.sct,
+                        completion.status.sc,
+                        completion.status.dnr
+                    );
+                    if !completion.succeeded() {
+                        crate::kprintln!("nvme-async-probe: FAIL non-success status");
+                        return;
+                    }
+                    // Decode + print the data the controller DMA'd in.
+                    let read_bytes = unsafe {
+                        // SAFETY: read_virt_for_task aliases the freshly
+                        // DMA'd buffer page (direct map).
+                        core::slice::from_raw_parts(read_virt_for_task as *const u8, 32)
+                    };
+                    let mut hex_buf = [0u8; 64];
+                    let mut idx = 0usize;
+                    while idx < 32 {
+                        let high = read_bytes[idx] >> 4;
+                        let low = read_bytes[idx] & 0x0F;
+                        hex_buf[idx * 2] =
+                            if high < 10 { b'0' + high } else { b'a' + high - 10 };
+                        hex_buf[idx * 2 + 1] =
+                            if low < 10 { b'0' + low } else { b'a' + low - 10 };
+                        idx += 1;
+                    }
+                    let hex_str = core::str::from_utf8(&hex_buf).unwrap_or("?");
+                    crate::kprintln!(
+                        "nvme-async-probe: LBA0 ascii='{}' hex={}",
+                        trim_ascii(&read_bytes[..20]),
+                        hex_str
+                    );
+                }
+                Err(err) => {
+                    crate::kprintln!("nvme-async-probe: future err={:?}", err);
+                }
+            }
+        })
+        .expect("task cell spawn");
+
+    let mut executor = feox_async::SingleCoreExecutor::<4>::new();
+    if !executor.enqueue(drainer_header) {
+        crate::kprintln!("nvme-async-probe: executor queue full (drainer)");
+        return;
+    }
+    if !executor.enqueue(header) {
+        crate::kprintln!("nvme-async-probe: executor queue full (read)");
+        return;
+    }
+
+    // Drive loop: `poll_one` one task per pass and stop once the read
+    // task is complete. `run_until_idle` would never return because the
+    // drainer self-wakes on every poll. Bound the loop so a wedged
+    // controller doesn't hang boot.
+    let mut polls = 0_u64;
+    loop {
+        // SAFETY: both task cells live on this stack frame and aren't
+        // moved; their headers remain valid for the duration of this
+        // loop.
+        let progressed = unsafe { executor.poll_one() };
+        polls += 1;
+        if unsafe { header.as_ref().state() } == feox_async::TaskState::Complete {
+            break;
+        }
+        if !progressed {
+            crate::kprintln!(
+                "nvme-async-probe: executor unexpectedly idle at poll {}",
+                polls
+            );
+            return;
+        }
+        if polls >= u64::from(POLL_LIMIT) {
+            crate::kprintln!("nvme-async-probe: stuck after {} polls", polls);
+            return;
+        }
+    }
+    crate::kprintln!("nvme-async-probe: task complete (polls={})", polls);
+
+    // ---- Tear down I/O queues (SQ before CQ per spec) ----
+    let _ = nvme_submit_and_wait(
+        registers,
+        admin_sq,
+        admin_cq,
+        0,
+        ADMIN_ENTRIES,
+        ADMIN_ENTRIES,
+        &mut admin,
+        SubmissionQueueEntry::delete_io_submission_queue(IO_QUEUE_ID, 4),
+        POLL_LIMIT,
+    );
+    let _ = nvme_submit_and_wait(
+        registers,
+        admin_sq,
+        admin_cq,
+        0,
+        ADMIN_ENTRIES,
+        ADMIN_ENTRIES,
+        &mut admin,
+        SubmissionQueueEntry::delete_io_completion_queue(IO_QUEUE_ID, 5),
+        POLL_LIMIT,
+    );
+    crate::kprintln!("nvme-io-probe: I/O queues torn down");
+    crate::block::shutdown();
+
+    // Shut the controller back down.
+    registers.set_cc(0);
+    let mut waited = 0_u32;
+    while registers.csts().ready() {
+        waited += 1;
+        if waited >= POLL_LIMIT {
+            crate::kprintln!("nvme-admin-probe: timeout waiting CSTS.RDY=0 on shutdown");
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    crate::kprintln!("nvme-admin-probe: controller halted (CSTS.RDY=0)");
+    crate::kprintln!("nvme-admin-probe: full lifecycle ok");
+}
+
+#[cfg(target_os = "none")]
+fn run_mmio_cycle_probe() {
+    use crate::memory::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
+    use crate::mmio::{mmio_map_bootstrap, mmio_unmap_bootstrap};
+    use crate::paging::{DirectMapPageTables, PageTableRoot};
+
+    // LAPIC base. A real x86 device MMIO address that no other Feox code
+    // accesses, and (importantly) not covered by the direct map since the
+    // boot map reports it as Reserved, not Usable.
+    const PROBE_PHYS: u64 = 0xFEE0_0000;
+
+    crate::kprintln!(
+        "mmio-probe: requesting MMIO mapping phys={:#018x} length={:#x}",
+        PROBE_PHYS,
+        PAGE_SIZE
+    );
+    let region = match mmio_map_bootstrap(
+        PhysicalAddress::new(PROBE_PHYS),
+        PAGE_SIZE,
+        true,
+        true,
+    ) {
+        Ok(region) => region,
+        Err(_) => {
+            crate::kprintln!("mmio-probe: mmio_map failed");
+            return;
+        }
+    };
+    crate::kprintln!(
+        "mmio-probe: mapped virt={:#018x} phys={:#018x} uncached={} writable={}",
+        region.virtual_base,
+        region.physical_base,
+        region.uncached,
+        region.writable
+    );
+
+    // Walk the active root and confirm the install landed correctly.
+    let root = PageTableRoot::active();
+    let source = DirectMapPageTables;
+    let translation = match root.translate_with(&source, VirtualAddress::new(region.virtual_base)) {
+        Ok(Some(t)) => t,
+        _ => {
+            crate::kprintln!("mmio-probe: vtop_walk did not return a leaf");
+            let _ = mmio_unmap_bootstrap(region);
+            return;
+        }
+    };
+    crate::kprintln!(
+        "mmio-probe: walk phys={:#018x} writable={} cache_disabled={} write_through={}",
+        translation.physical_address.as_u64(),
+        translation.entry.is_writable(),
+        translation.entry.is_cache_disabled(),
+        translation.entry.is_write_through()
+    );
+    if translation.physical_address.as_u64() != PROBE_PHYS {
+        crate::kprintln!("mmio-probe: FAIL walk phys mismatch");
+        let _ = mmio_unmap_bootstrap(region);
+        return;
+    }
+    if !translation.entry.is_cache_disabled() || !translation.entry.is_write_through() {
+        crate::kprintln!("mmio-probe: FAIL UC flags not set");
+        let _ = mmio_unmap_bootstrap(region);
+        return;
+    }
+
+    crate::kprintln!("mmio-probe: calling mmio_unmap_bootstrap...");
+    if mmio_unmap_bootstrap(region).is_err() {
+        crate::kprintln!("mmio-probe: mmio_unmap failed");
+        return;
+    }
+    crate::kprintln!("mmio-probe: full mmio_map cycle ok");
+}
+
+#[cfg(target_os = "none")]
+fn run_vm_mem_cycle_probe() {
+    use crate::memory::PAGE_SIZE;
+    use crate::vm::{
+        mem_map_bootstrap, mem_unmap_bootstrap, mem_vtop_batch_bootstrap, mem_vtop_bootstrap,
+    };
+    use feox_asi::{
+        CapRequest, MapFlags, MemMapArgs, MemVtoPArgs, MemVtoPBatchArgs, PageFlags,
+        PhysicalAddress as AsiPhysicalAddress,
+    };
+
+    const PROBE_PAGES: usize = 4;
+    const PROBE_REGION_BYTES: u64 = (PROBE_PAGES as u64) * PAGE_SIZE;
+
+    crate::kprintln!(
+        "vm-mem-probe: requesting {}-page physical capability...",
+        PROBE_PAGES
+    );
+    let handle = match crate::capability::request_bootstrap_capability(&CapRequest::PhysicalPages {
+        num_pages: PROBE_PAGES,
+        flags: PageFlags::CONTIGUOUS,
+    }) {
+        Ok(handle) => handle,
+        Err(_) => {
+            crate::kprintln!("vm-mem-probe: cap request failed");
+            return;
+        }
+    };
+    crate::kprintln!(
+        "vm-mem-probe: cap handle id={} generation={}",
+        handle.id,
+        handle.generation
+    );
+
+    crate::kprintln!("vm-mem-probe: calling mem_map_bootstrap (multi-page)...");
+    let region = match mem_map_bootstrap(MemMapArgs {
+        handle,
+        offset_bytes: 0,
+        length_bytes: PROBE_REGION_BYTES,
+        flags: MapFlags::READ | MapFlags::WRITE,
+        out_region: core::ptr::null_mut(),
+    }) {
+        Ok(region) => region,
+        Err(_) => {
+            crate::kprintln!("vm-mem-probe: mem_map failed");
+            return;
+        }
+    };
+    crate::kprintln!(
+        "vm-mem-probe: mapped region base={:#018x} length={:#x}",
+        region.base,
+        region.length_bytes
+    );
+
+    // Single-address vtop on the first page — keeps coverage for the
+    // single-call code path.
+    crate::kprintln!("vm-mem-probe: calling mem_vtop_bootstrap (single)...");
+    let single_phys = match mem_vtop_bootstrap(MemVtoPArgs {
+        handle,
+        virtual_address: region.base,
+        out_physical_address: core::ptr::null_mut(),
+    }) {
+        Ok(AsiPhysicalAddress(p)) => p,
+        Err(_) => {
+            crate::kprintln!("vm-mem-probe: mem_vtop (single) failed");
+            let _ = mem_unmap_bootstrap(region);
+            return;
+        }
+    };
+    crate::kprintln!("vm-mem-probe: single vtop result={:#018x}", single_phys);
+
+    // Batch vtop across all 4 pages.
+    let vas: [u64; PROBE_PAGES] = [
+        region.base,
+        region.base + PAGE_SIZE,
+        region.base + 2 * PAGE_SIZE,
+        region.base + 3 * PAGE_SIZE,
+    ];
+    let mut phys_batch: [AsiPhysicalAddress; PROBE_PAGES] =
+        [AsiPhysicalAddress(0); PROBE_PAGES];
+
+    crate::kprintln!(
+        "vm-mem-probe: calling mem_vtop_batch_bootstrap (count={})...",
+        PROBE_PAGES
+    );
+    let written = match mem_vtop_batch_bootstrap(MemVtoPBatchArgs {
+        handle,
+        virtual_addresses: vas.as_ptr(),
+        physical_addresses: phys_batch.as_mut_ptr(),
+        count: PROBE_PAGES,
+    }) {
+        Ok(written) => written,
+        Err(_) => {
+            crate::kprintln!("vm-mem-probe: mem_vtop_batch failed");
+            let _ = mem_unmap_bootstrap(region);
+            return;
+        }
+    };
+    crate::kprintln!("vm-mem-probe: batch vtop wrote {} translations", written);
+
+    let mut index = 0usize;
+    while index < PROBE_PAGES {
+        crate::kprintln!(
+            "vm-mem-probe:   batch[{}] va={:#018x} phys={:#018x}",
+            index,
+            vas[index],
+            phys_batch[index].0
+        );
+        index += 1;
+    }
+
+    // The cap was minted with PageFlags::CONTIGUOUS, so successive page
+    // translations must be PAGE_SIZE apart in phys.
+    let mut contiguous = true;
+    let mut probe = 1usize;
+    while probe < PROBE_PAGES {
+        if phys_batch[probe].0 != phys_batch[probe - 1].0 + PAGE_SIZE {
+            contiguous = false;
+            break;
+        }
+        probe += 1;
+    }
+    if contiguous {
+        crate::kprintln!("vm-mem-probe: batch phys is contiguous");
+    } else {
+        crate::kprintln!("vm-mem-probe: FAIL batch phys NOT contiguous");
+        let _ = mem_unmap_bootstrap(region);
+        return;
+    }
+
+    // Cross-check: single vtop and batch[0] must agree.
+    if phys_batch[0].0 != single_phys {
+        crate::kprintln!(
+            "vm-mem-probe: FAIL single vtop {:#x} != batch[0] {:#x}",
+            single_phys,
+            phys_batch[0].0
+        );
+        let _ = mem_unmap_bootstrap(region);
+        return;
+    }
+
+    crate::kprintln!("vm-mem-probe: calling mem_unmap_bootstrap (multi-page)...");
+    if mem_unmap_bootstrap(region).is_err() {
+        crate::kprintln!("vm-mem-probe: mem_unmap failed");
+        return;
+    }
+    crate::kprintln!("vm-mem-probe: full mem_map cycle ok");
 }
 
 fn runtime_active_entry() -> ! {
@@ -617,6 +1447,8 @@ fn runtime_active_entry() -> ! {
                         summary.retained_events
                     );
                 }
+                #[cfg(target_os = "none")]
+                run_vm_access_probe();
                 let _ = crate::runtime_context::enqueue_command(RuntimeServiceCommand::EnterIdle);
             }
             RuntimeServiceCommand::EnterIdle => {
@@ -823,6 +1655,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                 bootstrap_page_table_frame,
                 transition_root_ready,
                 transition_pages_mapped,
+                direct_map_pages_installed,
+                direct_map_4k_pages_installed,
                 transition_stack_top,
                 transition_stack_alias_top,
                 transition_data_identity,
@@ -891,6 +1725,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                         .map(|table| table.fill(0))
                         .is_some();
                         let mut transition_pages_mapped = 0_u64;
+                        let mut direct_map_pages_installed = 0_u64;
+                        let mut direct_map_4k_pages_installed = 0_u64;
                         let transition_map_result = if transition_root_ready {
                             let kernel_pages =
                                 kernel_image.size_bytes().div_ceil(memory::PAGE_SIZE).max(1);
@@ -1038,45 +1874,156 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             {
                                 map_result = Err("transition_vm_window_prepare_failed");
                             }
+                            // (The bootstrap page-table access window slot at
+                            // `runtime_layout.page_table_access_window_base()`
+                            // is no longer prebuilt or self-mapped — the
+                            // direct map below replaces it. The address-space
+                            // slot stays reserved in the layout for future
+                            // use; nothing live runs through it.)
+                            //
+                            // Install the permanent direct map of physical RAM
+                            // (docs/VIRTUAL_ADDRESS_LAYOUT.md). Every Usable
+                            // region is covered exactly: a 4 KiB head fills
+                            // the bytes before the first 2 MiB boundary, a
+                            // 2 MiB-page bulk covers the aligned interior,
+                            // and a 4 KiB tail finishes any leftover at the
+                            // end. Non-Usable phys (kernel image, MMIO,
+                            // BIOS ROM, ACPI) stays unmapped through the
+                            // direct map; callers that need those use the
+                            // bootstrap kernel-image alias or a dedicated
+                            // MMIO mapping in the locked MMIO zone.
+                            if map_result.is_ok() {
+                                const HUGE_PAGE_SIZE: u64 = 1 << 21;
+                                let direct_flags = (1_u64 << 1)
+                                    | paging::PageTableEntry::FLAG_NO_EXECUTE;
+                                let regions = boot_map.regions();
+                                let mut region_idx = 0usize;
+                                while region_idx < regions.len() && map_result.is_ok() {
+                                    let region = regions[region_idx];
+                                    region_idx += 1;
+                                    if !matches!(region.kind, MemoryRegionKind::Usable) {
+                                        continue;
+                                    }
+                                    let raw_start = region.start.as_u64();
+                                    let raw_end = region.end.as_u64();
+                                    if raw_end <= raw_start {
+                                        continue;
+                                    }
+                                    let aligned_start = (raw_start + HUGE_PAGE_SIZE - 1)
+                                        & !(HUGE_PAGE_SIZE - 1);
+                                    let aligned_end = raw_end & !(HUGE_PAGE_SIZE - 1);
+                                    let has_bulk = aligned_end > aligned_start
+                                        && aligned_start >= raw_start
+                                        && aligned_end <= raw_end;
+
+                                    // 4 KiB head: [raw_start, aligned_start)
+                                    let head_end = if has_bulk {
+                                        aligned_start
+                                    } else {
+                                        raw_end
+                                    };
+                                    let mut phys = raw_start;
+                                    while phys < head_end && map_result.is_ok() {
+                                        let frame = memory::PhysicalFrame::containing(
+                                            memory::PhysicalAddress::new(phys),
+                                        );
+                                        let va = memory::VirtualAddress::new(
+                                            memory::DIRECT_MAP_BASE.wrapping_add(phys),
+                                        );
+                                        if page_root
+                                            .map_4k_with(
+                                                &mut live_page_tables,
+                                                &mut paging_allocator,
+                                                va,
+                                                frame,
+                                                direct_flags,
+                                            )
+                                            .is_err()
+                                        {
+                                            map_result =
+                                                Err("transition_direct_map_head_failed");
+                                            break;
+                                        }
+                                        phys = phys.wrapping_add(memory::PAGE_SIZE);
+                                        direct_map_4k_pages_installed += 1;
+                                    }
+
+                                    if !has_bulk {
+                                        continue;
+                                    }
+
+                                    // 2 MiB bulk: [aligned_start, aligned_end)
+                                    phys = aligned_start;
+                                    while phys < aligned_end && map_result.is_ok() {
+                                        let frame = memory::PhysicalFrame::containing(
+                                            memory::PhysicalAddress::new(phys),
+                                        );
+                                        let va = memory::VirtualAddress::new(
+                                            memory::DIRECT_MAP_BASE.wrapping_add(phys),
+                                        );
+                                        if page_root
+                                            .map_2m_with(
+                                                &mut live_page_tables,
+                                                &mut paging_allocator,
+                                                va,
+                                                frame,
+                                                direct_flags,
+                                            )
+                                            .is_err()
+                                        {
+                                            map_result =
+                                                Err("transition_direct_map_failed");
+                                            break;
+                                        }
+                                        phys = phys.wrapping_add(HUGE_PAGE_SIZE);
+                                        direct_map_pages_installed += 1;
+                                    }
+
+                                    // 4 KiB tail: [aligned_end, raw_end)
+                                    phys = aligned_end;
+                                    while phys < raw_end && map_result.is_ok() {
+                                        let frame = memory::PhysicalFrame::containing(
+                                            memory::PhysicalAddress::new(phys),
+                                        );
+                                        let va = memory::VirtualAddress::new(
+                                            memory::DIRECT_MAP_BASE.wrapping_add(phys),
+                                        );
+                                        if page_root
+                                            .map_4k_with(
+                                                &mut live_page_tables,
+                                                &mut paging_allocator,
+                                                va,
+                                                frame,
+                                                direct_flags,
+                                            )
+                                            .is_err()
+                                        {
+                                            map_result =
+                                                Err("transition_direct_map_tail_failed");
+                                            break;
+                                        }
+                                        phys = phys.wrapping_add(memory::PAGE_SIZE);
+                                        direct_map_4k_pages_installed += 1;
+                                    }
+                                }
+                            }
+                            // Prebuild the MMIO sub-window's page-table
+                            // intermediates so device drivers can install
+                            // leaf entries post-handoff without a runtime
+                            // allocator. The MMIO zone itself is 8 TiB; this
+                            // prebuild reserves only MMIO_PREBUILT_SIZE of
+                            // it (currently 64 MiB).
                             if map_result.is_ok()
                                 && page_root
                                     .prepare_4k_pages_with(
                                         &mut live_page_tables,
                                         &mut paging_allocator,
-                                        runtime_layout.page_table_access_window_base(),
-                                        runtime_layout.page_table_access_window_size(),
+                                        memory::VirtualAddress::new(memory::MMIO_BASE),
+                                        memory::MMIO_PREBUILT_SIZE,
                                     )
                                     .is_err()
                             {
-                                map_result = Err("transition_page_table_access_window_prepare_failed");
-                            }
-                            if map_result.is_ok() {
-                                let control_flags =
-                                    (1_u64 << 1) | paging::PageTableEntry::FLAG_NO_EXECUTE;
-                                match page_root.leaf_table_frame_with(
-                                    &live_page_tables,
-                                    runtime_layout.page_table_access_window_base(),
-                                ) {
-                                    Ok(Some(access_window_pt_frame)) => {
-                                        if page_root
-                                            .map_4k_with(
-                                                &mut live_page_tables,
-                                                &mut paging_allocator,
-                                                runtime_layout.page_table_access_window_base(),
-                                                access_window_pt_frame,
-                                                control_flags,
-                                            )
-                                            .is_err()
-                                        {
-                                            map_result =
-                                                Err("transition_page_table_access_control_map_failed");
-                                        }
-                                    }
-                                    _ => {
-                                        map_result =
-                                            Err("transition_page_table_access_control_unavailable");
-                                    }
-                                }
+                                map_result = Err("transition_mmio_prebuild_failed");
                             }
                             map_result
                         } else {
@@ -1114,6 +2061,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             bootstrap_page_table_root.start_address().as_u64(),
                             transition_root_ready,
                             transition_pages_mapped,
+                            direct_map_pages_installed,
+                            direct_map_4k_pages_installed,
                             transition_stack_top,
                             transition_stack_alias_top,
                             transition_data_identity,
@@ -1128,6 +2077,8 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                     None => (
                         0,
                         false,
+                        0,
+                        0,
                         0,
                         0,
                         0,
@@ -1153,6 +2104,13 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                 crate::kprintln!(
                     "paging: transition_pages_mapped={}",
                     transition_pages_mapped
+                );
+                crate::kprintln!(
+                    "paging: direct_map_pages_2m={} pages_4k={} coverage_bytes={:#x}",
+                    direct_map_pages_installed,
+                    direct_map_4k_pages_installed,
+                    direct_map_pages_installed * (1 << 21)
+                        + direct_map_4k_pages_installed * memory::PAGE_SIZE
                 );
                 if let Some(entry) = transition_stage_entry_alias {
                     crate::kprintln!("paging: transition_entry={:#018x}", entry.as_u64());

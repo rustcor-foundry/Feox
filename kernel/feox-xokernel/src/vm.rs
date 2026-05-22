@@ -3,8 +3,8 @@
 use crate::capability;
 use crate::memory::{self, PAGE_SIZE, PhysicalAddress, PhysicalFrame, VirtualAddress};
 use crate::paging::{
-    Map4kError, PageTableEntry, PageTableFrameAllocator, PageTableFrameMutSource, PageTableRoot,
-    Unmap4kError,
+    DirectMapPageTables, Map4kError, PageTableEntry, PageTableFrameAllocator,
+    PageTableFrameMutSource, PageTableRoot, Unmap4kError,
 };
 use crate::runtime_context::{self, BootstrapVmMapping};
 use feox_asi::{
@@ -210,7 +210,7 @@ pub fn mem_map_bootstrap(
     .ok_or(BootstrapVmError::OutOfVirtualSpace)?;
 
     let root = PageTableRoot::active();
-    let mut live_page_tables = crate::paging::BootstrapIdentityMappedPageTables;
+    let mut live_page_tables = DirectMapPageTables;
     struct NoopAllocator;
     impl PageTableFrameAllocator for NoopAllocator {
         fn allocate_table_frame(&mut self) -> Option<PhysicalFrame> {
@@ -260,7 +260,7 @@ pub fn mem_unmap_bootstrap(region: MappedRegion) -> Result<(), BootstrapVmError>
     };
 
     let root = PageTableRoot::active();
-    let mut live_page_tables = crate::paging::BootstrapIdentityMappedPageTables;
+    let mut live_page_tables = DirectMapPageTables;
     let page_count = active.region.length_bytes / PAGE_SIZE;
     let mut page = 0u64;
     while page < page_count {
@@ -296,7 +296,7 @@ pub fn mem_vtop_bootstrap(args: MemVtoPArgs) -> Result<AsiPhysicalAddress, Boots
     #[cfg(target_os = "none")]
     {
         let root = PageTableRoot::active();
-        let source = crate::paging::BootstrapIdentityMappedPageTables;
+        let source = DirectMapPageTables;
         let translation = root
             .translate_with(&source, VirtualAddress::new(args.virtual_address))
             .map_err(|_| BootstrapVmError::AddressNotMapped)?

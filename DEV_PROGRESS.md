@@ -10,6 +10,363 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-21 (background drainer task)
+
+- added `pub async fn drainer_task()` to `kernel/feox-xokernel/src/block.rs`:
+  an infinite `loop { drain(); yield_now().await; }` that pumps the I/O
+  CQ on every executor pass and cooperatively yields between passes via
+  a small `YieldNow` helper (self-wakes once, returns `Pending`, then
+  `Ready`)
+- migrated `run_nvme_admin_probe` off the hand-rolled drive loop:
+  - spawns the drainer task on a second `TaskCell` and enqueues it
+    onto the same `SingleCoreExecutor<4>` alongside the read task
+  - replaced the alternating `executor.run_until_idle()` +
+    `block::drain()` pump with a single `poll_one` loop that breaks
+    when the read task reaches `TaskState::Complete`
+  - `run_until_idle` can no longer be used here — the drainer self-wakes
+    on every poll, so it would spin forever. `poll_one` polls one
+    task per pass instead
+- bounded smoke now reports `nvme-async-probe: task complete (polls=4)`
+  with the LBA0 data still decoded correctly
+  (`'FEOX-NVME-SMOKE-LBA0'`), and reaches `stage: runtime service idle`
+- 90 host tests pass; `cargo kernel` and `cargo loader` clean
+
+### 2026-05-21 (kernel block API)
+
+- factored the NVMe submit/drain plumbing out of the boot probe and into
+  a new `kernel/feox-xokernel/src/block.rs` module (registered as
+  `pub mod block` in `lib.rs`)
+- exposed a free-function surface so kernel code can do
+  `crate::block::read(nsid, lba, buf_phys).await` without touching
+  `feox_nvme::SubmissionQueueEntry` or controller registers:
+  - `BlockDeviceConfig` (registers + SQ/CQ pointers + queue depths + I/O QID)
+  - `initialize(config) -> Result<(), BlockError>` — sets up the static device
+  - `read(nsid, lba, buf_phys) -> Result<NvmeIoFuture<8>, BlockError>` —
+    reserves a CID via `NvmeQueuePair::submit`, builds the NVM Read SQE,
+    writes it to the I/O SQ, rings the SQ tail doorbell, returns the
+    NVMe future
+  - `drain() -> bool` — pumps CQEs from the I/O CQ into
+    `NvmeQueuePair::complete` (which fires the bound waker dispatcher)
+  - `shutdown()` — calls `NvmeQueuePair::fail` to release outstanding
+    futures, then clears the static
+  - `is_initialized()` — diagnostic accessor
+- migrated `run_nvme_admin_probe` onto the new API. After the
+  controller bring-up + Identify + Create I/O CQ/SQ admin commands
+  succeed, the probe calls `block::initialize`, spawns an async task
+  that does `block::read(...).await`, and uses `block::drain` in the
+  drive loop. `block::shutdown` runs after the I/O queue teardown
+  finishes so the static state is cleared before the controller's
+  CC.EN goes back to 0
+- removed the duplicate `NvmeAsyncState` / `nvme_async_submit_read` /
+  `nvme_async_drain` from `boot.rs`
+- bounded smoke now reports
+  `nvme-async-probe: submitting NVM Read via block::read` followed by
+  the same successful completion + decoded data, still in
+  `poll_passes=2 drain_passes=1`
+- 90 host tests pass; `cargo kernel` and `cargo loader` clean
+
+### 2026-05-21 (executor enqueue gap closed)
+
+- closed the executor "enqueue gap" in `feox_async::TASK_HEADER_WAKER_VTABLE`.
+  The waker now pushes the task back into the owning run queue when
+  `wake()` transitions a parked task to ready
+- added `wake_target: AtomicPtr<u8>` and `wake_dispatcher: AtomicPtr<c_void>`
+  fields to `TaskHeader`, plus an `unsafe fn bind_wake_target(target,
+  dispatcher: WakeDispatcher)` method that the executor calls on
+  `enqueue`. The vtable's `wake` and `wake_by_ref` closures invoke the
+  bound dispatcher on `WakeDisposition::Enqueue`; the dispatcher is a
+  monomorphized `run_queue_push_dispatcher::<CAP>` that casts the
+  type-erased target back to `*mut RunQueue<CAP>` and pushes the task
+- `SingleCoreExecutor::enqueue` now calls `bind_wake_target` so every
+  task added to an executor has an enqueue path for external wakes
+- new unit test `waker_re_enqueues_parked_task_after_external_wake`
+  verifies the closed gap: spawn a future that stashes its waker on
+  first poll and parks, run to idle, fire the stashed waker, and
+  confirm the executor is no longer idle (the task has been re-queued)
+  before the next `run_until_idle` polls it to completion
+- removed the manual `executor.enqueue(header)` re-enqueue from
+  `run_nvme_admin_probe`: the waker handles it now
+- bounded smoke still reports `task complete (poll_passes=2
+  drain_passes=1)` for the NVMe LBA read, confirming the path still
+  closes after one drain + one re-poll
+- 90 host tests pass (89 + the new external-wake test); `cargo kernel`
+  and `cargo loader` clean
+
+### 2026-05-21 (async NVMe driver path)
+
+- wired the live NVMe controller through `feox-async`'s executor + the
+  existing `feox_nvme::NvmeQueuePair<N>` / `InflightMap<N>` async
+  primitives. The boot probe now reads LBA 0 through a real
+  `async`/`await` task instead of busy-polling
+- new `NvmeAsyncState` static in `boot.rs` holds the live controller
+  state (registers, SQ/CQ pointers + indices + phase, queue_pair);
+  `nvme_async_submit_read` reserves a CID via `NvmeQueuePair::submit`,
+  builds the NVM Read SQE, writes it to the I/O SQ and rings the
+  doorbell; `nvme_async_drain` walks the I/O CQ and delivers each
+  completion to `NvmeQueuePair::complete`
+- the async task uses `feox_async::TaskCell::new(CoreId(0)).spawn(...)`
+  with an `async move` block that awaits the read future, decodes the
+  completion, and prints the ASCII + hex prefix of the read buffer; the
+  drive loop alternates `executor.run_until_idle()` with a drainer pass
+- **three stack/layout issues uncovered and fixed**:
+  - `BOOT_STACK` (low-half stack used before the CR3 handoff) overflowed
+    silently into the adjacent `.data` and corrupted the `GDT` static.
+    The post-handoff `lgdt` then reloaded a zeroed GDT and locked up.
+    Bumped from 16 KiB → 64 KiB
+  - `TRANSITION_STACK_PAGES` (higher-half runtime stack) needed more
+    room once the async runtime + task cell + future state machine
+    were live; bumped from 4 → 8 pages (16 KiB → 32 KiB)
+  - `EarlyKernelReservations::MAX_REGIONS` bumped from 96 → 256 to
+    accommodate the larger boot-time allocation footprint
+- **executor "enqueue gap"** documented in
+  `feox_async::TASK_HEADER_WAKER_VTABLE` is real: the waker transitions
+  the task atomic state but does NOT push the task back into the run
+  queue. The probe re-enqueues the task manually after each successful
+  drain; closing the gap is the next focus item
+- bounded smoke now reports
+  `nvme-async-probe: completion cid=0 sct=0 sc=0 dnr=false` followed by
+  `nvme-async-probe: LBA0 ascii='FEOX-NVME-SMOKE-LBA0' hex=...` and
+  `nvme-async-probe: task complete (poll_passes=2 drain_passes=1)` —
+  two polls and one drain to round-trip a real LBA 0 read through the
+  async runtime
+- 89 host tests pass; `cargo kernel` and `cargo loader` clean
+
+### 2026-05-21 (NVMe I/O queues + LBA read)
+
+- extended `feox_nvme::SubmissionQueueEntry` with builders for the
+  admin queue-management commands and one I/O command:
+  `create_io_completion_queue`, `create_io_submission_queue`,
+  `delete_io_completion_queue`, `delete_io_submission_queue`,
+  `nvm_read`
+- generalized the doorbell helpers in `feox_nvme::ControllerRegisters`
+  from `ring_admin_*_doorbell` to `ring_sq_tail_doorbell(qid, tail)` /
+  `ring_cq_head_doorbell(qid, head)`; the offset math computes the
+  correct admin (qid=0) or I/O (qid>=1) doorbell location for any
+  controller with `CAP.DSTRD = 0`
+- factored a tiny `NvmeProbeQueueState` (sq_tail, cq_head, phase) and a
+  `nvme_submit_and_wait` helper in `boot.rs` so the probe can pump
+  multiple commands through the admin and I/O queues with consistent
+  doorbell + phase-tracking logic
+- extended `run_nvme_admin_probe` into a full NVMe lifecycle: reset →
+  enable → Identify Controller → Create I/O CQ → Create I/O SQ → NVM
+  Read LBA 0 → Delete I/O SQ → Delete I/O CQ → shutdown. The probe
+  decodes the model/serial/firmware (as before) and the 20-byte
+  ASCII / 32-byte hex prefix of the read buffer
+- updated `tools/run-qemu-smoke.sh` to stamp the ASCII pattern
+  `FEOX-NVME-SMOKE-LBA0` into LBA 0 of the smoke disk image each run, so
+  the trace shows recognizable bytes coming back from the controller
+- **subtle bit-layout bug fix**: `CC.IOSQES` is at bits 19:16 and
+  `CC.IOCQES` is at bits 23:20 of the Controller Configuration
+  register, not 23:20 / 27:24 as the spec text suggested. QEMU's
+  `nvme_create_cq` rejects Create I/O CQ with the misleadingly-named
+  `NVME_MAX_QSIZE_EXCEEDED` status when these fields don't match
+  `NVME_SQES=6` / `NVME_CQES=4`. The boot CC programming now uses the
+  correct shifts (`(4u32 << 20) | (6u32 << 16) | 1`)
+- bounded smoke trace now reports:
+  `nvme-io-probe: NVM Read LBA 0 ok`,
+  `nvme-io-probe: LBA0 ascii='FEOX-NVME-SMOKE-LBA0' hex=46454f58...`,
+  confirming a real round-trip through the device
+- 89 host tests pass; `cargo kernel` and `cargo loader` clean; smoke
+  reaches `stage: runtime service idle`
+
+### 2026-05-21 (NVMe admin queue)
+
+- extended `feox_nvme::ControllerRegisters` with the admin-queue
+  register helpers: `cc` / `set_cc`, `csts` (decoded via new `Csts`),
+  `set_aqa` (encodes the zero-based field), `set_asq`, `set_acq`,
+  `ring_admin_sq_tail_doorbell`, `ring_admin_cq_head_doorbell`
+- added `feox_nvme::SubmissionQueueEntry` (64-byte `#[repr(C, align(64))]`
+  layout) with a `SubmissionQueueEntry::identify_controller` builder
+  (opcode 0x06, CNS=0x01)
+- added `feox_nvme::CompletionQueueEntry` (16-byte) plus decoders for
+  command id, phase, status field, and SQ head pointer
+- extended the boot probe with `run_nvme_admin_probe`: allocates three
+  4 KiB DMA pages through the existing capability minter (admin SQ,
+  admin CQ, identify buffer), reaches them via the direct map, resets
+  the controller, programs AQA/ASQ/ACQ, sets `CC.EN`, polls
+  `CSTS.RDY`, submits `Identify Controller` with cid=1, polls the
+  admin CQ for phase change, decodes the model / serial / firmware
+  ASCII fields, and shuts the controller back down
+- doubled the NVMe BAR mapping in the probe from 4 KiB to 8 KiB so the
+  admin doorbell page at offset 0x1000 is reachable
+- bounded smoke now reports the full handshake:
+  `nvme-admin-probe: completion cid=1 sq_head=1 status=0x0` and
+  `model='QEMU NVMe Ctrl' serial='feox-smoke' firmware='10.0.8'`
+  (the `feox-smoke` serial is the same string passed in the QEMU
+  command-line, confirming a live round-trip)
+- 89 host tests pass; `cargo kernel` and `cargo loader` clean; smoke
+  reaches `stage: runtime service idle`
+
+### 2026-05-21 (NVMe wired into MMIO)
+
+- added 32-bit port I/O helpers `outl` / `inl` to `arch/x86_64/cpu.rs`
+- added legacy x86 PCI configuration-space reader in
+  `arch/x86_64/pci.rs` (single `config_read32` over the 0xCF8/0xCFC
+  port pair)
+- added `kernel/feox-xokernel/src/pci.rs` (registered as `pub mod pci`)
+  with `PciDevice`, `scan_for_class`, `bar64`, and the constant
+  `PCI_CLASS_NVME = 0x010802`. The scanner walks the 256×32×8 bus space
+  and returns the first matching function
+- added `feox_nvme::ControllerRegisters` plus decoded
+  `feox_nvme::Cap` and `feox_nvme::Vs` views. `ControllerRegisters`
+  wraps a raw pointer to a mapped BAR and exposes
+  `cap()` / `vs()` reads via `read_volatile`
+- promoted the kernel's default features to `["runtime", "storage"]` so
+  the default `cargo kernel` build pulls in `feox-async` and
+  `feox-nvme`; the crate exposes `feox_xokernel::nvme as feox_nvme`
+  (`#[cfg(feature = "storage")]`)
+- added `run_nvme_mmio_probe` to the boot self-test: PCI-scan for the
+  NVMe class, read BAR0, map the first 4 KiB through
+  `mmio_map_bootstrap` (UC), confirm the page-table walk reports the
+  same phys + UC flags, then construct a `ControllerRegisters` over the
+  mapped BAR and print `CAP` (with `mqes`, `dstrd`, `mpsmin`, `mpsmax`)
+  and `VS` (`major.minor.tertiary`). The probe prints "no NVMe
+  controller found" and continues cleanly when no device is present
+- updated `tools/run-qemu-smoke.sh` to lazily create a 16 MiB sparse
+  backing file at `target/feox-qemu/x86_64-nvme-disk.debug.img` and
+  attach it as an emulated NVMe device
+  (`-device nvme,drive=feox-nvme-disk,serial=feox-smoke`)
+- bounded smoke now traces:
+  `nvme-mmio-probe: found 00:03.0 vid=0x1b36 did=0x0010 class=0x010802`,
+  `BAR0 phys=0x000000c000000000`,
+  `CAP=0x004008200f0107ff mqes=2047 dstrd=0 mpsmin=0 mpsmax=4`,
+  `VS=0x00010400 version=1.4.0`, and reaches
+  `stage: runtime service idle`
+- 89 host tests pass (added 2 unit tests covering `Cap` / `Vs`
+  decoders); `cargo kernel` and `cargo loader` clean
+
+### 2026-05-21 (MMIO bring-up)
+
+- added `FLAG_WRITE_THROUGH` (bit 3, PWT) and `FLAG_CACHE_DISABLE` (bit 4,
+  PCD) public constants on `PageTableEntry`, plus `is_cache_disabled` /
+  `is_write_through` accessors
+- added `MMIO_PREBUILT_SIZE` constant (64 MiB) in `memory.rs` — the size
+  of the MMIO sub-window whose page-table intermediates are prebuilt at
+  boot
+- added retained MMIO state in `runtime_context.rs`:
+  `BootstrapMmioMapping`, a 16-slot retained mapping array, a bump-offset
+  cursor, and `allocate_mmio_range` / `record_mmio_mapping` /
+  `remove_mmio_mapping` / `mmio_mappings` / `mmio_bump_offset` helpers
+- created `kernel/feox-xokernel/src/mmio.rs` (registered as `pub mod
+  mmio` in `lib.rs`) with `mmio_map_bootstrap(phys, length, writable,
+  uncached)` and `mmio_unmap_bootstrap(region)`. Internal kernel API;
+  no syscall ABI yet
+- transition root builder in `boot.rs` now calls `prepare_4k_pages_with`
+  over `[MMIO_BASE, MMIO_BASE + MMIO_PREBUILT_SIZE)` after the direct
+  map install, so device drivers can install MMIO leaf entries without a
+  runtime allocator
+- extended the boot self-test with `run_mmio_cycle_probe`: maps the
+  LAPIC base (`0xFEE00000`) into the MMIO zone with UC, walks the active
+  root to verify the leaf entry's phys + PCD + PWT bits, then unmaps
+- 4 new unit tests in `mmio.rs` exercise alignment validation and
+  retained-table round-trip; all 87 host tests pass
+- bounded smoke trace shows
+  `mmio-probe: walk phys=0x00000000fee00000 writable=true
+  cache_disabled=true write_through=true` and reaches
+  `stage: runtime service idle`
+- updated `docs/VIRTUAL_ADDRESS_LAYOUT.md` (MMIO row promoted from policy
+  marker to live for the prebuilt sub-window) and `docs/CURRENT_STATUS.md`
+
+### 2026-05-21 (broadened self-test)
+
+- broadened the bootstrap VM self-test in `boot.rs`:
+  - request a 4-page contiguous physical capability instead of a single page
+  - issue one `mem_map_bootstrap` for the whole 16 KiB region
+  - single `mem_vtop_bootstrap` on the first page (preserves the
+    single-address code path)
+  - `mem_vtop_batch_bootstrap` on all 4 pages with a stack-allocated input
+    and output buffer
+  - verify contiguity: `phys_batch[i+1] == phys_batch[i] + PAGE_SIZE`
+  - cross-check: `phys_batch[0] == single_vtop_result`
+  - one `mem_unmap_bootstrap` releases the whole region
+- the smoke trace now logs every per-page translation, so a regression in
+  the live VM lane shows up in the bounded-CI log immediately
+- 83 host tests pass; bounded smoke reaches `stage: runtime service idle`;
+  `cargo kernel` and `cargo loader` clean
+
+### 2026-05-21 (access window retirement)
+
+- retired the bootstrap page-table access window mechanism now that
+  `DirectMapPageTables` is the live source for `mem_map` / `mem_unmap` /
+  `mem_vtop`
+- removed `BootstrapPageTableAccessWindow`, `BootstrapPageTableAccessReservation`,
+  `BootstrapPageTableAccessSource`, `PageTableAccessError`, and
+  `bootstrap_page_table_access_control_table_mut` from `paging.rs`
+- removed `BootstrapPageTableAccessSlot`, `BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY`,
+  the slot static, `acquire_page_table_access_slot`, `release_page_table_access_slot`,
+  `page_table_access_slots`, and the access-window reset from
+  `runtime_context.rs`
+- removed the access-window prebuild and self-map install from the
+  transition root builder in `boot.rs`
+- removed the three access-window unit tests; the parallel-test race on
+  `BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS` is gone as a side effect (no shared
+  static remains)
+- kept `BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE` / `_SIZE` in `memory.rs`
+  as a reserved 20 KiB address-space slot at `0xFFFF_9000_0800_0000` —
+  doc comment updated to reflect the slot-only status
+- updated `docs/PAGE_TABLE_ACCESS_PLAN.md` (Resolution → Retirement) and
+  `docs/VIRTUAL_ADDRESS_LAYOUT.md` (live-status table marks the access
+  window retired)
+- 83 host tests pass across 3 parallel runs without flake; smoke reaches
+  `stage: runtime service idle`; `cargo kernel` and `cargo loader` clean
+
+### 2026-05-21 (direct map)
+
+- added `PageTableRoot::map_2m_with` to `paging.rs` — installs a 2 MiB
+  huge-page leaf at the PD level (PS=1), allocating missing intermediates
+- added `DirectMapPageTables` source in `paging.rs` that derefs page-table
+  frames at `DIRECT_MAP_BASE + phys` (no slots, no LRU, no per-frame
+  `invlpg`)
+- transition root builder in `boot.rs` now installs the permanent direct
+  map of physical RAM after the bootstrap windows: one 2 MiB huge-page
+  entry per aligned interior chunk of every Usable region, with 4 KiB
+  head/tail entries to cover the unaligned bytes; non-Usable phys
+  (kernel image, MMIO, BIOS ROM, ACPI) is deliberately excluded
+- cut over `mem_map_bootstrap`, `mem_unmap_bootstrap`, and
+  `mem_vtop_bootstrap` from `BootstrapPageTableAccessSource::active()` to
+  `DirectMapPageTables`
+- simplified the boot probe: dropped the multi-step access-window
+  primitive probe (Phase A — served its purpose during the bug hunt);
+  added a single direct-map read of the active root frame; the live
+  `mem_map` / `mem_vtop` / `mem_unmap` cycle still runs every boot
+- bounded smoke now traces `paging: direct_map_pages_2m=100 pages_4k=1490
+  coverage_bytes=0xcdd2000` (200 MiB of bulk + ~5.8 MiB of head/tail on
+  the QEMU 256 MiB target) and reaches `stage: runtime service idle`
+- 86 host tests pass; `cargo kernel` and `cargo loader` clean
+- updated `docs/VIRTUAL_ADDRESS_LAYOUT.md` (direct-map region promoted
+  from policy marker to live) and `docs/CURRENT_STATUS.md`
+
+### 2026-05-21 (layout lock)
+
+- locked the permanent kernel virtual layout in `docs/VIRTUAL_ADDRESS_LAYOUT.md`:
+  user/kernel split is the standard x86_64 canonical 128 TiB/128 TiB; kernel
+  image stays at `0xFFFF_9000_0000_0000` (bootstrap window becomes permanent);
+  direct map at `0xFFFF_C000_0000_0000` (32 TiB); per-core data at
+  `0xFFFF_E000_0000_0000` (1 TiB stride × 32 cores); MMIO at
+  `0xFFFF_F000_0000_0000` (8 TiB); kernel vmalloc / capability tables at
+  `0xFFFF_F800_0000_0000` (8 TiB)
+- added policy-marker constants in `memory.rs` for each locked region
+  (`DIRECT_MAP_BASE`, `DIRECT_MAP_SIZE`, `PER_CORE_BASE`, `PER_CORE_STRIDE`,
+  `PER_CORE_MAX_CORES`, `MMIO_BASE`, `MMIO_SIZE`, `KERNEL_VMALLOC_BASE`,
+  `KERNEL_VMALLOC_SIZE`) so callers can reference the locked addresses
+  before live mappings exist
+- updated `docs/CURRENT_STATUS.md` so Immediate Next Focus is direct-map
+  bring-up rather than layout policy work
+
+### 2026-05-21
+
+- diagnosed and fixed the post-handoff bootstrap VM blocker called out in `docs/PAGE_TABLE_ACCESS_PLAN.md` Latest Finding
+- root cause was a release-path off-by-N bug in `BootstrapPageTableAccessReservation::release`: the control PT alias was computed as `slot.virtual_base - PAGE_SIZE`, which only equals `window_base` for slot index 0 and silently dereferenced the previous slot's alias for any later slot; the second release in a multi-frame walk then faulted on a slot whose own alias had just been cleared
+- stored `window_base` on `BootstrapPageTableAccessReservation` and used it directly in `release()`
+- raised `BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY` from 3 to 4 and the access window size from 16 KiB to 20 KiB so one `map_4k_with` / `unmap_4k_with` / `translate_with` walk can hold simultaneous aliases for PML4, PDPT, PD, and PT
+- pubbed `BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY` and threaded it through `BootstrapPageTableAccessSource` so the const is the single source of truth
+- cut over `mem_map_bootstrap`, `mem_unmap_bootstrap`, and `mem_vtop_bootstrap` in `vm.rs` from `BootstrapIdentityMappedPageTables` to `BootstrapPageTableAccessSource::active()`
+- added a bootstrap VM self-test in `boot.rs` that runs in the retained runtime command queue: a low-level access-window primitive probe followed by a full `mem_map` → `mem_vtop` → `mem_unmap` cycle against a real one-page capability
+- bounded QEMU smoke now reaches `stage: runtime service idle` with the live VM cycle exercised on every boot
+- added `tools/run-qemu-smoke.sh` as a bash equivalent of `tools/run-qemu-smoke.ps1` so contributors on a Linux host without `pwsh` can still run the bounded smoke locally; the PowerShell harness remains the authoritative CI entry point
+- updated `docs/CURRENT_STATUS.md` and `docs/PAGE_TABLE_ACCESS_PLAN.md` to mark Bootstrap VM hardening resolved
+- all 86 host tests pass (`cargo test`); `cargo kernel` and `cargo loader` clean
+
 ### 2026-04-08
 
 - locked a bootstrap capability-backed VM window at `0xFFFF_9000_0400_0000` with a fixed 64 MiB bootstrap-only mapping arena in `memory.rs` and `docs/VIRTUAL_ADDRESS_LAYOUT.md`
@@ -179,5 +536,6 @@ This document is the running development record for Feox.
 
 ## Next Focus
 
-- **Live memory mapping lane**: wire the new capability-backed 4 KiB map helper into bootstrap `mem_map` / `mem_unmap` operations with retained VM state and syscall exposure
-- decide the permanent kernel virtual address layout and update `docs/VIRTUAL_ADDRESS_LAYOUT.md` with the direct-map base and per-core/MMIO zone choices
+- extend the block layer to handle multiple devices / namespaces / queue pairs
+- bring up the per-core data zone at `0xFFFF_E000_0000_0000` when SMP work begins
+- decide whether ASI exposes the NVMe driver through a generic block/file layer or a dedicated NVMe ABI

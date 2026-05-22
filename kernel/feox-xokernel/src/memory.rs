@@ -21,7 +21,64 @@ pub const BOOTSTRAP_VM_WINDOW_SIZE: u64 = 64 * 1024 * 1024;
 /// Higher-half base for the bootstrap page-table access window.
 pub const BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_BASE: u64 = 0xFFFF_9000_0800_0000;
 /// Size of the bootstrap page-table access window in bytes.
-pub const BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE: u64 = 16 * 1024;
+///
+/// The access window mechanism is retired (`docs/PAGE_TABLE_ACCESS_PLAN.md`);
+/// the live VM lane walks page tables through the permanent direct map at
+/// [`DIRECT_MAP_BASE`]. This 20 KiB virtual range is preserved as a reserved
+/// slot in `0xFFFF_9000` so any future tactical mechanism that wants the
+/// same address-space footprint can claim it without churn.
+pub const BOOTSTRAP_PAGE_TABLE_ACCESS_WINDOW_SIZE: u64 = 20 * 1024;
+
+// ---------------------------------------------------------------------------
+// Permanent kernel virtual layout — policy markers
+//
+// These constants record the layout commitments captured in
+// `docs/VIRTUAL_ADDRESS_LAYOUT.md`. They are not yet backed by live mappings;
+// implementation passes will install mappings inside these regions and the
+// doc's implementation-status table will be updated as each region goes live.
+// Any code that needs to reason about the permanent kernel layout (e.g. to
+// reject mappings outside it) should reference these constants instead of
+// re-deriving the addresses.
+// ---------------------------------------------------------------------------
+
+/// Base of the permanent direct map of physical memory.
+///
+/// Translation: `direct_map_va = DIRECT_MAP_BASE + phys_addr`.
+pub const DIRECT_MAP_BASE: u64 = 0xFFFF_C000_0000_0000;
+
+/// Maximum physical RAM coverage of the direct map, in bytes.
+pub const DIRECT_MAP_SIZE: u64 = 32 * 1024 * 1024 * 1024 * 1024;
+
+/// Base of the per-core kernel data region.
+///
+/// Each logical core owns one stride-sized slot starting here:
+/// `core_base(core_id) = PER_CORE_BASE + core_id as u64 * PER_CORE_STRIDE`.
+pub const PER_CORE_BASE: u64 = 0xFFFF_E000_0000_0000;
+
+/// Stride between adjacent per-core slots, in bytes (1 TiB).
+pub const PER_CORE_STRIDE: u64 = 1 << 40;
+
+/// Maximum number of cores the locked layout reserves space for.
+pub const PER_CORE_MAX_CORES: u64 = 32;
+
+/// Base of the kernel-owned MMIO mapping region.
+pub const MMIO_BASE: u64 = 0xFFFF_F000_0000_0000;
+
+/// Size of the kernel-owned MMIO region, in bytes (8 TiB).
+pub const MMIO_SIZE: u64 = 8 * 1024 * 1024 * 1024 * 1024;
+
+/// Size of the MMIO sub-window whose page-table intermediates are prebuilt
+/// during transition root construction. Sized to comfortably hold a handful
+/// of typical device BARs (NVMe, USB, GPU control, modest framebuffers)
+/// without bloating the boot-time page-table footprint. MMIO mappings beyond
+/// this prebuild require expanding it first.
+pub const MMIO_PREBUILT_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Base of the kernel vmalloc / capability-table dynamic region.
+pub const KERNEL_VMALLOC_BASE: u64 = 0xFFFF_F800_0000_0000;
+
+/// Size of the kernel vmalloc region, in bytes (8 TiB).
+pub const KERNEL_VMALLOC_SIZE: u64 = 8 * 1024 * 1024 * 1024 * 1024;
 
 /// Virtual address wrapper.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -206,7 +263,13 @@ impl Default for EarlyKernelReservations {
 
 impl EarlyKernelReservations {
     /// Maximum number of early reservation entries tracked during bootstrap.
-    pub const MAX_REGIONS: usize = 96;
+    ///
+    /// Grew from 96 → 256 when the kernel started running the async
+    /// runtime in the boot probe: bigger bootstrap stack (8 pages) plus
+    /// the extra page-table frames allocated for the direct map's 4 KiB
+    /// head/tail mappings and the MMIO prebuild push the total over the
+    /// old cap. 256 leaves comfortable headroom.
+    pub const MAX_REGIONS: usize = 256;
 
     /// Builds the initial reservation set for the currently loaded kernel image
     /// and active top-level page table root.

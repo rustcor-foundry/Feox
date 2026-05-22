@@ -5,11 +5,14 @@
 //! Top-level facade for the Feox xokernel prototype.
 
 pub mod arch;
+pub mod block;
 pub mod boot;
 pub mod capability;
 pub mod console;
 pub mod memory;
+pub mod mmio;
 pub mod paging;
+pub mod pci;
 pub mod runtime_context;
 pub mod vm;
 
