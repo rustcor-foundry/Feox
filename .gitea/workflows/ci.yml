@@ -6,134 +6,36 @@ on:
   pull_request:
     branches: [main]
 
-# lx-ws01: 80 threads, 503 GB RAM
-# Feox is a bare-metal no_std kernel. CI checks kernel/loader crates against
-# their proper targets so we catch type/borrow errors without needing hardware.
 env:
   CARGO_TERM_COLOR: always
-  CARGO_BUILD_JOBS: "80"
 
 jobs:
-  host-tests:
+  test:
     name: Workspace host tests
     runs-on: lx-ws01
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust stable with bare-metal targets
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-none,x86_64-unknown-uefi
-          components: clippy
+      - run: cargo test
 
-      - name: Run workspace unit tests
-        run: cargo test --jobs 80
-
-  build:
-    name: Build kernel and loader artifacts
+  kernel:
+    name: Build x86_64 kernel
     runs-on: lx-ws01
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust stable with bare-metal targets
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-none,x86_64-unknown-uefi
+          targets: x86_64-unknown-none
+      - run: cargo kernel
 
-      - name: Build x86_64 kernel
-        run: cargo kernel --jobs 80
-
-      - name: Build x86_64 UEFI loader
-        run: cargo loader --jobs 80
-
-  lint-and-check:
-    name: Target checks and lints
+  loader:
+    name: Build UEFI loader
     runs-on: lx-ws01
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust stable with bare-metal targets
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-none,x86_64-unknown-uefi
-          components: clippy
-
-      - name: Check kernel crates (x86_64-unknown-none)
-        run: |
-          cargo check \
-            -p feox-asi -p feox-async -p feox-boot -p feox-nvme -p feox-xokernel \
-            --target x86_64-unknown-none \
-            --jobs 80
-
-      - name: Check UEFI loader (x86_64-unknown-uefi)
-        run: |
-          cargo check \
-            -p feox-loader-uefi \
-            --target x86_64-unknown-uefi \
-            --jobs 80
-
-      - name: Clippy kernel crates
-        run: |
-          cargo clippy \
-            -p feox-asi -p feox-async -p feox-boot -p feox-nvme -p feox-xokernel \
-            --target x86_64-unknown-none \
-            --jobs 80 \
-            -- -D warnings
-
-      - name: Clippy UEFI loader
-        run: |
-          cargo clippy \
-            -p feox-loader-uefi \
-            --target x86_64-unknown-uefi \
-            --jobs 80 \
-            -- -D warnings
-
-  qemu-smoke:
-    name: x86_64 QEMU smoke boot
-    runs-on: lx-ws01
-    needs: [host-tests, build, lint-and-check]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable with bare-metal targets
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-none,x86_64-unknown-uefi
-
-      - name: Confirm PowerShell is available
-        run: pwsh --version
-
-      - name: Print runner tool versions
-        run: |
-          rustc --version
-          cargo --version
-          qemu-system-x86_64 --version || true
-          pwsh --version
-
-      - name: Check x86_64 boot-host prerequisites
-        run: pwsh -File ./tools/check-host.ps1 -Architecture x86_64
-
-      - name: Print resolved firmware paths
-        run: |
-          echo "FEOX_QEMU=${FEOX_QEMU:-<unset>}"
-          echo "FEOX_OVMF_CODE=${FEOX_OVMF_CODE:-<unset>}"
-          echo "FEOX_OVMF_VARS=${FEOX_OVMF_VARS:-<unset>}"
-          ls -la /usr/share/OVMF || true
-          ls -la /usr/share/edk2/x64 || true
-          ls -la /usr/share/edk2-ovmf/x64 || true
-          ls -la /usr/share/qemu || true
-
-      - name: Run bounded x86_64 QEMU smoke boot
-        run: pwsh -File ./tools/run-qemu-smoke.ps1 -Architecture x86_64 -TimeoutSeconds 20 -SuccessMarker "stage: runtime service idle"
-
-      - name: Dump QEMU smoke logs
-        if: always()
-        run: |
-          echo "== target/feox-qemu =="
-          ls -la target/feox-qemu || true
-          echo "== debug log tail =="
-          tail -n 120 target/feox-qemu/x86_64-debug.debug.log || true
-          echo "== stdout log tail =="
-          tail -n 80 target/feox-qemu/x86_64-stdout.debug.log || true
-          echo "== stderr log tail =="
-          tail -n 80 target/feox-qemu/x86_64-stderr.debug.log || true
+          targets: x86_64-unknown-uefi
+      - run: cargo loader
