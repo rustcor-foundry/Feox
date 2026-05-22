@@ -22,6 +22,10 @@ use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
 /// the loader did not provide one.
 static RSDP_PHYS: AtomicU64 = AtomicU64::new(0);
 
+/// Sub-1-MiB physical frame reserved by the loader for the AP boot
+/// trampoline. Zero means the loader could not allocate one.
+static AP_TRAMPOLINE_PHYS: AtomicU64 = AtomicU64::new(0);
+
 /// Number of pages in the kernel's bootstrap higher-half stack.
 ///
 /// 4 pages (16 KiB) covered everything up through the synchronous NVMe
@@ -362,10 +366,19 @@ fn run_vm_access_probe() {
     run_per_core_probe();
 
     // Walk the ACPI MADT (if firmware provided an RSDP) and report
-    // the secondary-processor topology. APs aren't started yet — this
-    // discovery pass lays the groundwork for AP bring-up to land in a
-    // follow-up commit.
-    run_acpi_smp_probe();
+    // the secondary-processor topology. APs aren't started yet here —
+    // this discovery pass returns the LAPIC list used by
+    // `run_ap_boot_probe` below.
+    let topology = run_acpi_smp_probe();
+
+    // Send INIT-SIPI-SIPI to the first non-BSP LAPIC the MADT
+    // reported, place a tiny 16-bit trampoline at the loader-
+    // allocated sub-1-MiB frame, and watch for the trampoline's
+    // magic word. Validates the LAPIC IPI plumbing without going as
+    // far as a Rust ap_entry.
+    if let Some(topology) = topology {
+        run_ap_boot_probe(&topology);
+    }
 
     // Optional: scan for an NVMe controller, map its BAR0 through the
     // MMIO lane, and read the CAP+VS registers through it. Prints
@@ -417,17 +430,17 @@ fn run_per_core_probe() {
 }
 
 #[cfg(target_os = "none")]
-fn run_acpi_smp_probe() {
+fn run_acpi_smp_probe() -> Option<crate::acpi::AcpiTopology> {
     let rsdp = RSDP_PHYS.load(core::sync::atomic::Ordering::Acquire);
     if rsdp == 0 {
         crate::kprintln!("acpi-smp-probe: skipped (no rsdp from loader)");
-        return;
+        return None;
     }
     let topology = match unsafe { crate::acpi::parse_topology(rsdp) } {
         Ok(t) => t,
         Err(err) => {
             crate::kprintln!("acpi-smp-probe: parse failed err={:?}", err);
-            return;
+            return None;
         }
     };
     crate::kprintln!(
@@ -448,6 +461,63 @@ fn run_acpi_smp_probe() {
             entry.is_online_capable() as u8
         );
         i += 1;
+    }
+    Some(topology)
+}
+
+#[cfg(target_os = "none")]
+fn run_ap_boot_probe(topology: &crate::acpi::AcpiTopology) {
+    if topology.lapic_count < 2 {
+        crate::kprintln!("ap-boot-probe: skipped (no secondary APs reported)");
+        return;
+    }
+    // The BSP is conventionally apic_id 0; pick the first reported
+    // LAPIC with a different ID. (QEMU enumerates BSP first, so this
+    // is `lapics[1]` in practice, but we don't assume the order.)
+    let bsp = match crate::lapic::read_id() {
+        Ok(_) => 0_u8,
+        Err(_) => 0_u8,
+    };
+    let target = topology
+        .lapics()
+        .iter()
+        .find(|e| e.is_enabled() && e.apic_id != bsp);
+    let Some(target) = target else {
+        crate::kprintln!("ap-boot-probe: no enabled non-BSP LAPIC");
+        return;
+    };
+
+    if let Err(err) = crate::lapic::initialize(u64::from(topology.local_apic_address)) {
+        crate::kprintln!("ap-boot-probe: lapic::initialize err={:?}", err);
+        return;
+    }
+    match (crate::lapic::read_id(), crate::lapic::read_version()) {
+        (Ok(id), Ok(ver)) => crate::kprintln!(
+            "ap-boot-probe: lapic id={} version={:#010x}",
+            id,
+            ver
+        ),
+        (id, ver) => crate::kprintln!(
+            "ap-boot-probe: lapic read err id={:?} ver={:?}",
+            id,
+            ver
+        ),
+    }
+
+    let tramp = AP_TRAMPOLINE_PHYS.load(core::sync::atomic::Ordering::Acquire);
+    if tramp == 0 {
+        crate::kprintln!("ap-boot-probe: skipped (loader did not allocate trampoline frame)");
+        return;
+    }
+    crate::kprintln!(
+        "ap-boot-probe: target_apic_id={} trampoline_phys={:#018x} sipi_vector={:#04x}",
+        target.apic_id,
+        tramp,
+        (tramp >> 12) as u8
+    );
+    match crate::smp::bring_up_first_ap(tramp, target.apic_id) {
+        Ok(()) => crate::kprintln!("ap-boot-probe: AP alive (magic observed)"),
+        Err(err) => crate::kprintln!("ap-boot-probe: bring_up_first_ap err={:?}", err),
     }
 }
 
@@ -1831,6 +1901,12 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                 crate::kprintln!("memory: rsdp_phys={:#018x}", rsdp);
             } else {
                 crate::kprintln!("memory: rsdp_phys=<not provided>");
+            }
+            if let Some(tramp) = handoff.ap_trampoline_phys() {
+                AP_TRAMPOLINE_PHYS.store(tramp, core::sync::atomic::Ordering::Release);
+                crate::kprintln!("memory: ap_trampoline_phys={:#018x}", tramp);
+            } else {
+                crate::kprintln!("memory: ap_trampoline_phys=<not provided>");
             }
             let registered_resources =
                 capability::seed_bootstrap_resources_from_handoff(handoff.memory_map())

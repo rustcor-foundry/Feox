@@ -111,10 +111,14 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"FEOXBOOT");
 
 /// Current boot handoff ABI version.
 ///
-/// v2 (2026-05-22): adds [`BootInfo::rsdp_phys`] so the kernel can
-/// locate ACPI tables for SMP / IRQ routing discovery. Loaders that
-/// can't supply an RSDP set this to 0.
-pub const BOOT_INFO_VERSION: u32 = 2;
+/// v3 (2026-05-22): adds [`BootInfo::ap_trampoline_phys`], the
+/// physical address of a single 4 KiB page below 1 MiB reserved by
+/// the loader for use as the AP boot trampoline target (SIPI vector
+/// must address sub-1-MiB physical memory). Loaders that cannot
+/// allocate such a page set this to 0.
+///
+/// v2 (2026-05-22): adds [`BootInfo::rsdp_phys`].
+pub const BOOT_INFO_VERSION: u32 = 3;
 
 /// Raw boot handoff structure passed to the kernel entrypoint in `rdi`.
 #[repr(C)]
@@ -133,6 +137,12 @@ pub struct BootInfo {
     /// Physical address of the ACPI 2.0 RSDP, or 0 if the loader
     /// could not locate one (e.g. legacy BIOS / no ACPI table).
     pub rsdp_phys: u64,
+    /// Physical address of a 4 KiB page below 1 MiB the loader has
+    /// reserved for the AP boot trampoline. The kernel writes the
+    /// 16-bit trampoline + an AP-status word here and points the
+    /// LAPIC SIPI vector at `ap_trampoline_phys >> 12`. Zero if the
+    /// loader could not allocate such a page.
+    pub ap_trampoline_phys: u64,
 }
 
 impl BootInfo {
@@ -146,13 +156,19 @@ impl BootInfo {
             memory_map_ptr: core::ptr::null(),
             memory_map_len: 0,
             rsdp_phys: 0,
+            ap_trampoline_phys: 0,
         }
     }
 
-    /// Creates a boot info structure from a memory map slice and an
-    /// optional ACPI RSDP physical address (zero if not provided).
+    /// Creates a boot info structure from a memory map slice, the
+    /// ACPI RSDP physical address (zero if not provided), and the AP
+    /// trampoline frame physical address (zero if not allocated).
     #[must_use]
-    pub const fn new(memory_map: &[MemoryRegion], rsdp_phys: u64) -> Self {
+    pub const fn new(
+        memory_map: &[MemoryRegion],
+        rsdp_phys: u64,
+        ap_trampoline_phys: u64,
+    ) -> Self {
         Self {
             magic: BOOT_INFO_MAGIC,
             version: BOOT_INFO_VERSION,
@@ -160,6 +176,7 @@ impl BootInfo {
             memory_map_ptr: memory_map.as_ptr(),
             memory_map_len: memory_map.len(),
             rsdp_phys,
+            ap_trampoline_phys,
         }
     }
 }
@@ -169,6 +186,7 @@ impl BootInfo {
 pub struct BootHandoff<'a> {
     memory_map: &'a [MemoryRegion],
     rsdp_phys: u64,
+    ap_trampoline_phys: u64,
 }
 
 impl<'a> BootHandoff<'a> {
@@ -203,6 +221,7 @@ impl<'a> BootHandoff<'a> {
         Some(Self {
             memory_map,
             rsdp_phys: info.rsdp_phys,
+            ap_trampoline_phys: info.ap_trampoline_phys,
         })
     }
 
@@ -220,6 +239,17 @@ impl<'a> BootHandoff<'a> {
             None
         } else {
             Some(self.rsdp_phys)
+        }
+    }
+
+    /// Returns the bootloader-supplied AP trampoline frame physical
+    /// address, or `None` if the loader could not allocate one.
+    #[must_use]
+    pub const fn ap_trampoline_phys(self) -> Option<u64> {
+        if self.ap_trampoline_phys == 0 {
+            None
+        } else {
+            Some(self.ap_trampoline_phys)
         }
     }
 
@@ -263,6 +293,7 @@ mod tests {
             memory_map_ptr: core::ptr::null(),
             memory_map_len: 0,
             rsdp_phys: 0,
+            ap_trampoline_phys: 0,
         };
 
         // SAFETY: `info` lives for the duration of this test and points to a
@@ -292,6 +323,7 @@ mod tests {
             memory_map_ptr: regions.as_ptr(),
             memory_map_len: regions.len(),
             rsdp_phys: 0xDEAD_BEEF_F000,
+            ap_trampoline_phys: 0x8000,
         };
 
         // SAFETY: `info` lives for the duration of this test and points to a
@@ -306,12 +338,14 @@ mod tests {
             Some(0x5000)
         );
         assert_eq!(handoff.rsdp_phys(), Some(0xDEAD_BEEF_F000));
+        assert_eq!(handoff.ap_trampoline_phys(), Some(0x8000));
     }
 
     #[test]
-    fn boot_handoff_rsdp_zero_reports_none() {
-        let info = BootInfo::new(&[], 0);
+    fn boot_handoff_optional_fields_zero_reports_none() {
+        let info = BootInfo::new(&[], 0, 0);
         let handoff = unsafe { BootHandoff::from_ptr(&raw const info) }.expect("valid handoff");
         assert_eq!(handoff.rsdp_phys(), None);
+        assert_eq!(handoff.ap_trampoline_phys(), None);
     }
 }

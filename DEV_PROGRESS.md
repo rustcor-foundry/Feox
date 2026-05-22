@@ -10,6 +10,44 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-22 (AP boot v1: trampoline alive)
+
+- bumped Boot ABI to v3 (`BOOT_INFO_VERSION = 3`): adds
+  `BootInfo::ap_trampoline_phys: u64` (zero if loader can't allocate
+  one) and `BootHandoff::ap_trampoline_phys() -> Option<u64>`
+- UEFI loader now allocates a single 4 KiB page below 1 MiB via
+  `boot::allocate_pages(AllocateType::MaxAddress(0x100000), ...)`
+  before `exit_boot_services`. SIPI vectors address sub-1-MiB
+  physical memory, so the kernel can't get this through its normal
+  capability allocator (which only sees Usable RAM above the BIOS
+  area)
+- new `kernel/feox-xokernel/src/lapic.rs`: maps the LAPIC MMIO at the
+  MADT-reported address (typically `0xFEE00000`) through
+  `mmio_map_bootstrap` (uncached). Exposes `read_id`, `read_version`,
+  `send_init(dst_apic_id)`, `send_startup(dst_apic_id, vector)`.
+  Polls ICR delivery-status bit between sends
+- new `kernel/feox-xokernel/src/smp.rs`: writes a hand-assembled
+  14-byte 16-bit real-mode trampoline at the loader-allocated frame.
+  Trampoline does `cli; mov ds, cs; mov word [0xFF0], 0xCAFE; hlt`.
+  `bring_up_first_ap(trampoline_phys, target_apic_id)` clears the
+  magic, copies the bytes, sends INIT-SIPI-SIPI with crude busy
+  delays (10M iter post-INIT, 200K between SIPIs), then polls the
+  magic word for up to 5M iterations
+- new `run_ap_boot_probe` (boot probe) runs after
+  `run_acpi_smp_probe`. Picks the first non-BSP LAPIC, initializes
+  the LAPIC driver, prints LAPIC id + version, calls
+  `bring_up_first_ap`. With QEMU `-smp 4`, bounded smoke reports:
+  `ap-boot-probe: lapic id=0 version=0x00050014`
+  `ap-boot-probe: target_apic_id=1 trampoline_phys=0x9f000 sipi_vector=0x9f`
+  `ap-boot-probe: AP alive (magic observed)`
+- scope note: the trampoline does NOT enter Rust on the AP. It runs
+  ~6 instructions of real-mode asm and halts. v2 will transition
+  real -> protected -> long mode, share the BSP's CR3, load per-AP
+  GS_BASE, and jump to a Rust `ap_entry`
+- 101 host tests pass (was 97; +1 feox-boot ap_trampoline accessor,
+  +1 lapic delivery-poll constant, +3 smp trampoline layout/magic
+  tests); `cargo kernel` and `cargo loader` clean
+
 ### 2026-05-22 (SMP discovery: ACPI MADT + per-core infra)
 
 - bumped Boot ABI to v2 (`BOOT_INFO_VERSION = 2`): adds
