@@ -13,6 +13,7 @@ pub mod memory;
 pub mod mmio;
 pub mod paging;
 pub mod pci;
+pub mod per_core;
 pub mod runtime_context;
 pub mod vm;
 

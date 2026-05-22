@@ -349,12 +349,59 @@ fn run_vm_access_probe() {
     // unmap.
     run_mmio_cycle_probe();
 
+    // Stand up the per-core data area for core 0. After this call,
+    // kernel code can use `crate::per_core::current()` (a GS-relative
+    // load on x86_64) to reach its own per-CPU block. Single-core
+    // only for now; SMP bring-up of secondary cores is a follow-up.
+    run_per_core_probe();
+
     // Optional: scan for an NVMe controller, map its BAR0 through the
     // MMIO lane, and read the CAP+VS registers through it. Prints
     // "no controller" and continues if PCI has no NVMe device.
     run_nvme_mmio_probe();
 
     crate::kprintln!("vm-probe: complete");
+}
+
+#[cfg(target_os = "none")]
+fn run_per_core_probe() {
+    match crate::per_core::initialize_core0() {
+        Ok(handle) => {
+            crate::kprintln!(
+                "per-core-probe: core 0 initialized (cap id={}, gen={})",
+                handle.id,
+                handle.generation
+            );
+            let area = crate::per_core::current();
+            // Validate via the GS-relative path: load through `gs:[0]`
+            // (current()), then re-load self_ptr to confirm it matches
+            // what `gs:[0]` already returned.
+            let self_ptr = area.self_ptr;
+            if area.magic != crate::per_core::PER_CORE_MAGIC {
+                crate::kprintln!(
+                    "per-core-probe: FAIL bad magic {:#018x}",
+                    area.magic
+                );
+                return;
+            }
+            if area.core_id != 0 {
+                crate::kprintln!("per-core-probe: FAIL core_id={} (expected 0)", area.core_id);
+                return;
+            }
+            if (self_ptr as u64) != (area as *const _ as u64) {
+                crate::kprintln!("per-core-probe: FAIL self_ptr mismatch");
+                return;
+            }
+            crate::kprintln!(
+                "per-core-probe: ok via GS (core_id={}, self_ptr={:p})",
+                area.core_id,
+                self_ptr
+            );
+        }
+        Err(msg) => {
+            crate::kprintln!("per-core-probe: {}", msg);
+        }
+    }
 }
 
 #[cfg(target_os = "none")]
