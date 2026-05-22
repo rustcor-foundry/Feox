@@ -137,10 +137,38 @@ fn boot_kernel() -> Result<(), LoadError> {
         loaded_kernel.image_end
     );
 
+    // Locate the ACPI RSDP via the UEFI configuration table while boot
+    // services are still active. ACPI 2.0 is preferred; ACPI 1.0 is a
+    // fallback. Zero means no ACPI table was reported by firmware.
+    let rsdp_phys = find_rsdp_address();
+    loader_logln!("feox-loader: rsdp_phys={:#018x}", rsdp_phys);
+
     let memory_map = unsafe { boot::exit_boot_services(Some(MemoryType::LOADER_DATA)) };
     BOOT_SERVICES_ACTIVE.store(false, Ordering::Relaxed);
-    let boot_info = build_boot_info(&memory_map, loaded_kernel);
+    let boot_info = build_boot_info(&memory_map, loaded_kernel, rsdp_phys);
     jump_to_kernel(loaded_kernel.entry_point, boot_info)
+}
+
+fn find_rsdp_address() -> u64 {
+    use uefi::system::with_config_table;
+    use uefi::table::cfg::ConfigTableEntry;
+
+    with_config_table(|entries| {
+        // Prefer ACPI 2.0 (XSDT-capable); fall back to ACPI 1.0.
+        let mut acpi1_addr: u64 = 0;
+        for entry in entries {
+            match entry.guid {
+                ConfigTableEntry::ACPI2_GUID => return entry.address as u64,
+                ConfigTableEntry::ACPI_GUID => {
+                    if acpi1_addr == 0 {
+                        acpi1_addr = entry.address as u64;
+                    }
+                }
+                _ => {}
+            }
+        }
+        acpi1_addr
+    })
 }
 
 fn load_kernel_image(kernel_bytes: &[u8]) -> Result<LoadedKernel, LoadError> {
@@ -232,7 +260,11 @@ fn copy_load_segment(kernel_bytes: &[u8], segment: ProgramHeader) -> Result<(), 
     Ok(())
 }
 
-fn build_boot_info(memory_map: &MemoryMapOwned, kernel: LoadedKernel) -> *const BootInfo {
+fn build_boot_info(
+    memory_map: &MemoryMapOwned,
+    kernel: LoadedKernel,
+    rsdp_phys: u64,
+) -> *const BootInfo {
     let regions = unsafe { &mut *BOOT_STORAGE.regions.get() };
     let mut count = 0usize;
 
@@ -258,7 +290,7 @@ fn build_boot_info(memory_map: &MemoryMapOwned, kernel: LoadedKernel) -> *const 
     }
 
     let boot_info = unsafe { &mut *BOOT_STORAGE.info.get() };
-    *boot_info = BootInfo::new(&regions[..count]);
+    *boot_info = BootInfo::new(&regions[..count], rsdp_phys);
     boot_info as *const BootInfo
 }
 

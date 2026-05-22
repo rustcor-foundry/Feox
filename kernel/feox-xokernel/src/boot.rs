@@ -3,6 +3,7 @@
 
 #[cfg(target_os = "none")]
 use core::arch::global_asm;
+use core::sync::atomic::AtomicU64;
 
 use crate::arch;
 use crate::bootabi::BootHandoff;
@@ -15,6 +16,11 @@ use crate::runtime_context::{
     RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState, RuntimeSnapshot,
 };
 use crate::{KernelConfig, PROJECT_NAME, PROJECT_STYLE};
+
+/// ACPI RSDP physical address forwarded by the loader, stashed for
+/// post-bootstrap probes that need to walk ACPI tables. Zero means
+/// the loader did not provide one.
+static RSDP_PHYS: AtomicU64 = AtomicU64::new(0);
 
 /// Number of pages in the kernel's bootstrap higher-half stack.
 ///
@@ -355,6 +361,12 @@ fn run_vm_access_probe() {
     // only for now; SMP bring-up of secondary cores is a follow-up.
     run_per_core_probe();
 
+    // Walk the ACPI MADT (if firmware provided an RSDP) and report
+    // the secondary-processor topology. APs aren't started yet — this
+    // discovery pass lays the groundwork for AP bring-up to land in a
+    // follow-up commit.
+    run_acpi_smp_probe();
+
     // Optional: scan for an NVMe controller, map its BAR0 through the
     // MMIO lane, and read the CAP+VS registers through it. Prints
     // "no controller" and continues if PCI has no NVMe device.
@@ -401,6 +413,41 @@ fn run_per_core_probe() {
         Err(msg) => {
             crate::kprintln!("per-core-probe: {}", msg);
         }
+    }
+}
+
+#[cfg(target_os = "none")]
+fn run_acpi_smp_probe() {
+    let rsdp = RSDP_PHYS.load(core::sync::atomic::Ordering::Acquire);
+    if rsdp == 0 {
+        crate::kprintln!("acpi-smp-probe: skipped (no rsdp from loader)");
+        return;
+    }
+    let topology = match unsafe { crate::acpi::parse_topology(rsdp) } {
+        Ok(t) => t,
+        Err(err) => {
+            crate::kprintln!("acpi-smp-probe: parse failed err={:?}", err);
+            return;
+        }
+    };
+    crate::kprintln!(
+        "acpi-smp-probe: lapics={} enabled={} local_apic_addr={:#010x}",
+        topology.lapic_count,
+        topology.enabled_count(),
+        topology.local_apic_address
+    );
+    let mut i = 0usize;
+    while i < topology.lapic_count {
+        let entry = topology.lapics[i];
+        crate::kprintln!(
+            "acpi-smp-probe:   cpu[{}] uid={} apic_id={} enabled={} online_capable={}",
+            i,
+            entry.processor_uid,
+            entry.apic_id,
+            entry.is_enabled() as u8,
+            entry.is_online_capable() as u8
+        );
+        i += 1;
     }
 }
 
@@ -1779,6 +1826,12 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
     );
     match handoff {
         Some(handoff) => {
+            if let Some(rsdp) = handoff.rsdp_phys() {
+                RSDP_PHYS.store(rsdp, core::sync::atomic::Ordering::Release);
+                crate::kprintln!("memory: rsdp_phys={:#018x}", rsdp);
+            } else {
+                crate::kprintln!("memory: rsdp_phys=<not provided>");
+            }
             let registered_resources =
                 capability::seed_bootstrap_resources_from_handoff(handoff.memory_map())
                     .unwrap_or(0);
@@ -2240,24 +2293,35 @@ pub fn bootstrap(config: KernelConfig, handoff: Option<BootHandoff<'_>>) -> ! {
                             {
                                 map_result = Err("transition_mmio_prebuild_failed");
                             }
-                            // Prebuild core 0's per-core slot intermediates
-                            // so per_core::initialize_core0 can install the
-                            // leaf PerCoreData mapping at PER_CORE_BASE
-                            // post-handoff without a frame allocator. Only
-                            // core 0's stride is prebuilt today; secondary
-                            // cores will need their own prebuild when SMP
-                            // bring-up lands.
-                            if map_result.is_ok()
-                                && page_root
-                                    .prepare_4k_pages_with(
-                                        &mut live_page_tables,
-                                        &mut paging_allocator,
-                                        memory::VirtualAddress::new(memory::PER_CORE_BASE),
-                                        memory::PER_CORE_PREBUILT_PER_CORE_SIZE,
-                                    )
-                                    .is_err()
-                            {
-                                map_result = Err("transition_per_core_prebuild_failed");
+                            // Prebuild PML4/PDPT/PD/PT chains for every
+                            // potential core's per-core slot so per_core
+                            // bring-up (whether for core 0 today or a
+                            // secondary AP tomorrow) can install leaf
+                            // entries post-handoff without a frame
+                            // allocator. Each stride only reserves
+                            // PER_CORE_PREBUILT_PER_CORE_SIZE of intermediates,
+                            // so the total is PER_CORE_MAX_CORES * a small
+                            // fixed amount (currently 32 * ~12 KiB).
+                            if map_result.is_ok() {
+                                let mut idx = 0_u64;
+                                while idx < memory::PER_CORE_MAX_CORES {
+                                    let slot_base = memory::PER_CORE_BASE
+                                        .wrapping_add(idx.wrapping_mul(memory::PER_CORE_STRIDE));
+                                    if page_root
+                                        .prepare_4k_pages_with(
+                                            &mut live_page_tables,
+                                            &mut paging_allocator,
+                                            memory::VirtualAddress::new(slot_base),
+                                            memory::PER_CORE_PREBUILT_PER_CORE_SIZE,
+                                        )
+                                        .is_err()
+                                    {
+                                        map_result =
+                                            Err("transition_per_core_prebuild_failed");
+                                        break;
+                                    }
+                                    idx = idx.saturating_add(1);
+                                }
                             }
                             map_result
                         } else {

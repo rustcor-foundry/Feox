@@ -10,6 +10,42 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-22 (SMP discovery: ACPI MADT + per-core infra)
+
+- bumped Boot ABI to v2 (`BOOT_INFO_VERSION = 2`): adds
+  `BootInfo::rsdp_phys: u64` (zero if loader can't provide one) and
+  `BootHandoff::rsdp_phys() -> Option<u64>` accessor
+- UEFI loader walks the configuration table (`uefi::system::
+  with_config_table`) before `exit_boot_services` and forwards the
+  ACPI 2.0 GUID's RSDP (falling back to ACPI 1.0). Stash kept inside
+  `BootInfo::new(memory_map, rsdp_phys)`
+- new `kernel/feox-xokernel/src/acpi.rs` parser: maps ACPI tables
+  through `mmio_map_bootstrap` (ACPI ranges aren't in the direct
+  map), validates RSDP signature + checksum, follows
+  XSDT (revision ≥ 2) or RSDT (legacy), walks SDT entries to find
+  `"APIC"` (MADT). Returns a fixed-capacity `AcpiTopology` with up
+  to 32 `LapicEntry { processor_uid, apic_id, flags }` and the
+  MADT-reported `local_apic_address`. RAII `AcpiMap` cleans up
+  mappings on drop
+- transition root prebuild now covers *all* `PER_CORE_MAX_CORES = 32`
+  strides at `PER_CORE_BASE + core_id * PER_CORE_STRIDE`, not just
+  core 0. Each stride reserves `PER_CORE_PREBUILT_PER_CORE_SIZE =
+  2 MiB` of intermediates so future AP per-core inserts don't need
+  a runtime frame allocator
+- new `run_acpi_smp_probe` boot probe reads RSDP via a private
+  `RSDP_PHYS: AtomicU64`, parses topology, and prints LAPIC count +
+  per-CPU APIC ID / flags. Stashed in `bootstrap()` immediately
+  after handoff
+- bumped the QEMU smoke launch to `-smp 4` so the multi-AP discovery
+  path runs on every boot; bounded smoke now reports:
+  `acpi-smp-probe: lapics=4 enabled=4 local_apic_addr=0xfee00000`
+  followed by per-CPU lines
+- APs are *not* started yet (the locked slot just has PML4
+  intermediates ready). AP boot (INIT/SIPI + 16-bit trampoline +
+  per-AP entry) is the next focus
+- 97 host tests pass (was 93; +1 for feox-boot rsdp accessor, +3 for
+  acpi entry/flag tests); cargo kernel and cargo loader clean
+
 ### 2026-05-22 (per-core slot mapped at PER_CORE_BASE)
 
 - added `memory::PER_CORE_PREBUILT_PER_CORE_SIZE = 2 MiB`. Sized for
