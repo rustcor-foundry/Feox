@@ -6,5 +6,6 @@ pub mod exceptions;
 pub mod gdt;
 pub mod idt;
 pub mod panic;
+pub mod pci;
 pub mod serial;
 pub mod syscall;

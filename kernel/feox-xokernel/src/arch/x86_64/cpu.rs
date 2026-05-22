@@ -245,6 +245,41 @@ pub fn reload_current_page_table_root() {
     }
 }
 
+/// Writes a 32-bit value to an x86 I/O port.
+///
+/// # Safety
+///
+/// Caller must ensure the port is valid and unaffected by concurrent access.
+pub unsafe fn outl(port: u16, value: u32) {
+    unsafe {
+        asm!(
+            "out dx, eax",
+            in("dx") port,
+            in("eax") value,
+            options(nostack, preserves_flags, nomem),
+        );
+    }
+}
+
+/// Reads a 32-bit value from an x86 I/O port.
+///
+/// # Safety
+///
+/// Caller must ensure the port is valid and that the read does not have
+/// side effects the caller is unprepared for.
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    unsafe {
+        asm!(
+            "in eax, dx",
+            in("dx") port,
+            out("eax") value,
+            options(nostack, preserves_flags, nomem),
+        );
+    }
+    value
+}
+
 /// Raises a software breakpoint exception on the current core.
 pub fn trigger_breakpoint() {
     // SAFETY: this intentionally raises vector 3 so the bootstrap exception

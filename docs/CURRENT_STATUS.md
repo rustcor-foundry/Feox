@@ -1,6 +1,6 @@
 # Feox Current Status
 
-Last updated: 2026-04-08
+Last updated: 2026-05-21
 
 ## Posture
 
@@ -37,7 +37,7 @@ Last updated: 2026-04-08
 - **A-02**: `feox-async` now has `RunQueue`, `TaskHeader` with type-erased poll, `TaskCell<F>`, `SingleCoreExecutor`
 - **A-03**: x86_64 ASI transport now installs `SYSCALL` / `SYSRET`, programs `IA32_STAR` / `IA32_LSTAR` / `IA32_FMASK`, carries a dedicated syscall stack, and dispatches typed ASI opcodes through shared `feox-asi` syscall and batch types
 - **A-04**: bootstrap capability layer now has a 256-slot table, a registered physical-memory resource registry, a delegation tree with cascade release, working `cap_request` for physical pages, first capability-backed 4 KiB map helper coverage, and first `cap_list` / `cap_delegate` / `cap_release` syscall handling
-- **A-04b**: bootstrap ASI memory lane now has shared `MemMap` / `MemVtoP` ABI types, a fixed 64 MiB bootstrap VM window, retained bootstrap mapping records, bootstrap-scoped `mem_map` / `mem_unmap` syscall handling, and first `mem_vtop` / `mem_vtop_batch` translation support for active physical-memory mappings
+- **A-04b**: bootstrap ASI memory lane now has shared `MemMap` / `MemVtoP` ABI types, a fixed 64 MiB bootstrap VM window, retained bootstrap mapping records, bootstrap-scoped `mem_map` / `mem_unmap` syscall handling, and first `mem_vtop` / `mem_vtop_batch` translation support for active physical-memory mappings. As of 2026-05-21 the live `mem_map` / `mem_unmap` / `mem_vtop` callers walk the active root through `BootstrapPageTableAccessSource` (a 20 KiB / 4-slot bootstrap page-table access window) instead of `BootstrapIdentityMappedPageTables`, and the bounded smoke now reaches `stage: runtime service idle` after a live `mem_map → mem_vtop → mem_unmap` cycle against a real bootstrap capability
 - **A-05**: `PageTableEdges` frame-tree sidecar records every intermediate allocation for future reclaim
 
 ### Deferred (next sessions)
@@ -57,11 +57,11 @@ Last updated: 2026-04-08
 ## Current Risks
 
 - the retained runtime still idles after the command queue drains — broader subsystem bring-up not yet started
-- permanent virtual address layout decisions are not yet locked (direct-map base, per-core zones, MMIO windows), though the bootstrap layout now reserves and prebuilds a dedicated page-table access window for the next live paging pass
-- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population beyond physical memory, and the memory lane is still bootstrap-window-only rather than a real per-process VM subsystem
-- the new bootstrap VM lane is proven in host tests and syscall/unit coverage, but live post-handoff use still depends on page-table-access assumptions that are not yet hardened for the higher-half runtime path
-- the transition root now prebuilds both the bootstrap VM window and the reserved page-table access window, and `paging.rs` now has a retained-slot-backed accessor helper for that window, but the live bootstrap VM callers still have not been switched off `BootstrapIdentityMappedPageTables`
-- the latest live self-test narrowed the remaining blocker further: the access-window control self-map and dynamic slot PTE installs now succeed, but the first live write through the aliased active root frame still page-faults, so the new source prototype remains out of the live `mem_map` path for now
+- the permanent virtual address layout is locked in `docs/VIRTUAL_ADDRESS_LAYOUT.md` and `memory.rs`; the direct map at `0xFFFF_C000_0000_0000` is live and covers every Usable RAM region (2 MiB bulk + 4 KiB head/tail) — per-core, MMIO, and kernel vmalloc remain policy markers awaiting implementation
+- the capability system is still bootstrap-scoped — there is no multi-process table set, no device-resource population beyond physical memory, and the memory lane is still bootstrap-window-only rather than a real per-process VM subsystem; the NVMe BAR is currently mapped without going through the capability layer (kernel-internal API only)
+- the access window dynamic slot capacity is 4, sized for a single 4-level walk; any future caller that needs simultaneous aliases for more than four distinct frames must expand the window first
+- `mem_vtop_batch` is now exercised by the bootstrap self-test on every boot (4-page contiguous capability, batch translation with contiguity check)
+- per-core layout reserves 32 cores × 1 TiB each (`PER_CORE_MAX_CORES = 32`); SMP work beyond that ceiling must revisit the layout before scaling further
 
 ## Recommended Entry Points
 
@@ -76,7 +76,27 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Bootstrap VM hardening** — validate one safe dereference strategy for access-window aliases after their PTEs are installed, then retry the live caller cutover from `BootstrapIdentityMappedPageTables` in `mem_map` / `mem_unmap` / `mem_vtop`
-2. **Virtual address layout** — lock the permanent direct-map base and per-core/MMIO zones in `docs/VIRTUAL_ADDRESS_LAYOUT.md`
+1. **Per-core data bring-up** — when SMP work begins, the locked per-core
+   slot at `0xFFFF_E000_0000_0000` (1 TiB stride × 32 cores) becomes the
+   home for per-core stacks, IDT/GDT/TSS, IST stacks, and retained context.
+2. **Storage ABI surface** — decide whether ASI exposes the NVMe driver
+   through a generic block/file syscall layer or as a dedicated NVMe ABI.
+3. **Multi-device / multi-namespace block layer** — the current
+   `crate::block` module is hardcoded to one NVMe device with one I/O
+   queue pair. A real block layer needs device enumeration, namespace
+   handling, and per-queue scheduling.
 
-The next concrete design document for item 1 is `docs/PAGE_TABLE_ACCESS_PLAN.md`.
+The executor "enqueue gap" is closed, the kernel block surface
+(`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the
+NVMe submit/drain primitives behind free functions, and a long-lived
+`crate::block::drainer_task` now pumps completions on every executor
+pass — so other kernel subsystems can do `block::read(nsid, lba,
+buf).await` without managing a drive loop or touching queue plumbing.
+
+Bootstrap VM hardening, the permanent virtual address layout, the direct
+map, the access-window retirement, broadened live self-test coverage,
+MMIO bring-up, PCI enumeration, first-device BAR mapping (NVMe), the
+NVMe admin queue handshake, and the full NVMe I/O queue + LBA read
+lifecycle are all resolved — see `docs/PAGE_TABLE_ACCESS_PLAN.md`
+Retirement section and the live status table in
+`docs/VIRTUAL_ADDRESS_LAYOUT.md`.

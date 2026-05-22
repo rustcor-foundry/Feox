@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-default = []
+default = ["runtime", "storage"]
 runtime = ["dep:feox-async"]
 storage = ["runtime", "dep:feox-nvme"]
 

@@ -358,9 +358,348 @@ impl<const N: usize> Default for NvmeQueuePair<N> {
     }
 }
 
+/// Decoded view of the NVMe `CAP` (Controller Capabilities) register.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cap(pub u64);
+
+impl Cap {
+    /// Maximum Queue Entries Supported (zero-based, +1 to get the real
+    /// queue depth limit).
+    #[must_use]
+    pub const fn mqes(self) -> u16 {
+        (self.0 & 0xFFFF) as u16
+    }
+    /// Doorbell stride: bytes between adjacent doorbells = `4 << dstrd()`.
+    #[must_use]
+    pub const fn dstrd(self) -> u8 {
+        ((self.0 >> 32) & 0xF) as u8
+    }
+    /// Minimum host memory page size: `2 ^ (12 + mpsmin())` bytes.
+    #[must_use]
+    pub const fn mpsmin(self) -> u8 {
+        ((self.0 >> 48) & 0xF) as u8
+    }
+    /// Maximum host memory page size: `2 ^ (12 + mpsmax())` bytes.
+    #[must_use]
+    pub const fn mpsmax(self) -> u8 {
+        ((self.0 >> 52) & 0xF) as u8
+    }
+}
+
+/// Decoded view of the NVMe `VS` (Version) register.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Vs(pub u32);
+
+impl Vs {
+    /// Major version number (MJR).
+    #[must_use]
+    pub const fn major(self) -> u16 {
+        ((self.0 >> 16) & 0xFFFF) as u16
+    }
+    /// Minor version number (MNR).
+    #[must_use]
+    pub const fn minor(self) -> u8 {
+        ((self.0 >> 8) & 0xFF) as u8
+    }
+    /// Tertiary version number (TER).
+    #[must_use]
+    pub const fn tertiary(self) -> u8 {
+        (self.0 & 0xFF) as u8
+    }
+}
+
+/// Decoded view of the NVMe `CSTS` (Controller Status) register.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Csts(pub u32);
+
+impl Csts {
+    /// Controller Ready bit (CSTS.RDY, bit 0).
+    #[must_use]
+    pub const fn ready(self) -> bool {
+        (self.0 & 0x1) != 0
+    }
+    /// Controller Fatal Status bit (CSTS.CFS, bit 1).
+    #[must_use]
+    pub const fn fatal(self) -> bool {
+        (self.0 & 0x2) != 0
+    }
+}
+
+/// NVMe admin / I/O submission queue entry (64 bytes, little-endian on
+/// the wire matching x86_64 native order).
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubmissionQueueEntry {
+    /// Command Dword 0: opcode (low byte), fused (bits 9..8), reserved
+    /// (bits 13..10), PSDT (bits 15..14), command identifier (bits 31..16).
+    pub cdw0: u32,
+    /// Namespace identifier (0 for admin commands that do not target
+    /// a namespace).
+    pub nsid: u32,
+    /// Reserved bytes 8..16.
+    pub reserved: u64,
+    /// Metadata pointer.
+    pub mptr: u64,
+    /// PRP entry 1 — physical address of the data buffer.
+    pub prp1: u64,
+    /// PRP entry 2 — second PRP for buffers spanning more than one page.
+    pub prp2: u64,
+    /// Command Dword 10.
+    pub cdw10: u32,
+    /// Command Dword 11.
+    pub cdw11: u32,
+    /// Command Dword 12.
+    pub cdw12: u32,
+    /// Command Dword 13.
+    pub cdw13: u32,
+    /// Command Dword 14.
+    pub cdw14: u32,
+    /// Command Dword 15.
+    pub cdw15: u32,
+}
+
+impl SubmissionQueueEntry {
+    /// Builds an `Identify Controller` admin command (opcode 0x06,
+    /// CNS = 0x01) targeting the supplied PRP1 buffer with the given
+    /// command identifier.
+    #[must_use]
+    pub fn identify_controller(prp1: u64, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x06 | (u32::from(cid) << 16);
+        entry.prp1 = prp1;
+        // CNS = 0x01 in CDW10[7:0] selects the Identify Controller data
+        // structure.
+        entry.cdw10 = 0x0000_0001;
+        entry
+    }
+
+    /// Builds a `Create I/O Completion Queue` admin command
+    /// (opcode 0x05). `entries` is the desired queue size in entries
+    /// (encoded zero-based on the wire). PC=1, IEN=0 (polled), IV=0.
+    #[must_use]
+    pub fn create_io_completion_queue(qid: u16, entries: u16, prp1: u64, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x05 | (u32::from(cid) << 16);
+        entry.prp1 = prp1;
+        entry.cdw10 = u32::from(qid) | (u32::from(entries - 1) << 16);
+        entry.cdw11 = 0x0000_0001; // PC=1, IEN=0
+        entry
+    }
+
+    /// Builds a `Create I/O Submission Queue` admin command
+    /// (opcode 0x01). `cqid` is the paired I/O CQ. PC=1, priority=0.
+    #[must_use]
+    pub fn create_io_submission_queue(
+        qid: u16,
+        entries: u16,
+        cqid: u16,
+        prp1: u64,
+        cid: u16,
+    ) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x01 | (u32::from(cid) << 16);
+        entry.prp1 = prp1;
+        entry.cdw10 = u32::from(qid) | (u32::from(entries - 1) << 16);
+        entry.cdw11 = 0x0000_0001 | (u32::from(cqid) << 16); // PC=1, CQID
+        entry
+    }
+
+    /// Builds a `Delete I/O Completion Queue` admin command (opcode 0x04).
+    #[must_use]
+    pub fn delete_io_completion_queue(qid: u16, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x04 | (u32::from(cid) << 16);
+        entry.cdw10 = u32::from(qid);
+        entry
+    }
+
+    /// Builds a `Delete I/O Submission Queue` admin command (opcode 0x00).
+    #[must_use]
+    pub fn delete_io_submission_queue(qid: u16, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x00 | (u32::from(cid) << 16);
+        entry.cdw10 = u32::from(qid);
+        entry
+    }
+
+    /// Builds an `NVM Read` I/O command (opcode 0x02). `nlb` is the
+    /// number of logical blocks **encoded as zero-based**: pass `0` to
+    /// read one block, `1` for two, etc. `prp1` is the data buffer
+    /// physical base.
+    #[must_use]
+    pub fn nvm_read(nsid: u32, slba: u64, nlb_zero_based: u16, prp1: u64, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x02 | (u32::from(cid) << 16);
+        entry.nsid = nsid;
+        entry.prp1 = prp1;
+        entry.cdw10 = slba as u32;
+        entry.cdw11 = (slba >> 32) as u32;
+        entry.cdw12 = u32::from(nlb_zero_based);
+        entry
+    }
+}
+
+/// NVMe admin / I/O completion queue entry (16 bytes).
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompletionQueueEntry {
+    /// Dword 0 — command-specific.
+    pub dw0: u32,
+    /// Dword 1 — command-specific.
+    pub dw1: u32,
+    /// Dword 2 — submission queue head pointer (low 16), submission
+    /// queue identifier (high 16).
+    pub dw2: u32,
+    /// Dword 3 — command identifier (low 16), phase bit (bit 16),
+    /// status field (bits 31..17).
+    pub dw3: u32,
+}
+
+impl CompletionQueueEntry {
+    /// Returns the command identifier the queue completion corresponds to.
+    #[must_use]
+    pub const fn command_id(self) -> u16 {
+        (self.dw3 & 0xFFFF) as u16
+    }
+    /// Returns the phase bit observed in this completion (bit 16).
+    #[must_use]
+    pub const fn phase(self) -> u8 {
+        ((self.dw3 >> 16) & 1) as u8
+    }
+    /// Returns the 15-bit status field (status code + status code type +
+    /// "do not retry"). Zero means success.
+    #[must_use]
+    pub const fn status_field(self) -> u16 {
+        ((self.dw3 >> 17) & 0x7FFF) as u16
+    }
+    /// Returns the submission queue head pointer reported by the controller.
+    #[must_use]
+    pub const fn sq_head(self) -> u16 {
+        (self.dw2 & 0xFFFF) as u16
+    }
+}
+
+/// Thin reader over an NVMe controller's MMIO register bank.
+///
+/// The caller supplies a raw pointer to the start of the controller's
+/// `BAR0` (already mapped into the kernel address space with UC caching).
+/// Methods read registers via volatile accesses; no decode of submission
+/// queue / completion queue state is performed here.
+#[derive(Clone, Copy, Debug)]
+pub struct ControllerRegisters {
+    base: *mut u8,
+}
+
+// SAFETY: `ControllerRegisters` is a raw pointer to MMIO; the caller
+// guarantees the pointer is valid kernel virtual memory for the lifetime
+// of the controller. The pointer itself does not have `Send`/`Sync`
+// hazards beyond what the device exposes.
+unsafe impl Send for ControllerRegisters {}
+unsafe impl Sync for ControllerRegisters {}
+
+impl ControllerRegisters {
+    /// Wraps a pointer to the NVMe controller's mapped MMIO base.
+    ///
+    /// # Safety
+    ///
+    /// `base` must point at the first byte of a kernel virtual range that
+    /// covers at least the first 0x1008 bytes of the NVMe BAR0 mapping
+    /// (controller registers + admin doorbells) and that mapping must
+    /// remain installed for the lifetime of this value.
+    #[must_use]
+    pub const unsafe fn new(base: *mut u8) -> Self {
+        Self { base }
+    }
+
+    fn read_u32(self, offset: usize) -> u32 {
+        unsafe {
+            // SAFETY: caller guarantees `base` covers the register bank.
+            core::ptr::read_volatile(self.base.add(offset).cast::<u32>())
+        }
+    }
+
+    fn write_u32(self, offset: usize, value: u32) {
+        unsafe {
+            // SAFETY: same.
+            core::ptr::write_volatile(self.base.add(offset).cast::<u32>(), value);
+        }
+    }
+
+    /// Reads the controller's `CAP` register (offset 0x00).
+    #[must_use]
+    pub fn cap(self) -> Cap {
+        let low = self.read_u32(0x00);
+        let high = self.read_u32(0x04);
+        Cap((u64::from(high) << 32) | u64::from(low))
+    }
+
+    /// Reads the controller's `VS` register (offset 0x08).
+    #[must_use]
+    pub fn vs(self) -> Vs {
+        Vs(self.read_u32(0x08))
+    }
+
+    /// Reads the controller's `CC` register (offset 0x14).
+    #[must_use]
+    pub fn cc(self) -> u32 {
+        self.read_u32(0x14)
+    }
+
+    /// Writes the controller's `CC` register (offset 0x14).
+    pub fn set_cc(self, value: u32) {
+        self.write_u32(0x14, value);
+    }
+
+    /// Reads the controller's `CSTS` register (offset 0x1C).
+    #[must_use]
+    pub fn csts(self) -> Csts {
+        Csts(self.read_u32(0x1C))
+    }
+
+    /// Writes the admin queue attributes register (offset 0x24).
+    ///
+    /// `sq_entries` and `cq_entries` are the true entry counts. Each
+    /// must be in the range 2..=4096; this method encodes them as the
+    /// zero-based field values the controller expects.
+    pub fn set_aqa(self, sq_entries: u16, cq_entries: u16) {
+        let aqa = (u32::from(cq_entries - 1) << 16) | u32::from(sq_entries - 1);
+        self.write_u32(0x24, aqa);
+    }
+
+    /// Writes the admin submission queue base address register
+    /// (offsets 0x28 low / 0x2C high). `phys` must be 4 KiB aligned.
+    pub fn set_asq(self, phys: u64) {
+        self.write_u32(0x28, phys as u32);
+        self.write_u32(0x2C, (phys >> 32) as u32);
+    }
+
+    /// Writes the admin completion queue base address register
+    /// (offsets 0x30 low / 0x34 high). `phys` must be 4 KiB aligned.
+    pub fn set_acq(self, phys: u64) {
+        self.write_u32(0x30, phys as u32);
+        self.write_u32(0x34, (phys >> 32) as u32);
+    }
+
+    /// Rings the submission queue tail doorbell for `qid` (admin = 0).
+    ///
+    /// Assumes the controller advertises `CAP.DSTRD = 0` (4-byte stride).
+    /// Callers using a controller with a wider stride must compute the
+    /// doorbell offset themselves.
+    pub fn ring_sq_tail_doorbell(self, qid: u16, tail: u16) {
+        let offset = 0x1000 + (usize::from(qid) * 8);
+        self.write_u32(offset, u32::from(tail));
+    }
+
+    /// Rings the completion queue head doorbell for `qid` (admin = 0).
+    pub fn ring_cq_head_doorbell(self, qid: u16, head: u16) {
+        let offset = 0x1000 + (usize::from(qid) * 8) + 4;
+        self.write_u32(offset, u32::from(head));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{InflightMap, NvmeCompletion, NvmeError, NvmeIoFuture, NvmeQueuePair};
+    use super::{Cap, InflightMap, NvmeCompletion, NvmeError, NvmeIoFuture, NvmeQueuePair, Vs};
     use core::future::Future;
     use core::pin::pin;
     use core::task::{Context, Poll, Waker};
@@ -440,5 +779,34 @@ mod tests {
             Future::poll(pin!(&mut future).as_mut(), &mut cx),
             Poll::Ready(Err(NvmeError::CapabilityRevoked))
         );
+    }
+
+    #[test]
+    fn cap_decodes_known_fields() {
+        // MQES = 0x00FF (0-based; queue depth = 256)
+        // DSTRD = 0 (4-byte doorbells)
+        // MPSMIN = 0 (4 KiB), MPSMAX = 0 (4 KiB)
+        let cap = Cap(0x0000_0000_0000_00FF);
+        assert_eq!(cap.mqes(), 0x00FF);
+        assert_eq!(cap.dstrd(), 0);
+        assert_eq!(cap.mpsmin(), 0);
+        assert_eq!(cap.mpsmax(), 0);
+
+        // DSTRD nibble at bits 35..32: 0x3 → byte 4 high nibble.
+        let cap = Cap(0x0003_0003_0000_03FF);
+        assert_eq!(cap.dstrd(), 3);
+    }
+
+    #[test]
+    fn vs_decodes_major_minor_tertiary() {
+        // NVMe 1.4.0 reports VS = 0x0001_0400.
+        let vs = Vs(0x0001_0400);
+        assert_eq!(vs.major(), 1);
+        assert_eq!(vs.minor(), 4);
+        assert_eq!(vs.tertiary(), 0);
+        // NVMe 2.0.0 reports VS = 0x0002_0000.
+        let vs = Vs(0x0002_0000);
+        assert_eq!(vs.major(), 2);
+        assert_eq!(vs.minor(), 0);
     }
 }

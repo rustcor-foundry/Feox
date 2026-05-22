@@ -3,12 +3,15 @@
 
 //! Executor primitives for the Feox async runtime.
 
+#[cfg(test)]
+extern crate std;
+
 use core::cell::UnsafeCell;
 use core::future::Future;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU8, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use feox_asi::CoreId;
 
@@ -70,6 +73,12 @@ pub enum PendingDisposition {
     Requeue(CoreId),
 }
 
+/// Type-erased function pointer that knows how to push a task into a
+/// specific run queue. Bound to a [`TaskHeader`] via
+/// [`TaskHeader::bind_wake_target`]; invoked by the waker vtable when a
+/// `wake()` call transitions a parked task back to `Ready`.
+pub type WakeDispatcher = unsafe fn(target: *mut u8, header: NonNull<TaskHeader>);
+
 /// Minimal task header used by the executor and waker paths.
 ///
 /// Always the first field of [`TaskCell`] (enforced by `#[repr(C)]`), so a
@@ -81,12 +90,23 @@ pub struct TaskHeader {
     core_affinity: CoreId,
     /// Type-erased poll function. `None` until [`TaskCell::spawn`] installs it.
     poll_fn: UnsafeCell<Option<PollFn>>,
+    /// Opaque pointer passed to [`Self::wake_dispatcher`] when an external
+    /// wake transitions the task from `Parked` back to `Ready`. Typically
+    /// points at the owning run queue. `null` means no external dispatcher
+    /// is bound.
+    wake_target: AtomicPtr<u8>,
+    /// Function pointer (typed as [`WakeDispatcher`]) stored as an opaque
+    /// data pointer because stable Rust has no `AtomicFnPtr`. Read with
+    /// [`Self::take_wake_dispatcher`].
+    wake_dispatcher: AtomicPtr<core::ffi::c_void>,
 }
 
 // Safety: `TaskHeader` uses `AtomicU8` for state transitions and a
 // `UnsafeCell<Option<PollFn>>` for the poll function. The poll function is
 // written exactly once (before any polling begins) and then only read. All
-// concurrent state access goes through the atomic state machine.
+// concurrent state access goes through the atomic state machine. The wake
+// target/dispatcher pair is set via atomics and is single-writer (the
+// executor that owns the task) during the task's lifetime.
 unsafe impl Sync for TaskHeader {}
 
 impl TaskHeader {
@@ -97,6 +117,59 @@ impl TaskHeader {
             state: AtomicU8::new(TaskState::Ready as u8),
             core_affinity,
             poll_fn: UnsafeCell::new(None),
+            wake_target: AtomicPtr::new(core::ptr::null_mut()),
+            wake_dispatcher: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+
+    /// Binds an external wake hook. When the waker vtable observes a wake
+    /// that transitions the task from `Parked` back to `Ready`, it calls
+    /// `dispatcher(target, header)` to push the task back into its owning
+    /// run queue.
+    ///
+    /// Closing the "enqueue gap" from [`TASK_HEADER_WAKER_VTABLE`]: until
+    /// a target is bound the vtable's `wake` is a no-op past the atomic
+    /// state transition, so wakes that arrive between polls are lost.
+    ///
+    /// # Safety
+    ///
+    /// - `target` must remain valid for as long as any clone of the
+    ///   task's waker can still fire (typically the lifetime of the
+    ///   owning executor).
+    /// - `dispatcher` must be safe to call from any wake context (e.g.
+    ///   from an external drainer between executor polls). On a
+    ///   single-core polled runtime that means no concurrent access to
+    ///   the run queue elsewhere.
+    pub unsafe fn bind_wake_target(&self, target: *mut u8, dispatcher: WakeDispatcher) {
+        let fn_ptr = dispatcher as *mut core::ffi::c_void;
+        self.wake_target.store(target, Ordering::Release);
+        self.wake_dispatcher.store(fn_ptr, Ordering::Release);
+    }
+
+    /// Removes any bound wake hook. After this call, the waker reverts to
+    /// the no-op behavior of the prototype vtable.
+    pub fn clear_wake_target(&self) {
+        self.wake_target.store(core::ptr::null_mut(), Ordering::Release);
+        self.wake_dispatcher
+            .store(core::ptr::null_mut(), Ordering::Release);
+    }
+
+    /// Invokes the bound wake dispatcher, if any. Called by the vtable
+    /// after `wake()` returns [`WakeDisposition::Enqueue`].
+    fn invoke_wake_dispatcher(&self) {
+        let dispatcher_ptr = self.wake_dispatcher.load(Ordering::Acquire);
+        if dispatcher_ptr.is_null() {
+            return;
+        }
+        let target = self.wake_target.load(Ordering::Acquire);
+        // SAFETY: the dispatcher pointer was installed via
+        // `bind_wake_target` whose unsafe contract requires it to be a
+        // valid `WakeDispatcher` callable with `target`.
+        let dispatcher: WakeDispatcher = unsafe {
+            core::mem::transmute::<*mut core::ffi::c_void, WakeDispatcher>(dispatcher_ptr)
+        };
+        unsafe {
+            dispatcher(target, NonNull::from(self));
         }
     }
 
@@ -408,6 +481,24 @@ impl<F: Future<Output = ()>> TaskCell<F> {
 // SingleCoreExecutor — drives a run queue to completion
 // ---------------------------------------------------------------------------
 
+/// Monomorphized [`WakeDispatcher`] used by [`SingleCoreExecutor::enqueue`]
+/// to push a woken task back into a `RunQueue<CAP>`.
+///
+/// # Safety
+///
+/// `target` must point at a live `RunQueue<CAP>` owned by the executor
+/// that originally bound this dispatcher into the task's header. The
+/// caller (the waker vtable) only invokes this when the task is in
+/// `Ready` state, which on a single-core polled runtime means the
+/// owning executor is not currently inside `poll_one`/`run_until_idle`.
+unsafe fn run_queue_push_dispatcher<const CAP: usize>(
+    target: *mut u8,
+    header: NonNull<TaskHeader>,
+) {
+    let queue = unsafe { &mut *target.cast::<RunQueue<CAP>>() };
+    let _ = queue.push(header);
+}
+
 /// Minimal single-core async executor.
 ///
 /// Drives a fixed-capacity [`RunQueue`] of type-erased tasks. Each call to
@@ -441,8 +532,21 @@ impl<const CAP: usize> SingleCoreExecutor<CAP> {
 
     /// Enqueues a task header returned by [`TaskCell::spawn`].
     ///
-    /// Returns `false` if the run queue is full.
+    /// Binds the task's waker to this executor's run queue so that
+    /// external wakes (delivered from outside a poll) re-enqueue the
+    /// task automatically. Returns `false` if the run queue is full.
     pub fn enqueue(&mut self, task: NonNull<TaskHeader>) -> bool {
+        unsafe {
+            // SAFETY: this executor owns its run queue for as long as it
+            // exists; the dispatcher we register is the monomorphized
+            // pusher for `RunQueue<CAP>`. The caller is responsible for
+            // keeping the executor alive at least as long as any waker
+            // clone of `task`.
+            task.as_ref().bind_wake_target(
+                core::ptr::addr_of_mut!(self.run_queue).cast::<u8>(),
+                run_queue_push_dispatcher::<CAP>,
+            );
+        }
         self.run_queue.push(task)
     }
 
@@ -515,16 +619,16 @@ impl<const CAP: usize> Default for SingleCoreExecutor<CAP> {
 /// it is alive.
 ///
 /// Clone is a copy of the raw pointer (no reference counting). Drop is a
-/// no-op. `wake` and `wake_by_ref` call `TaskHeader::wake()`.
+/// no-op. `wake` and `wake_by_ref` call `TaskHeader::wake()` and, when
+/// that returns [`WakeDisposition::Enqueue`], invoke the task's bound
+/// wake dispatcher (see [`TaskHeader::bind_wake_target`]) so an
+/// external wake (e.g. an I/O drainer between executor polls) lands
+/// the task back in the owning [`RunQueue`].
 ///
-/// **Enqueue gap.** This vtable calls `TaskHeader::wake()` to record the
-/// wakeup in the state machine but does not push the task onto a run queue.
-/// When a task is woken from `Parked` → `Ready`, the caller that holds the
-/// `WakeDisposition::Enqueue` result is responsible for pushing the task
-/// pointer onto the owning core's `RunQueue`. For the single-core bootstrap
-/// runtime this is fine because all wakes arrive synchronously. A full
-/// reactor will extend this by carrying a `RunQueue` pointer in the waker
-/// data once the queue layout is stable.
+/// Tasks that have not been bound to an executor fall through to a
+/// no-op past the atomic state transition; that mirrors the original
+/// prototype behavior and is appropriate for wakes that arrive during
+/// a poll (the executor handles those via `finish_pending_poll`).
 static TASK_HEADER_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     // clone
     |ptr| RawWaker::new(ptr, &TASK_HEADER_WAKER_VTABLE),
@@ -532,12 +636,16 @@ static TASK_HEADER_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     |ptr| {
         // Safety: ptr is a valid *const TaskHeader for the life of the waker.
         let header = unsafe { &*(ptr as *const TaskHeader) };
-        let _ = header.wake();
+        if let WakeDisposition::Enqueue(_) = header.wake() {
+            header.invoke_wake_dispatcher();
+        }
     },
     // wake_by_ref
     |ptr| {
         let header = unsafe { &*(ptr as *const TaskHeader) };
-        let _ = header.wake();
+        if let WakeDisposition::Enqueue(_) = header.wake() {
+            header.invoke_wake_dispatcher();
+        }
     },
     // drop: no-op (no allocation to free)
     |_ptr| {},
@@ -725,6 +833,71 @@ mod tests {
         // SAFETY: cell is live for the duration of this test.
         unsafe { executor.run_until_idle() };
 
+        assert_eq!(unsafe { header.as_ref() }.state(), TaskState::Complete);
+    }
+
+    /// A future that captures its waker on the first poll and parks
+    /// (without self-waking). The test code fires the stashed waker
+    /// from outside any poll to simulate an external drainer.
+    #[derive(Default)]
+    struct WakerHolder {
+        waker: std::sync::Mutex<Option<core::task::Waker>>,
+    }
+
+    struct ExternalWakeFuture {
+        holder: std::sync::Arc<WakerHolder>,
+        polled: bool,
+    }
+
+    impl Future for ExternalWakeFuture {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            if !self.polled {
+                *self.holder.waker.lock().unwrap() = Some(cx.waker().clone());
+                self.polled = true;
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        }
+    }
+
+    #[test]
+    fn waker_re_enqueues_parked_task_after_external_wake() {
+        let holder = std::sync::Arc::new(WakerHolder::default());
+        let cell = TaskCell::<ExternalWakeFuture>::new(CoreId(0));
+        let header = cell
+            .spawn(ExternalWakeFuture {
+                holder: holder.clone(),
+                polled: false,
+            })
+            .expect("spawn succeeds");
+
+        let mut executor = SingleCoreExecutor::<4>::new();
+        assert!(executor.enqueue(header));
+
+        // First pass: the task polls once, stashes its waker, and parks.
+        // SAFETY: `cell` outlives the executor.
+        unsafe { executor.run_until_idle() };
+        assert_eq!(unsafe { header.as_ref() }.state(), TaskState::Parked);
+        assert!(executor.is_idle());
+
+        // Fire the stashed waker from outside any poll. This is the
+        // path that used to silently lose the wake in the prototype
+        // vtable.
+        let waker = holder
+            .waker
+            .lock()
+            .unwrap()
+            .take()
+            .expect("waker was stashed");
+        waker.wake();
+
+        // The bound dispatcher should have re-enqueued the task.
+        assert!(!executor.is_idle());
+
+        // SAFETY: same as above.
+        unsafe { executor.run_until_idle() };
         assert_eq!(unsafe { header.as_ref() }.state(), TaskState::Complete);
     }
 }

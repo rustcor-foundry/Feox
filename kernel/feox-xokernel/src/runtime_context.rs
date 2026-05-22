@@ -1,7 +1,6 @@
 //! Retained bootstrap runtime context shared across early kernel paths.
 #![allow(clippy::undocumented_unsafe_blocks)]
 
-use crate::memory::PAGE_SIZE;
 use core::sync::atomic::{AtomicU32, Ordering};
 use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
@@ -116,11 +115,11 @@ static mut BOOTSTRAP_EVENT_COUNT: usize = 0;
 const BOOTSTRAP_VM_MAPPING_CAPACITY: usize = 64;
 static mut BOOTSTRAP_VM_MAPPINGS: [Option<BootstrapVmMapping>; BOOTSTRAP_VM_MAPPING_CAPACITY] =
     [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
-const BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY: usize = 3;
-static mut BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS:
-    [Option<BootstrapPageTableAccessSlot>; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY] =
-    [None; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY];
-
+const BOOTSTRAP_MMIO_MAPPING_CAPACITY: usize = 16;
+static mut BOOTSTRAP_MMIO_MAPPINGS:
+    [Option<BootstrapMmioMapping>; BOOTSTRAP_MMIO_MAPPING_CAPACITY] =
+    [None; BOOTSTRAP_MMIO_MAPPING_CAPACITY];
+static mut BOOTSTRAP_MMIO_BUMP_OFFSET: u64 = 0;
 /// Retained bootstrap record for the core that owns the current runtime slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootstrapCoreContext {
@@ -204,15 +203,19 @@ pub struct BootstrapVmMapping {
     pub offset_bytes: u64,
 }
 
-/// One retained bootstrap page-table access slot reservation.
+/// One retained bootstrap MMIO mapping owned by the bootstrap runtime.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct BootstrapPageTableAccessSlot {
-    /// Slot number inside the dedicated page-table access window.
-    pub slot_index: usize,
-    /// Physical base address of the reserved page-table frame.
-    pub frame_base: u64,
-    /// Virtual base address of the slot inside the access window.
+pub struct BootstrapMmioMapping {
+    /// Virtual base inside the MMIO zone.
     pub virtual_base: u64,
+    /// Physical base of the mapped device region.
+    pub physical_base: u64,
+    /// Mapping length in bytes (page-aligned).
+    pub length_bytes: u64,
+    /// True if the mapping was installed with PCD (cache-disable).
+    pub uncached: bool,
+    /// True if the mapping was installed writable.
+    pub writable: bool,
 }
 
 /// Minimal retained command set for the first runtime service loop.
@@ -477,70 +480,6 @@ pub fn find_vm_mapping_for_address(
     }
 }
 
-/// Returns the retained page-table access slots in slot order.
-#[must_use]
-pub fn page_table_access_slots(
-) -> [Option<BootstrapPageTableAccessSlot>; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY] {
-    unsafe { BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS }
-}
-
-/// Acquires one retained page-table access slot for `frame_base`.
-///
-/// Reuses an existing slot if the same frame is already reserved.
-#[must_use]
-pub fn acquire_page_table_access_slot(
-    window_base: u64,
-    frame_base: u64,
-) -> Option<BootstrapPageTableAccessSlot> {
-    assert_context_claimed();
-    unsafe {
-        let mut index = 0usize;
-        while index < BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY {
-            if let Some(slot) = BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index]
-                && slot.frame_base == frame_base
-            {
-                return Some(slot);
-            }
-            index += 1;
-        }
-
-        index = 0;
-        while index < BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY {
-            if BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index].is_none() {
-                let slot = BootstrapPageTableAccessSlot {
-                    slot_index: index,
-                    frame_base,
-                    // Slot 0 in the access window is reserved as the permanent
-                    // self-map of the control PT page. Dynamic aliases start
-                    // at the second 4 KiB slot.
-                    virtual_base: window_base + ((index as u64 + 1) * PAGE_SIZE),
-                };
-                BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[index] = Some(slot);
-                return Some(slot);
-            }
-            index += 1;
-        }
-        None
-    }
-}
-
-/// Releases the retained page-table access slot matching `slot`.
-#[must_use]
-pub fn release_page_table_access_slot(slot: BootstrapPageTableAccessSlot) -> bool {
-    assert_context_claimed();
-    unsafe {
-        if slot.slot_index >= BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY {
-            return false;
-        }
-        let active = BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[slot.slot_index];
-        if active == Some(slot) {
-            BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS[slot.slot_index] = None;
-            return true;
-        }
-        false
-    }
-}
-
 /// Finds the first non-overlapping page-aligned region inside the bootstrap VM
 /// window that can satisfy `length_bytes`.
 #[must_use]
@@ -590,6 +529,80 @@ pub fn allocate_vm_region(
     None
 }
 
+/// Bump-allocates a page-aligned virtual range inside the MMIO zone for a
+/// new mapping of `length_bytes`. The cursor advances on success; failure
+/// leaves it untouched.
+#[must_use]
+pub fn allocate_mmio_range(
+    zone_base: u64,
+    prebuilt_size: u64,
+    length_bytes: u64,
+) -> Option<u64> {
+    assert_context_claimed();
+    if length_bytes == 0 || length_bytes % crate::memory::PAGE_SIZE != 0 {
+        return None;
+    }
+    unsafe {
+        let next = BOOTSTRAP_MMIO_BUMP_OFFSET.checked_add(length_bytes)?;
+        if next > prebuilt_size {
+            return None;
+        }
+        let virt = zone_base.checked_add(BOOTSTRAP_MMIO_BUMP_OFFSET)?;
+        BOOTSTRAP_MMIO_BUMP_OFFSET = next;
+        Some(virt)
+    }
+}
+
+/// Records an active MMIO mapping in the retained table. Returns `Err(())`
+/// if the table is full.
+pub fn record_mmio_mapping(mapping: BootstrapMmioMapping) -> Result<(), ()> {
+    assert_context_claimed();
+    unsafe {
+        let mut index = 0usize;
+        while index < BOOTSTRAP_MMIO_MAPPING_CAPACITY {
+            if BOOTSTRAP_MMIO_MAPPINGS[index].is_none() {
+                BOOTSTRAP_MMIO_MAPPINGS[index] = Some(mapping);
+                return Ok(());
+            }
+            index += 1;
+        }
+    }
+    Err(())
+}
+
+/// Removes the MMIO mapping whose virtual base matches `virtual_base` and
+/// returns the previous record. Returns `None` if no mapping was found.
+#[must_use]
+pub fn remove_mmio_mapping(virtual_base: u64) -> Option<BootstrapMmioMapping> {
+    assert_context_claimed();
+    unsafe {
+        let mut index = 0usize;
+        while index < BOOTSTRAP_MMIO_MAPPING_CAPACITY {
+            if let Some(mapping) = BOOTSTRAP_MMIO_MAPPINGS[index]
+                && mapping.virtual_base == virtual_base
+            {
+                BOOTSTRAP_MMIO_MAPPINGS[index] = None;
+                return Some(mapping);
+            }
+            index += 1;
+        }
+    }
+    None
+}
+
+/// Returns the retained MMIO mappings in slot order.
+#[must_use]
+pub fn mmio_mappings(
+) -> [Option<BootstrapMmioMapping>; BOOTSTRAP_MMIO_MAPPING_CAPACITY] {
+    unsafe { BOOTSTRAP_MMIO_MAPPINGS }
+}
+
+/// Returns the current MMIO bump-allocator offset.
+#[must_use]
+pub fn mmio_bump_offset() -> u64 {
+    unsafe { BOOTSTRAP_MMIO_BUMP_OFFSET }
+}
+
 #[cfg(test)]
 pub(crate) fn reset_for_tests() {
     // Ensure the context is claimed before the reset so that subsequent
@@ -609,22 +622,21 @@ pub(crate) fn reset_for_tests() {
         BOOTSTRAP_EVENTS = [None; BOOTSTRAP_EVENT_CAPACITY];
         BOOTSTRAP_EVENT_COUNT = 0;
         BOOTSTRAP_VM_MAPPINGS = [None; BOOTSTRAP_VM_MAPPING_CAPACITY];
-        BOOTSTRAP_PAGE_TABLE_ACCESS_SLOTS = [None; BOOTSTRAP_PAGE_TABLE_ACCESS_SLOT_CAPACITY];
+        BOOTSTRAP_MMIO_MAPPINGS = [None; BOOTSTRAP_MMIO_MAPPING_CAPACITY];
+        BOOTSTRAP_MMIO_BUMP_OFFSET = 0;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapPageTableAccessSlot, BootstrapVmMapping, RuntimeReadinessState,
-        RuntimeReadySummary, RuntimeServiceCommand, RuntimeServiceHeartbeat,
-        RuntimeServiceReport, RuntimeServiceState, acquire_page_table_access_slot,
+        BootstrapVmMapping, RuntimeReadinessState, RuntimeReadySummary, RuntimeServiceCommand,
+        RuntimeServiceHeartbeat, RuntimeServiceReport, RuntimeServiceState,
         claim_bootstrap_context, dequeue_command, enqueue_command, events,
-        find_vm_mapping_for_address, page_table_access_slots, push_event, ready_summary,
-        record_vm_mapping, release_page_table_access_slot, remove_vm_mapping, reset_for_tests,
-        runtime_readiness, service, service_heartbeat, service_report, store_ready_summary,
-        store_runtime_readiness, store_service, store_service_heartbeat,
-        store_service_report, vm_mappings,
+        find_vm_mapping_for_address, push_event, ready_summary, record_vm_mapping,
+        remove_vm_mapping, reset_for_tests, runtime_readiness, service, service_heartbeat,
+        service_report, store_ready_summary, store_runtime_readiness, store_service,
+        store_service_heartbeat, store_service_report, vm_mappings,
     };
     use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
@@ -892,29 +904,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bootstrap_page_table_access_slots_allocate_reuse_and_release() {
-        reset_for_tests();
-        let first = acquire_page_table_access_slot(0xFFFF_9000_0800_0000, 0x2000)
-            .expect("first slot should allocate");
-        let reused = acquire_page_table_access_slot(0xFFFF_9000_0800_0000, 0x2000)
-            .expect("same frame should reuse slot");
-        let second = acquire_page_table_access_slot(0xFFFF_9000_0800_0000, 0x3000)
-            .expect("second slot should allocate");
-
-        assert_eq!(first, reused);
-        assert_eq!(
-            first,
-            BootstrapPageTableAccessSlot {
-                slot_index: 0,
-                frame_base: 0x2000,
-                virtual_base: 0xFFFF_9000_0800_1000,
-            }
-        );
-        assert_eq!(second.slot_index, 1);
-        assert!(page_table_access_slots().iter().flatten().any(|slot| *slot == first));
-        assert!(release_page_table_access_slot(first));
-        assert!(!release_page_table_access_slot(first));
-        assert!(page_table_access_slots().iter().flatten().all(|slot| *slot != first));
-    }
 }

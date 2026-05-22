@@ -10,7 +10,17 @@ use core::arch::global_asm;
 use core::panic::PanicInfo;
 
 #[cfg(target_os = "none")]
-const BOOT_STACK_SIZE: usize = 16 * 1024;
+/// Size of the low-half boot stack used before the higher-half handoff.
+///
+/// The 16 KiB initial budget overflowed once the boot path started
+/// pulling in feox-async + feox-nvme code (deeper stack frames in the
+/// transition-root build, direct-map install, MMIO prebuild, PCI scan,
+/// NVMe admin/IO queue setup, async-runtime spawn site). The overflow
+/// silently corrupted the GDT static at the very bottom of .data
+/// (a few hundred bytes below `BOOT_STACK`), which then made the
+/// post-handoff `lgdt` reload load a zeroed GDT and lock up. 64 KiB
+/// gives the boot path the headroom it needs.
+const BOOT_STACK_SIZE: usize = 64 * 1024;
 
 #[cfg(target_os = "none")]
 #[unsafe(link_section = ".bss.boot_stack")]
