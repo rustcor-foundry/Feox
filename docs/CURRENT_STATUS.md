@@ -79,24 +79,30 @@ Use those before deeper kernel or loader changes.
 1. **Per-core data bring-up** — when SMP work begins, the locked per-core
    slot at `0xFFFF_E000_0000_0000` (1 TiB stride × 32 cores) becomes the
    home for per-core stacks, IDT/GDT/TSS, IST stacks, and retained context.
-2. **Storage ABI surface** — decide whether ASI exposes the NVMe driver
-   through a generic block/file syscall layer or as a dedicated NVMe ABI.
-3. **Multi-device / multi-namespace block layer** — the current
+2. **Multi-device / multi-namespace block layer** — the current
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
    handling, and per-queue scheduling.
+3. **Storage ABI v1** — the v0 surface (`StorageSubmitRead` +
+   `StoragePoll`) uses raw `buffer_phys` and a sentinel device cap.
+   v1 swaps both for capability-backed forms (`CapType::StorageDevice`,
+   `CapType::DmaPool` flowed end-to-end) and adds the EventSlot/park
+   variant so callers can sleep instead of spin-polling. See
+   `docs/STORAGE_ABI.md`.
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the
-NVMe submit/drain primitives behind free functions, and a long-lived
-`crate::block::drainer_task` now pumps completions on every executor
-pass — so other kernel subsystems can do `block::read(nsid, lba,
-buf).await` without managing a drive loop or touching queue plumbing.
+NVMe submit/drain primitives behind free functions, a long-lived
+`crate::block::drainer_task` pumps completions on every executor pass,
+and the storage ABI lane (`AsiOp::StorageSubmitRead` 0x0500 /
+`AsiOp::StoragePoll` 0x0501) routes submit + poll through the syscall
+dispatch — exercised end-to-end on every boot by the storage-abi
+self-test in `run_nvme_admin_probe`.
 
 Bootstrap VM hardening, the permanent virtual address layout, the direct
 map, the access-window retirement, broadened live self-test coverage,
 MMIO bring-up, PCI enumeration, first-device BAR mapping (NVMe), the
-NVMe admin queue handshake, and the full NVMe I/O queue + LBA read
-lifecycle are all resolved — see `docs/PAGE_TABLE_ACCESS_PLAN.md`
-Retirement section and the live status table in
-`docs/VIRTUAL_ADDRESS_LAYOUT.md`.
+NVMe admin queue handshake, the full NVMe I/O queue + LBA read
+lifecycle, and the first storage ABI surface are all resolved — see
+`docs/PAGE_TABLE_ACCESS_PLAN.md` Retirement section, the live status
+table in `docs/VIRTUAL_ADDRESS_LAYOUT.md`, and `docs/STORAGE_ABI.md`.
