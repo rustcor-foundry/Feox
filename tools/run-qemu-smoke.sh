@@ -114,6 +114,7 @@ timeout --kill-after=2 "${TIMEOUT_SECONDS}" \
     "$QEMU_BIN" \
         -machine q35 \
         -cpu qemu64 \
+        -smp 4 \
         -m "$MEMORY_MIB" \
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
         -drive "if=pflash,format=raw,file=$VARS_COPY" \

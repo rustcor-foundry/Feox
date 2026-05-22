@@ -110,7 +110,11 @@ impl MemoryRegion {
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"FEOXBOOT");
 
 /// Current boot handoff ABI version.
-pub const BOOT_INFO_VERSION: u32 = 1;
+///
+/// v2 (2026-05-22): adds [`BootInfo::rsdp_phys`] so the kernel can
+/// locate ACPI tables for SMP / IRQ routing discovery. Loaders that
+/// can't supply an RSDP set this to 0.
+pub const BOOT_INFO_VERSION: u32 = 2;
 
 /// Raw boot handoff structure passed to the kernel entrypoint in `rdi`.
 #[repr(C)]
@@ -126,6 +130,9 @@ pub struct BootInfo {
     pub memory_map_ptr: *const MemoryRegion,
     /// Number of entries in the memory map.
     pub memory_map_len: usize,
+    /// Physical address of the ACPI 2.0 RSDP, or 0 if the loader
+    /// could not locate one (e.g. legacy BIOS / no ACPI table).
+    pub rsdp_phys: u64,
 }
 
 impl BootInfo {
@@ -138,18 +145,21 @@ impl BootInfo {
             flags: 0,
             memory_map_ptr: core::ptr::null(),
             memory_map_len: 0,
+            rsdp_phys: 0,
         }
     }
 
-    /// Creates a boot info structure from a memory map slice.
+    /// Creates a boot info structure from a memory map slice and an
+    /// optional ACPI RSDP physical address (zero if not provided).
     #[must_use]
-    pub const fn new(memory_map: &[MemoryRegion]) -> Self {
+    pub const fn new(memory_map: &[MemoryRegion], rsdp_phys: u64) -> Self {
         Self {
             magic: BOOT_INFO_MAGIC,
             version: BOOT_INFO_VERSION,
             flags: 0,
             memory_map_ptr: memory_map.as_ptr(),
             memory_map_len: memory_map.len(),
+            rsdp_phys,
         }
     }
 }
@@ -158,6 +168,7 @@ impl BootInfo {
 #[derive(Clone, Copy, Debug)]
 pub struct BootHandoff<'a> {
     memory_map: &'a [MemoryRegion],
+    rsdp_phys: u64,
 }
 
 impl<'a> BootHandoff<'a> {
@@ -189,13 +200,27 @@ impl<'a> BootHandoff<'a> {
             unsafe { slice::from_raw_parts(info.memory_map_ptr, info.memory_map_len) }
         };
 
-        Some(Self { memory_map })
+        Some(Self {
+            memory_map,
+            rsdp_phys: info.rsdp_phys,
+        })
     }
 
     /// Returns the bootloader-supplied physical memory map.
     #[must_use]
     pub const fn memory_map(self) -> &'a [MemoryRegion] {
         self.memory_map
+    }
+
+    /// Returns the bootloader-supplied ACPI RSDP physical address, or
+    /// `None` if the loader could not locate one.
+    #[must_use]
+    pub const fn rsdp_phys(self) -> Option<u64> {
+        if self.rsdp_phys == 0 {
+            None
+        } else {
+            Some(self.rsdp_phys)
+        }
     }
 
     /// Returns the total number of bytes marked usable in the memory map.
@@ -237,6 +262,7 @@ mod tests {
             flags: 0,
             memory_map_ptr: core::ptr::null(),
             memory_map_len: 0,
+            rsdp_phys: 0,
         };
 
         // SAFETY: `info` lives for the duration of this test and points to a
@@ -265,6 +291,7 @@ mod tests {
             flags: 0,
             memory_map_ptr: regions.as_ptr(),
             memory_map_len: regions.len(),
+            rsdp_phys: 0xDEAD_BEEF_F000,
         };
 
         // SAFETY: `info` lives for the duration of this test and points to a
@@ -278,5 +305,13 @@ mod tests {
                 .map(PhysicalAddress::as_u64),
             Some(0x5000)
         );
+        assert_eq!(handoff.rsdp_phys(), Some(0xDEAD_BEEF_F000));
+    }
+
+    #[test]
+    fn boot_handoff_rsdp_zero_reports_none() {
+        let info = BootInfo::new(&[], 0);
+        let handoff = unsafe { BootHandoff::from_ptr(&raw const info) }.expect("valid handoff");
+        assert_eq!(handoff.rsdp_phys(), None);
     }
 }

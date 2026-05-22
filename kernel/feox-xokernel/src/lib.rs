@@ -4,6 +4,7 @@
 
 //! Top-level facade for the Feox xokernel prototype.
 
+pub mod acpi;
 pub mod arch;
 pub mod block;
 pub mod boot;

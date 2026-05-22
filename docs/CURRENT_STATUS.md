@@ -76,12 +76,12 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **SMP bring-up of secondary cores** — core 0's per-CPU block is
-   now installed at the locked virtual slot `0xFFFF_E000_0000_0000`,
-   but only core 0's stride is prebuilt in the transition root.
-   Bringing up secondary cores requires prebuilding their strides
-   (`PER_CORE_BASE + core_id * PER_CORE_STRIDE`), wiring AP boot
-   (INIT/SIPI), and loading each core's own GS_BASE.
+1. **AP boot (INIT/SIPI + trampoline)** — ACPI MADT discovery is live
+   and all `PER_CORE_MAX_CORES` strides are prebuilt, so the kernel
+   knows which APs the firmware reports and has per-core VA space
+   ready. Launching them requires a 16-bit trampoline at a low phys,
+   INIT/SIPI through the LAPIC, and per-AP entry that loads its own
+   GS_BASE + jumps into a Rust entry point. Larger and arch-heavy.
 2. **Multi-device / multi-namespace block layer** — the current
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
@@ -98,11 +98,19 @@ Per-core data exists for core 0 (`crate::per_core::PerCoreData` with
 `self_ptr` / `magic` / `core_id` / `_reserved`). The page is mapped at
 the locked virtual slot `PER_CORE_BASE` (`0xFFFF_E000_0000_0000`)
 using PML4/PDPT/PD/PT intermediates prebuilt during transition root
-construction (`PER_CORE_PREBUILT_PER_CORE_SIZE = 2 MiB`).
-`IA32_GS_BASE` points at that slot so kernel code reaches its own
-per-CPU block via a `gs:[0]` load through `crate::per_core::current()`.
-Validated on every boot by `run_per_core_probe` (magic, core_id, and
-GS round-trip checks — `self_ptr` reads `0xFFFF_E000_0000_0000`).
+construction for *all* `PER_CORE_MAX_CORES` (32) strides, so secondary
+cores' per-core slots are ready to receive leaf inserts without a
+runtime frame allocator. `IA32_GS_BASE` points at core 0's slot so
+kernel code reaches its own per-CPU block via a `gs:[0]` load through
+`crate::per_core::current()`. Validated on every boot by
+`run_per_core_probe`.
+
+SMP discovery is live: the loader forwards the ACPI RSDP through
+`BootInfo::rsdp_phys` (ABI v2), and `crate::acpi::parse_topology`
+walks RSDP → XSDT → MADT to enumerate Local APIC entries.
+`run_acpi_smp_probe` reports the topology on every boot (with the
+QEMU smoke now launching `-smp 4`, all four APs are visible:
+`apic_id=0..3`, all enabled). APs themselves are not yet started.
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the
