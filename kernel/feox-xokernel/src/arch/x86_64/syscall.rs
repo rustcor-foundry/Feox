@@ -8,7 +8,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use feox_asi::{
     AsiOp, BatchOp, CapDelegateArgs, CapHandle, CapInfo, CapRequest, MemError, MemMapArgs,
-    MemVtoPArgs, MemVtoPBatchArgs, MappedRegion, PhysicalAddress,
+    MemVtoPArgs, MemVtoPBatchArgs, MappedRegion, PhysicalAddress, StorageError, StoragePollArgs,
+    StoragePollResult, StorageSubmitReadArgs,
 };
 
 #[cfg(target_os = "none")]
@@ -36,6 +37,7 @@ const SYSCALL_ERR_BATCH_FAILED: u64 = 0xFFFF_0004;
 const SYSCALL_ERR_NOT_READY: u64 = 0xFFFF_0005;
 const SYSCALL_CAP_ERROR_BASE: u64 = 0x100;
 const SYSCALL_MEM_ERROR_BASE: u64 = 0x200;
+const SYSCALL_STORAGE_ERROR_BASE: u64 = 0xFFFF_0500;
 
 const SYSCALL_STACK_SIZE: usize = 16 * 1024;
 
@@ -124,8 +126,12 @@ pub fn init() {
     INITIALIZED.store(true, Ordering::Release);
 }
 
+/// Dispatches one ASI syscall. Exposed as a C symbol so the inline
+/// SYSCALL/SYSRET trampoline can jump to it; kernel-side callers
+/// (e.g. the boot self-test) invoke it directly to exercise the same
+/// validation + dispatch path that ring 3 hits.
 #[unsafe(no_mangle)]
-extern "C" fn feox_syscall_dispatch(
+pub extern "C" fn feox_syscall_dispatch(
     opcode_raw: u64,
     args_ptr: *const u8,
     args_len: u64,
@@ -141,6 +147,14 @@ extern "C" fn feox_syscall_dispatch(
         return SYSCALL_ERR_INVALID_OPCODE;
     };
 
+    // Pump any pending NVMe completions before dispatching. This is how
+    // StoragePoll sees a freshly delivered completion without forcing
+    // user space to drive a drainer task itself. Cheap when the I/O CQ
+    // is empty (one volatile read of the CQE phase bit).
+    if crate::block::is_initialized() {
+        crate::block::drain();
+    }
+
     match opcode {
         AsiOp::CapRequest => dispatch_cap_request(args_ptr, args_len, out_value),
         AsiOp::CapList => dispatch_cap_list(args_ptr.cast_mut(), args_len, out_value),
@@ -155,6 +169,8 @@ extern "C" fn feox_syscall_dispatch(
             write_out(out_value, 0);
             SYSCALL_OK
         }
+        AsiOp::StorageSubmitRead => dispatch_storage_submit_read(args_ptr, args_len, out_value),
+        AsiOp::StoragePoll => dispatch_storage_poll(args_ptr, args_len, out_value),
         AsiOp::AsiBatch => dispatch_batch(args_ptr, args_len, out_value),
         _ => {
             push_event_if_ready("asi-op-unsupported");
@@ -614,6 +630,72 @@ fn syscall_cap_error(error: feox_asi::CapError) -> u64 {
 fn syscall_mem_error(error: MemError) -> u64 {
     SYSCALL_MEM_ERROR_BASE + error as u64
 }
+
+fn syscall_storage_error(error: StorageError) -> u64 {
+    SYSCALL_STORAGE_ERROR_BASE + error as u64
+}
+
+fn dispatch_storage_submit_read(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<StorageSubmitReadArgs>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length is checked against `StorageSubmitReadArgs` and
+        // the pointer is non-null.
+        *(args_ptr.cast::<StorageSubmitReadArgs>())
+    };
+    // v0 accepts any `device` capability without inspection; see
+    // docs/STORAGE_ABI.md "Capability story (bootstrap vs. v1)".
+    let _ = args.device;
+    match crate::block::storage_submit_read(args.nsid, args.lba, args.block_count, args.buffer_phys.0)
+    {
+        Ok(token) => {
+            push_event_if_ready("asi-storage-submit-read");
+            write_out(out_value, token.0);
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_storage_error(error)
+        }
+    }
+}
+
+fn dispatch_storage_poll(args_ptr: *const u8, args_len: u64, out_value: *mut u64) -> u64 {
+    if args_len != size_of::<StoragePollArgs>() as u64 || args_ptr.is_null() {
+        write_out(out_value, 0);
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length is checked against `StoragePollArgs` and the
+        // pointer is non-null.
+        *(args_ptr.cast::<StoragePollArgs>())
+    };
+    match crate::block::storage_poll(args.token) {
+        Ok(None) => {
+            write_out(out_value, StoragePollResult::NotReady as u64);
+            SYSCALL_OK
+        }
+        Ok(Some(completion)) => {
+            if !args.out_completion.is_null() {
+                unsafe {
+                    // SAFETY: caller-supplied writable pointer; we
+                    // checked it's non-null.
+                    *args.out_completion = completion;
+                }
+            }
+            push_event_if_ready("asi-storage-poll-ready");
+            write_out(out_value, StoragePollResult::Ready as u64);
+            SYSCALL_OK
+        }
+        Err(error) => {
+            write_out(out_value, 0);
+            syscall_storage_error(error)
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

@@ -877,6 +877,96 @@ fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
     }
     crate::kprintln!("nvme-async-probe: task complete (polls={})", polls);
 
+    // ---- Storage ABI self-test ----
+    // Exercise the syscall dispatch path end-to-end. Walks through
+    // feox_syscall_dispatch with AsiOp::StorageSubmitRead and
+    // AsiOp::StoragePoll the same way a ring-3 caller would. The block
+    // layer is still up (shutdown happens after the I/O queue teardown
+    // below) so the submission table sees a live device.
+    if let Some((abi_phys, abi_virt)) = alloc_dma_page() {
+        crate::kprintln!(
+            "storage-abi-probe: buffer phys={:#018x} virt={:p}",
+            abi_phys,
+            abi_virt
+        );
+        let submit_args = feox_asi::StorageSubmitReadArgs {
+            device: feox_asi::CapHandle {
+                id: 0,
+                generation: 0,
+            },
+            nsid: NSID,
+            lba: 0,
+            block_count: 1,
+            _reserved: 0,
+            buffer_phys: feox_asi::PhysicalAddress(abi_phys),
+        };
+        let mut submit_out: u64 = 0;
+        let submit_code = crate::arch::x86_64::syscall::feox_syscall_dispatch(
+            feox_asi::AsiOp::StorageSubmitRead as u64,
+            &submit_args as *const _ as *const u8,
+            core::mem::size_of::<feox_asi::StorageSubmitReadArgs>() as u64,
+            &mut submit_out,
+        );
+        if submit_code != 0 {
+            crate::kprintln!("storage-abi-probe: submit failed code={:#x}", submit_code);
+        } else {
+            let token = feox_asi::StorageToken(submit_out);
+            crate::kprintln!("storage-abi-probe: token={:#x}", token.0);
+            let mut completion = feox_asi::StorageCompletion::default();
+            let poll_args = feox_asi::StoragePollArgs {
+                token,
+                out_completion: &mut completion as *mut _,
+            };
+            let mut abi_polls = 0_u32;
+            let mut ready = false;
+            let mut last_poll_code: u64 = 0;
+            while abi_polls < POLL_LIMIT {
+                let mut poll_out: u64 = 0;
+                let poll_code = crate::arch::x86_64::syscall::feox_syscall_dispatch(
+                    feox_asi::AsiOp::StoragePoll as u64,
+                    &poll_args as *const _ as *const u8,
+                    core::mem::size_of::<feox_asi::StoragePollArgs>() as u64,
+                    &mut poll_out,
+                );
+                last_poll_code = poll_code;
+                if poll_code != 0 {
+                    break;
+                }
+                abi_polls += 1;
+                if poll_out == feox_asi::StoragePollResult::Ready as u64 {
+                    ready = true;
+                    break;
+                }
+            }
+            if !ready {
+                crate::kprintln!(
+                    "storage-abi-probe: did not reach Ready (polls={} last_code={:#x})",
+                    abi_polls,
+                    last_poll_code
+                );
+            } else {
+                crate::kprintln!(
+                    "storage-abi-probe: ready sct={} sc={} dnr={} polls={}",
+                    completion.nvme_sct,
+                    completion.nvme_sc,
+                    completion.dnr,
+                    abi_polls
+                );
+                let abi_bytes = unsafe {
+                    // SAFETY: abi_virt aliases the DMA page just written
+                    // by the controller via the syscall-driven read.
+                    core::slice::from_raw_parts(abi_virt as *const u8, 20)
+                };
+                crate::kprintln!(
+                    "storage-abi-probe: LBA0 ascii='{}'",
+                    trim_ascii(abi_bytes)
+                );
+            }
+        }
+    } else {
+        crate::kprintln!("storage-abi-probe: alloc failed");
+    }
+
     // ---- Tear down I/O queues (SQ before CQ per spec) ----
     let _ = nvme_submit_and_wait(
         registers,

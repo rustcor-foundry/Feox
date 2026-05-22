@@ -10,6 +10,40 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-21 (storage ABI v0)
+
+- locked the first-cut storage syscall surface in `docs/STORAGE_ABI.md`:
+  block-style ABI (protocol-agnostic), Submit+Poll semantics, opcode
+  range `0x0500`-`0x05FF` reserved for storage, v0 takes raw
+  `buffer_phys` with a sentinel device capability (v1 will replace
+  both with `CapType::StorageDevice` + `CapType::DmaPool` flowed
+  end-to-end)
+- added `AsiOp::StorageSubmitRead = 0x0500` and
+  `AsiOp::StoragePoll = 0x0501` to `crates/feox-asi`, plus shared
+  types: `StorageToken`, `StorageSubmitReadArgs`, `StoragePollArgs`,
+  `StorageCompletion`, `StoragePollResult`, `StorageError`
+- extended `crate::block` with a small 8-slot inflight-submissions
+  table keyed by `(slot_idx, generation)`. `storage_submit_read`
+  reserves a slot and stashes the `NvmeIoFuture<8>` from
+  `block::read`; `storage_poll` polls the future with a noop waker and
+  either reports `Ok(None)` (still pending) or `Ok(Some(completion))`
+  on Ready. Stale generations are rejected as `InvalidToken`
+- wired `dispatch_storage_submit_read` + `dispatch_storage_poll` in
+  `arch/x86_64/syscall.rs`, plus an unconditional `block::drain()` at
+  the top of `feox_syscall_dispatch` so user space sees fresh
+  completions on the next poll. Storage error codes return in the
+  high-half band `0xFFFF_0500 + StorageError`
+- exposed `feox_syscall_dispatch` as `pub extern "C"` so the boot
+  self-test can invoke the exact same entry point the SYSCALL/SYSRET
+  trampoline uses
+- new storage-abi self-test runs in `run_nvme_admin_probe` after the
+  existing NVMe async probe completes: allocates a fresh DMA page,
+  walks `StorageSubmitRead` → `StoragePoll` (loop) → decode buffer.
+  Bounded smoke now reports `storage-abi-probe: ready sct=0 sc=0
+  dnr=0 polls=1` and confirms the same `'FEOX-NVME-SMOKE-LBA0'` data
+- 91 host tests pass (was 90; +1 for `storage_abi_types_keep_expected_sizes`);
+  `cargo kernel` and `cargo loader` clean; CI green on `lx-ws01`
+
 ### 2026-05-21 (background drainer task)
 
 - added `pub async fn drainer_task()` to `kernel/feox-xokernel/src/block.rs`:
@@ -538,4 +572,4 @@ This document is the running development record for Feox.
 
 - extend the block layer to handle multiple devices / namespaces / queue pairs
 - bring up the per-core data zone at `0xFFFF_E000_0000_0000` when SMP work begins
-- decide whether ASI exposes the NVMe driver through a generic block/file layer or a dedicated NVMe ABI
+- evolve storage ABI from v0 (raw `buffer_phys`, sentinel device cap, Submit+Poll) toward v1 (capability-backed device + DMA, EventSlot/park variant)

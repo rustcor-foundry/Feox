@@ -87,6 +87,10 @@ pub enum AsiOp {
     ThreadPark = 0x0312,
     /// Enumerate visible devices.
     DevEnumerate = 0x0400,
+    /// Submit a single-LBA read against a storage device capability.
+    StorageSubmitRead = 0x0500,
+    /// Poll a previously submitted storage operation for completion.
+    StoragePoll = 0x0501,
     /// Submit many ASI operations in one syscall transition.
     AsiBatch = 0xFF00,
 }
@@ -114,6 +118,8 @@ impl AsiOp {
             0x0311 => Some(Self::ThreadExit),
             0x0312 => Some(Self::ThreadPark),
             0x0400 => Some(Self::DevEnumerate),
+            0x0500 => Some(Self::StorageSubmitRead),
+            0x0501 => Some(Self::StoragePoll),
             0xFF00 => Some(Self::AsiBatch),
             _ => None,
         }
@@ -580,11 +586,98 @@ pub struct CapHandle {
     pub generation: u32,
 }
 
+/// Opaque handle returned by `StorageSubmitRead` and consumed by
+/// `StoragePoll`. The kernel uses it as a slot index into the
+/// inflight-submissions table; user space must treat it as opaque.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[repr(transparent)]
+pub struct StorageToken(pub u64);
+
+/// Arguments for `StorageSubmitRead` (0x0500).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageSubmitReadArgs {
+    /// Capability identifying the storage device. v0 accepts any
+    /// handle because the bootstrap process owns the only device.
+    pub device: CapHandle,
+    /// NVMe namespace identifier (1-based).
+    pub nsid: u32,
+    /// Logical block address to read.
+    pub lba: u64,
+    /// Number of logical blocks. v0 must be 1.
+    pub block_count: u16,
+    /// Padding to keep the struct stable across future field additions.
+    pub _reserved: u16,
+    /// Physical address of the DMA buffer. v0 takes a raw phys to
+    /// match the bootstrap probe; v1 will use a buffer CapHandle.
+    pub buffer_phys: PhysicalAddress,
+}
+
+/// Arguments for `StoragePoll` (0x0501).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct StoragePollArgs {
+    /// Token returned by a previous `StorageSubmitRead`.
+    pub token: StorageToken,
+    /// Writable destination for the completion. The kernel only writes
+    /// through this pointer when the poll resolves to `Ready`.
+    pub out_completion: *mut StorageCompletion,
+}
+
+/// Completion record written through `StoragePollArgs::out_completion`
+/// when a submission resolves to `Ready`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct StorageCompletion {
+    /// NVMe SCT (status code type). Zero on success.
+    pub nvme_sct: u8,
+    /// NVMe SC (status code). Zero on success.
+    pub nvme_sc: u8,
+    /// 1 if the controller set DNR (do-not-retry).
+    pub dnr: u8,
+    /// Reserved for future expansion while keeping a stable ABI footprint.
+    pub _reserved: u8,
+}
+
+/// Result discriminant returned by `StoragePoll` via the syscall
+/// `out_value`. `Ready` means the kernel wrote a completion through
+/// the caller-supplied `out_completion` pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum StoragePollResult {
+    /// The submission is still in flight; the caller should drain and
+    /// retry. The kernel did not write a completion.
+    NotReady = 0,
+    /// The submission resolved; the kernel wrote a completion through
+    /// `out_completion`.
+    Ready = 1,
+}
+
+/// Storage syscall error codes returned in the high half of the
+/// syscall return register (`0xFFFF_05XX`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum StorageError {
+    /// The supplied device capability is invalid or the wrong type.
+    InvalidCapability = 0,
+    /// The kernel block layer has not been initialized.
+    NotInitialized = 1,
+    /// `block_count` was not 1.
+    UnsupportedBlockCount = 2,
+    /// The underlying block layer rejected the submission.
+    SubmitFailed = 3,
+    /// The supplied `StorageToken` does not name an inflight submission.
+    InvalidToken = 4,
+    /// The inflight submissions table is full.
+    InflightTableFull = 5,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AsiOp, BatchOp, CapInfo, CapPermissions, CoreId, CoreSet, MapFlags, MemMapArgs,
-        MemVtoPArgs, MappedRegion, PhysicalAddress, SyscallResult,
+        MemVtoPArgs, MappedRegion, PhysicalAddress, StorageCompletion, StoragePollArgs,
+        StoragePollResult, StorageSubmitReadArgs, StorageToken, SyscallResult,
     };
     use core::mem::size_of;
 
@@ -602,7 +695,22 @@ mod tests {
     fn asi_op_round_trips_from_raw() {
         assert_eq!(AsiOp::from_raw(0xFF00), Some(AsiOp::AsiBatch));
         assert_eq!(AsiOp::from_raw(0x0312), Some(AsiOp::ThreadPark));
+        assert_eq!(AsiOp::from_raw(0x0500), Some(AsiOp::StorageSubmitRead));
+        assert_eq!(AsiOp::from_raw(0x0501), Some(AsiOp::StoragePoll));
         assert_eq!(AsiOp::from_raw(0xDEAD), None);
+    }
+
+    #[test]
+    fn storage_abi_types_keep_expected_sizes() {
+        assert_eq!(size_of::<StorageToken>(), 8);
+        // device(8) + nsid(4) + pad(4 for lba align) + lba(8) +
+        // block_count(2) + _reserved(2) + pad(4 for buffer_phys align) +
+        // buffer_phys(8) = 40
+        assert_eq!(size_of::<StorageSubmitReadArgs>(), 40);
+        // token(8) + out_completion ptr (8 on 64-bit)
+        assert_eq!(size_of::<StoragePollArgs>(), 16);
+        assert_eq!(size_of::<StorageCompletion>(), 4);
+        assert_eq!(size_of::<StoragePollResult>(), 8);
     }
 
     #[test]
