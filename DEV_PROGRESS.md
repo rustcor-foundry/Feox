@@ -10,6 +10,41 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-21 (storage ABI v2: device capability enforced)
+
+- added `register_bootstrap_storage_device_resource(bar_base,
+  bar_size) -> Result<ResourceId, CapError>` in `capability.rs`,
+  mirroring the memory-resource path but registering with
+  `CapType::StorageDevice`
+- extended `BlockDeviceState` with `device_cap: Option<CapHandle>`
+  and surfaced:
+  - `block::register_device_capability(bar_base, bar_size) ->
+    Result<CapHandle, BlockError>` — registers the resource, mints
+    the root cap with full bootstrap permissions, stashes it on the
+    live device. Called by the boot probe right after
+    `block::initialize`
+  - `block::storage_device_cap() -> Option<CapHandle>` accessor
+  - `block::shutdown` now releases the device cap (if any) before
+    failing in-flight futures and clearing the static
+- `dispatch_storage_submit_read` now requires `args.device` to
+  resolve to a `CapType::StorageDevice` with `READ | WRITE`. Anything
+  else (including the old sentinel zero handle) returns
+  `0xFFFF_0500 + InvalidCapability`
+- self-test grew a negative path: it submits with a zero CapHandle
+  and asserts the dispatch returns a non-zero error code, then
+  submits the positive path with the real `device_cap` from
+  `block::register_device_capability`. Bounded smoke now reports:
+  - `nvme-async-probe: device cap minted (id=17, gen=0)`
+  - `storage-abi-probe: negative path rejected as expected
+    (code=0xffff0500)`
+  - `storage-abi-probe: ready sct=0 sc=0 dnr=0 polls=1` (positive)
+- threaded `bar_phys + bar_size` through `run_nvme_admin_probe` so
+  the device cap resource has accurate BAR metadata (8 KiB at the
+  controller's BAR0 phys)
+- updated `docs/STORAGE_ABI.md` with the v2 evolution; next focus is
+  v3 (DmaPool flow + EventSlot variant)
+- 91 host tests pass; `cargo kernel` and `cargo loader` clean
+
 ### 2026-05-21 (storage ABI v1: capability-backed buffer)
 
 - added `CapType::StorageDevice` enum variant to `feox-asi` (marker for

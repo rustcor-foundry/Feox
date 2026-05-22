@@ -460,7 +460,7 @@ fn run_nvme_mmio_probe() {
             cap.dstrd()
         );
     } else {
-        run_nvme_admin_probe(registers);
+        run_nvme_admin_probe(registers, bar_phys, 2 * PAGE_SIZE);
     }
 
     if mmio_unmap_bootstrap(region).is_err() {
@@ -536,7 +536,11 @@ fn nvme_submit_and_wait(
 }
 
 #[cfg(target_os = "none")]
-fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
+fn run_nvme_admin_probe(
+    registers: crate::nvme::ControllerRegisters,
+    bar_phys: u64,
+    bar_size: u64,
+) {
     use crate::capability::{request_bootstrap_capability, resource, verify_bootstrap_handle};
     use crate::memory::DIRECT_MAP_BASE;
     use crate::nvme::{CompletionQueueEntry, SubmissionQueueEntry};
@@ -771,6 +775,25 @@ fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
         return;
     }
 
+    // Mint the storage device capability so dispatch_storage_submit_read
+    // has something to verify args.device against. Released during
+    // block::shutdown.
+    let device_cap = match crate::block::register_device_capability(bar_phys, bar_size) {
+        Ok(handle) => {
+            crate::kprintln!(
+                "nvme-async-probe: device cap minted (id={}, gen={})",
+                handle.id,
+                handle.generation
+            );
+            handle
+        }
+        Err(err) => {
+            crate::kprintln!("nvme-async-probe: device cap mint failed err={:?}", err);
+            crate::block::shutdown();
+            return;
+        }
+    };
+
     // Spawn the background drainer task on the same executor. It pumps
     // CQ completions every poll pass and yields back so other tasks can
     // run. Without it the read task would park forever (the executor
@@ -913,11 +936,41 @@ fn run_nvme_admin_probe(registers: crate::nvme::ControllerRegisters) {
             buffer_handle.generation,
             abi_phys
         );
-        let submit_args = feox_asi::StorageSubmitReadArgs {
+        // ---- Negative path: bogus device cap must be rejected ----
+        let neg_args = feox_asi::StorageSubmitReadArgs {
             device: feox_asi::CapHandle {
                 id: 0,
                 generation: 0,
             },
+            nsid: NSID,
+            lba: 0,
+            block_count: 1,
+            _reserved: 0,
+            buffer: buffer_handle,
+            buffer_offset: 0,
+        };
+        let mut neg_out: u64 = 0;
+        let neg_code = crate::arch::x86_64::syscall::feox_syscall_dispatch(
+            feox_asi::AsiOp::StorageSubmitRead as u64,
+            &neg_args as *const _ as *const u8,
+            core::mem::size_of::<feox_asi::StorageSubmitReadArgs>() as u64,
+            &mut neg_out,
+        );
+        // 0xFFFF_0500 + StorageError::InvalidCapability (= 0). Any non-
+        // zero code is acceptable for the negative test; the specific
+        // value is the storage error base.
+        if neg_code == 0 {
+            crate::kprintln!("storage-abi-probe: negative path UNEXPECTEDLY accepted bogus cap");
+        } else {
+            crate::kprintln!(
+                "storage-abi-probe: negative path rejected as expected (code={:#x})",
+                neg_code
+            );
+        }
+
+        // ---- Positive path: real device cap ----
+        let submit_args = feox_asi::StorageSubmitReadArgs {
+            device: device_cap,
             nsid: NSID,
             lba: 0,
             block_count: 1,

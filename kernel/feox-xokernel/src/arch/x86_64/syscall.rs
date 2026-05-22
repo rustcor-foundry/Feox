@@ -645,10 +645,21 @@ fn dispatch_storage_submit_read(args_ptr: *const u8, args_len: u64, out_value: *
         // the pointer is non-null.
         *(args_ptr.cast::<StorageSubmitReadArgs>())
     };
-    // The `device` capability is not yet enforced; PCI enumeration
-    // doesn't mint CapType::StorageDevice handles today. See
-    // docs/STORAGE_ABI.md "Capability story (bootstrap vs. v1)".
-    let _ = args.device;
+    // Verify the device capability. It must resolve to a
+    // CapType::StorageDevice with READ + WRITE permissions. In
+    // bootstrap a single such cap is minted during the NVMe bring-up
+    // (see crate::block::register_device_capability); any other
+    // handle (including the v0/v1 sentinel zero handle) is rejected.
+    match crate::capability::verify_bootstrap_handle(
+        args.device,
+        feox_asi::CapPermissions::READ | feox_asi::CapPermissions::WRITE,
+    ) {
+        Ok(view) if view.cap_type == feox_asi::CapType::StorageDevice => {}
+        _ => {
+            write_out(out_value, 0);
+            return syscall_storage_error(feox_asi::StorageError::InvalidCapability);
+        }
+    }
     // Translate the buffer capability to a physical address. The
     // capability must be a PhysicalMemory (or future DmaPool) resource
     // with READ + WRITE permissions, and `buffer_offset + 4096` must

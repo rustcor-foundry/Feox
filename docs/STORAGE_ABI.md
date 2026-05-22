@@ -118,23 +118,31 @@ through the user-supplied `out_completion` pointer.
 **v0 (initial).** Buffer named by raw `buffer_phys: PhysicalAddress`,
 device cap accepted as any `CapHandle`. Bootstrap-only.
 
-**v1 (current).** Buffer named by `{ buffer: CapHandle, buffer_offset:
-u64 }`; kernel translates via `cap_to_phys_base`, which currently
-accepts `CapType::PhysicalMemory` and is structured to accept
-`CapType::DmaPool` once that resource type is minted. The `device`
-capability is still not enforced — `CapType::StorageDevice` exists as
-an enum variant but PCI enumeration doesn't mint one yet.
+**v1.** Buffer named by `{ buffer: CapHandle, buffer_offset: u64 }`;
+kernel translates via `cap_to_phys_base`, which accepts
+`CapType::PhysicalMemory`. Device capability still not enforced —
+`CapType::StorageDevice` exists as an enum variant but is not minted.
 
-**v2 (planned).** PCI enumeration mints a `CapType::StorageDevice` per
-NVMe controller; the dispatch verifies `args.device` against it.
-`CapType::DmaPool` minting + delegation is wired through `cap_request`
-so user space can request DMA-safe memory directly. The
-`StorageSubmitReadArgs` wire layout stays unchanged across v1 → v2 —
-only the kernel-side accepted CapType set widens.
+**v2 (current).** Device capability is enforced.
+`block::register_device_capability(bar_base, bar_size)` registers a
+`CapType::StorageDevice` resource over the controller's BAR and mints
+a root capability that the boot code retains on the live block device.
+`dispatch_storage_submit_read` verifies `args.device` is a live
+`StorageDevice` cap with `READ | WRITE`; anything else (including the
+old sentinel zero handle) returns `0xFFFF_0500 + InvalidCapability`.
+The block layer releases the device cap during `shutdown`. The
+`StorageSubmitReadArgs` wire layout did not change from v1.
+
+**v3 (planned).** `CapType::DmaPool` minting + delegation wired
+through `cap_request` so user space can request DMA-safe memory
+directly (today the buffer must be a `PhysicalMemory` cap, which works
+in bootstrap but won't generalize once an IOMMU is in the mix). Add
+an EventSlot/park variant so callers can sleep on completion instead
+of spin-polling.
 
 The wire layout of `StorageSubmitReadArgs` is **not** stable across
 v0 → v1 (the `buffer_phys` field was replaced). It is intended to be
-stable from v1 forward.
+stable from v1 forward; v2 only tightened the kernel-side enforcement.
 
 ## Drain semantics
 
