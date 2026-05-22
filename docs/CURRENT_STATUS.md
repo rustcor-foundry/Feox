@@ -1,6 +1,6 @@
 # Feox Current Status
 
-Last updated: 2026-05-21
+Last updated: 2026-05-22
 
 ## Posture
 
@@ -76,9 +76,13 @@ Use those before deeper kernel or loader changes.
 
 ## Immediate Next Focus
 
-1. **Per-core data bring-up** — when SMP work begins, the locked per-core
-   slot at `0xFFFF_E000_0000_0000` (1 TiB stride × 32 cores) becomes the
-   home for per-core stacks, IDT/GDT/TSS, IST stacks, and retained context.
+1. **Per-core slot mapping + SMP bring-up** — single-core per-CPU data
+   exists for core 0 (see "what is true now" below) but it currently
+   lives at the direct-map alias of its backing page, not at the
+   locked virtual slot `0xFFFF_E000_0000_0000` (1 TiB × 32 cores).
+   Future work: prebuild the per-core PML4 intermediates so each core
+   sees its own data at a stable VA, then bring up secondary cores
+   with their own GS_BASE.
 2. **Multi-device / multi-namespace block layer** — the current
    `crate::block` module is hardcoded to one NVMe device with one I/O
    queue pair. A real block layer needs device enumeration, namespace
@@ -90,6 +94,13 @@ Use those before deeper kernel or loader changes.
    in the mix) and adding an EventSlot/park variant so callers can
    sleep on completion instead of spin-polling. See
    `docs/STORAGE_ABI.md`.
+
+Per-core data exists for core 0 (`crate::per_core::PerCoreData` with
+`self_ptr` / `magic` / `core_id` / `_reserved`). `IA32_GS_BASE` points
+at the area's kernel direct-map alias, so kernel code reaches its own
+per-CPU block via a `gs:[0]` load through `crate::per_core::current()`.
+Validated on every boot by `run_per_core_probe` (magic, core_id, and
+GS round-trip checks).
 
 The executor "enqueue gap" is closed, the kernel block surface
 (`crate::block::initialize` / `read` / `drain` / `shutdown`) wraps the

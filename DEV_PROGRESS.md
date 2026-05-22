@@ -10,6 +10,34 @@ This document is the running development record for Feox.
 
 ## Entries
 
+### 2026-05-22 (per-core data area for core 0)
+
+- new `kernel/feox-xokernel/src/per_core.rs` module:
+  - `PerCoreData { self_ptr, magic, core_id, _reserved }` with
+    `#[repr(C)]`; `self_ptr` at offset 0 so `mov rax, gs:[0]`
+    materializes the area's own kernel virtual address
+  - `PER_CORE_MAGIC = 0xFE0C_0DEF_ACEC_0FE1` (non-zero so a zeroed
+    page is distinguishable from initialized state)
+  - `initialize_core0()` requests a 4 KiB `PhysicalPages` cap, writes
+    the struct through the direct-map alias, loads `IA32_GS_BASE`
+    (`0xC000_0101`) with the alias virtual address, and records the
+    base in a private static for the host-test fallback
+  - `current() -> &'static PerCoreData` uses a `mov {0}, gs:[0]`
+    inline asm load on `target_os = "none"`; falls back to the
+    recorded static on host so tests compile without GS support
+- registered as `pub mod per_core` in `lib.rs`
+- new `run_per_core_probe` runs after the MMIO probe and before the
+  NVMe probe: calls `initialize_core0`, reads the area through
+  `current()`, verifies magic + core_id + self_ptr round-trip. Trace:
+  `per-core-probe: ok via GS (core_id=0, self_ptr=0xffffc00000004000)`
+- note: the area lives at its direct-map alias for this session; the
+  locked virtual slot at `PER_CORE_BASE` (`0xFFFF_E000_0000_0000`)
+  remains reserved but unmapped. Explicit per-core PML4
+  intermediates + the eventual "all cores see per-CPU at the same VA"
+  property are deferred to a follow-up
+- 93 host tests pass (was 91; +2 for `per_core_data_layout_is_frozen`
+  + `magic_is_non_zero`); `cargo kernel` and `cargo loader` clean
+
 ### 2026-05-21 (storage ABI v2: device capability enforced)
 
 - added `register_bootstrap_storage_device_resource(bar_base,
