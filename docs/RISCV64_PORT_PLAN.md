@@ -1,0 +1,73 @@
+# riscv64 Port Plan
+
+Status: **Milestone 1 complete** — Feox boots in S-mode under QEMU `virt`,
+prints its banner over the SBI console, and parks the boot hart.
+
+## Boot model (how riscv64 differs from x86_64)
+
+x86_64 boots through the UEFI loader (`feox-loader-uefi`), which builds a
+`BootInfo` handoff and jumps to `feox_entry(boot_info)` → `boot::bootstrap`.
+
+riscv64 has **no UEFI loader**. The firmware stack is OpenSBI → (U-Boot on real
+hardware) → S-mode kernel. The kernel is entered directly:
+
+- QEMU: `qemu-system-riscv64 -machine virt -bios default -kernel <elf>` —
+  QEMU's built-in OpenSBI enters the kernel at its link address in S-mode.
+- Real Orange Pi RV: build a flat `Image`, deploy via the RVBOOT / U-Boot
+  `extlinux` recipe (same path openSUSE uses).
+
+In both cases the boot hart enters with `a0 = hartid`, `a1 = dtb` (flattened
+device-tree physical address). `_start` (in `kernel/feox-xokernel/src/main.rs`)
+sets up the boot stack, zeroes the frame pointer, and tail-calls
+`feox_entry(hartid, dtb)` → `arch::riscv64::riscv_main`.
+
+## What carries over unchanged
+
+The arch-agnostic core is reused as-is: `feox-async` (executor), `feox-nvme`
+(MMIO+DMA queues), `feox-asi`, `feox-boot` (ABI types), the capability system,
+and the arch-boundary contract in `arch/mod.rs`. RISC-V slots in as
+`arch/riscv64/`; no restructuring of the kernel facade was required.
+
+## Build & run
+
+```
+cargo kernel-riscv                       # build (riscv64gc-unknown-none-elf, --no-default-features)
+tools\run-qemu-riscv.ps1                 # build + boot under local QEMU virt (needs qemu-system-riscv64)
+tools\run-qemu-riscv.ps1 -TimeoutSeconds 20   # bounded smoke run, checks for the banner marker
+tools\run-qemu-riscv.ps1 -Remote lx-ws01      # build here, ship the ELF, boot on a RustyKey host
+```
+
+On Paul's setup the build host (Windows) has the Rust toolchain and repo while
+the boot host (lx-ws01, Debian) has `qemu-system-riscv64`. `-Remote <host>`
+builds locally, `rusk cp`s the self-contained ELF to the host, and runs QEMU
+there (time-bounded, since the boot hart parks in `wfi`), then checks the
+serial log for the banner marker. No Rust or repo checkout is needed remotely.
+
+The riscv64 milestone-1 build uses `--no-default-features` so the still
+x86-shaped `runtime`/`storage` crates are not pulled into the minimal
+SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
+`boot`, `paging`, `memory`, `smp`, `pci`, `vm`, `block`, `mmio`, `per_core`,
+`runtime_context`, `capability`) are gated to `target_arch = "x86_64"` in
+`lib.rs` until their riscv64 backends land.
+
+## Roadmap (incremental, each builds on the last)
+
+1. **Banner boot** ✅ — S-mode `_start`, SBI `console_putchar`, `wfi` halt.
+2. **Trap handling** — `stvec`/`scause`/`sepc` + trap frame; route exceptions
+   and the timer interrupt; this is the riscv64 analogue of the x86 IDT setup.
+3. **sv39 paging** — page-table walk/build, `satp` switch, `sfence.vma`
+   invalidation. Wires up `arch::invalidate_page` /
+   `arch::switch_page_table_root_and_jump` for riscv64.
+4. **Memory** — device-tree intake (parse `a1` DTB for RAM regions) replacing
+   the x86 ACPI/RSDP + loader memory map; un-gate `memory`.
+5. **Runtime** — bring `feox-async` up on riscv64; re-enable the `runtime`
+   feature for this target.
+6. **NVMe** — QEMU `virt` exposes an NVMe device; exercise `feox-nvme` over it.
+7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
+   replacing the x86 AP trampoline.
+
+## Interrupt-controller note
+
+x86 LAPIC/IOAPIC → riscv64 **PLIC** (external interrupts) + **CLINT/aclint**
+(timer/IPI, or the SBI timer + IPI extensions). These come in with the
+trap-handling and SMP passes.

@@ -4,20 +4,39 @@
 
 //! Top-level facade for the Feox xokernel prototype.
 
-pub mod acpi;
 pub mod arch;
-pub mod block;
-pub mod boot;
-pub mod capability;
 pub mod console;
+
+// The remaining subsystems are still x86_64-shaped (ACPI/RSDP intake, LAPIC,
+// the GDT/IDT-aliased CR3 handoff in `boot`, the paging/memory/SMP stack). The
+// riscv64 milestone-1 build takes a minimal `arch::riscv64::riscv_main` path
+// that brings up the SBI console and parks, so these are gated to x86_64 until
+// their riscv64 backends land (traps -> sv39 -> memory -> runtime -> SMP).
+#[cfg(target_arch = "x86_64")]
+pub mod acpi;
+#[cfg(target_arch = "x86_64")]
+pub mod block;
+#[cfg(target_arch = "x86_64")]
+pub mod boot;
+#[cfg(target_arch = "x86_64")]
+pub mod capability;
+#[cfg(target_arch = "x86_64")]
 pub mod lapic;
+#[cfg(target_arch = "x86_64")]
 pub mod memory;
+#[cfg(target_arch = "x86_64")]
 pub mod mmio;
+#[cfg(target_arch = "x86_64")]
 pub mod paging;
+#[cfg(target_arch = "x86_64")]
 pub mod pci;
+#[cfg(target_arch = "x86_64")]
 pub mod per_core;
+#[cfg(target_arch = "x86_64")]
 pub mod runtime_context;
+#[cfg(target_arch = "x86_64")]
 pub mod smp;
+#[cfg(target_arch = "x86_64")]
 pub mod vm;
 
 pub use feox_asi as asi;
