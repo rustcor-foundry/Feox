@@ -18,14 +18,32 @@ mod selected {
     };
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("Feox currently supports only x86_64 kernel builds. See docs/ARM64_PORT_PLAN.md.");
+#[cfg(target_arch = "riscv64")]
+pub mod riscv64;
+
+#[cfg(target_arch = "riscv64")]
+mod selected {
+    pub use super::riscv64::{
+        cpu::{disable_interrupts, hlt_loop},
+        panic, serial,
+    };
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
+compile_error!(
+    "Feox supports x86_64 and riscv64 kernel builds. See docs/ARM64_PORT_PLAN.md and docs/RISCV64_PORT_PLAN.md."
+);
 
 /// Returns the name of the currently selected kernel architecture.
 #[cfg(target_arch = "x86_64")]
 pub const CURRENT_ARCH: &str = "x86_64";
 
+/// Returns the name of the currently selected kernel architecture.
+#[cfg(target_arch = "riscv64")]
+pub const CURRENT_ARCH: &str = "riscv64";
+
 /// Performs the earliest architecture initialization required by the bootstrap path.
+#[cfg(target_arch = "x86_64")]
 pub fn early_init() {
     selected::disable_interrupts();
     console_init();
@@ -43,19 +61,40 @@ pub fn early_init() {
     selected::syscall::init();
 }
 
+/// Performs the earliest architecture initialization required by the bootstrap path.
+///
+/// riscv64 milestone-1 path: mask supervisor interrupts and bring the SBI
+/// console up. The descriptor-table / control-register setup that the x86_64
+/// path performs has no riscv64 analogue at this stage (trap-vector and
+/// `sstatus` setup land with the trap-handling pass).
+#[cfg(target_arch = "riscv64")]
+pub fn early_init() {
+    selected::disable_interrupts();
+    console_init();
+}
+
 /// Initializes the selected architecture's early console.
+#[cfg(target_arch = "x86_64")]
 pub fn console_init() {
     selected::serial::init();
     selected::debugcon::init();
 }
 
+/// Initializes the selected architecture's early console.
+#[cfg(target_arch = "riscv64")]
+pub fn console_init() {
+    selected::serial::init();
+}
+
 /// Returns the active top-level page-table root physical address.
+#[cfg(target_arch = "x86_64")]
 #[must_use]
 pub fn active_page_table_root() -> u64 {
     selected::read_cr3()
 }
 
 /// Returns the current bootstrap stack pointer.
+#[cfg(target_arch = "x86_64")]
 #[must_use]
 pub fn current_stack_pointer() -> u64 {
     selected::read_rsp()
@@ -64,6 +103,7 @@ pub fn current_stack_pointer() -> u64 {
 /// Switches to a supplied page-table root and jumps to a prepared entrypoint.
 ///
 /// Safety requirements are architecture-specific and enforced by the caller.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn switch_page_table_root_and_jump(root: u64, stack: u64, entry: u64) -> ! {
     unsafe { selected::switch_page_table_root_and_jump(root, stack, entry) }
 }
@@ -71,6 +111,7 @@ pub unsafe fn switch_page_table_root_and_jump(root: u64, stack: u64, entry: u64)
 /// Switches to a supplied stack and jumps to a prepared entrypoint.
 ///
 /// Safety requirements are architecture-specific and enforced by the caller.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn switch_stack_and_jump(stack: u64, entry: u64) -> ! {
     unsafe { selected::switch_stack_and_jump(stack, entry) }
 }
@@ -78,6 +119,7 @@ pub unsafe fn switch_stack_and_jump(stack: u64, entry: u64) -> ! {
 /// Reloads the bootstrap descriptor tables from supplied higher-half aliases.
 ///
 /// Safety requirements are architecture-specific and enforced by the caller.
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn reload_descriptor_tables(gdt_base: u64, idt_base: u64, idt_handler_delta: u64) {
     unsafe {
         selected::gdt::reload_with_base(gdt_base);
@@ -86,24 +128,34 @@ pub unsafe fn reload_descriptor_tables(gdt_base: u64, idt_base: u64, idt_handler
 }
 
 /// Invalidates the TLB entry for a single virtual address on the current core.
+#[cfg(target_arch = "x86_64")]
 pub fn invalidate_page(virt: u64) {
     selected::invalidate_page(virt);
 }
 
 /// Reloads the current page-table root to force a full local TLB flush.
+#[cfg(target_arch = "x86_64")]
 pub fn reload_current_page_table_root() {
     selected::reload_current_page_table_root();
 }
 
 /// Raises a controlled software breakpoint through the active IDT.
+#[cfg(target_arch = "x86_64")]
 pub fn trigger_breakpoint() {
     selected::trigger_breakpoint();
 }
 
 /// Writes preformatted early-boot output through the selected architecture console.
+#[cfg(target_arch = "x86_64")]
 pub fn write_fmt(args: fmt::Arguments<'_>) {
     selected::serial::write_fmt(args);
     selected::debugcon::write_fmt(args);
+}
+
+/// Writes preformatted early-boot output through the selected architecture console.
+#[cfg(target_arch = "riscv64")]
+pub fn write_fmt(args: fmt::Arguments<'_>) {
+    selected::serial::write_fmt(args);
 }
 
 /// Prints an early panic and halts forever.
