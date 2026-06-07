@@ -220,7 +220,10 @@ fn discover_pci() {
             crate::kprintln!("[feox] milestone 6a: PCIe ECAM up; NVMe controller discovered.");
 
             // Milestone 6b: assign the BAR and bring the controller to ready.
-            let _ = nvme::init(&dev);
+            // Milestone 6c: issue an admin Identify command round-trip.
+            if let Some(mut controller) = nvme::init(&dev) {
+                let _ = controller.identify_controller();
+            }
         }
         None => {
             crate::kprintln!("[feox] pcie: no NVMe controller found on the root bus");
