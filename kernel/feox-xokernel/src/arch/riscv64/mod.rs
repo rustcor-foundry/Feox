@@ -239,7 +239,58 @@ fn init_memory(dtb: usize) -> bool {
         "[feox] milestone 4b: sv39 walker + per-section W^X map online."
     );
 
+    // Milestone 11: VM abstraction — build a scratch address space, map test
+    // pages at non-identity VAs, verify translate(), unmap, and tear it down.
+    vm_selftest();
+
     on_qemu
+}
+
+/// Exercises the `AddressSpace` API on a scratch space (without activating it):
+/// map -> translate -> unmap -> destroy. Proves per-space map/walk/teardown,
+/// the foundation for per-process U-mode spaces.
+fn vm_selftest() {
+    let Some(mut space) = paging::AddressSpace::new() else {
+        crate::kprintln!("[feox] vm: could not allocate a scratch address space");
+        return;
+    };
+    let (Some(page_a), Some(page_b)) = (frame::alloc(), frame::alloc()) else {
+        crate::kprintln!("[feox] vm: out of frames for the VM self-test");
+        return;
+    };
+
+    // Deliberately non-identity VAs (4 GiB region) to prove real translation.
+    const VA_A: usize = 0x1_0000_0000;
+    const VB_B: usize = 0x1_0000_2000;
+    space.map(VA_A, page_a, 4096, paging::PTE_R | paging::PTE_W);
+    space.map(VB_B, page_b, 4096, paging::PTE_R | paging::PTE_W | paging::PTE_X);
+
+    let a = space.translate(VA_A);
+    let a_off = space.translate(VA_A + 0x40); // offset must carry through
+    let b = space.translate(VB_B);
+    let a_ok = a.map(|(pa, _)| pa) == Some(page_a)
+        && a_off.map(|(pa, _)| pa) == Some(page_a + 0x40);
+    let b_ok = b.map(|(pa, _)| pa) == Some(page_b);
+    crate::kprintln!(
+        "[feox] vm: mapped {:#x}->{:#x}, {:#x}->{:#x} (translate ok={})",
+        VA_A,
+        page_a,
+        VB_B,
+        page_b,
+        a_ok && b_ok
+    );
+
+    space.unmap(VA_A, 4096);
+    let unmapped_ok = space.translate(VA_A).is_none() && space.translate(VB_B).is_some();
+    crate::kprintln!("[feox] vm: unmapped {:#x} (gone={})", VA_A, unmapped_ok);
+
+    let freed = space.destroy();
+    frame::free(page_a);
+    frame::free(page_b);
+    crate::kprintln!(
+        "[feox] milestone 11: VM abstraction (map/translate/unmap/destroy; {} table frames reclaimed).",
+        freed
+    );
 }
 
 /// Translates a few representative kernel addresses through the live page table

@@ -29,12 +29,12 @@ unsafe extern "C" {
 
 /// PTE valid bit.
 const PTE_V: u64 = 1 << 0;
-/// PTE readable.
-const PTE_R: u64 = 1 << 1;
+/// PTE readable (mapping permission; public for `AddressSpace::map` callers).
+pub const PTE_R: u64 = 1 << 1;
 /// PTE writable.
-const PTE_W: u64 = 1 << 2;
+pub const PTE_W: u64 = 1 << 2;
 /// PTE executable.
-const PTE_X: u64 = 1 << 3;
+pub const PTE_X: u64 = 1 << 3;
 /// PTE accessed (set ahead of time so we don't need the A/D-update fault path).
 const PTE_A: u64 = 1 << 6;
 /// PTE dirty (ditto).
@@ -267,6 +267,12 @@ pub fn build_kernel_address_space(
 #[must_use]
 pub fn translate(va: usize) -> Option<(usize, u64)> {
     let root = (read_satp() & ((1 << 44) - 1)) << 12;
+    translate_in(root, va)
+}
+
+/// Walks `root`'s tables to translate `va`, without requiring `root` to be the
+/// active table. Returns the physical address and the leaf PTE's low flag bits.
+fn translate_in(root: usize, va: usize) -> Option<(usize, u64)> {
     let mut table = root;
     let mut level: i32 = 2;
     while level >= 0 {
@@ -276,7 +282,7 @@ pub fn translate(va: usize) -> Option<(usize, u64)> {
         if pte & PTE_V == 0 {
             return None;
         }
-        if pte & (PTE_R | PTE_X) != 0 {
+        if pte & (PTE_R | PTE_W | PTE_X) != 0 {
             let level_bits = 12 + 9 * (level as usize);
             let mask = (1usize << level_bits) - 1;
             // Mask the PPN to 44 bits (matching the non-leaf path) so reserved
@@ -289,6 +295,125 @@ pub fn translate(va: usize) -> Option<(usize, u64)> {
         level -= 1;
     }
     None
+}
+
+/// An sv39 address space: a root page table you can map into, translate, and
+/// activate. The bootstrap kernel map is built by `build_kernel_address_space`;
+/// per-process U-mode spaces are built with this type.
+///
+/// `destroy()` frees the page-table frames explicitly; there is intentionally no
+/// `Drop` (so an active space is never freed out from under the hart).
+pub struct AddressSpace {
+    root: usize,
+}
+
+impl AddressSpace {
+    /// Creates an empty address space backed by a fresh, zeroed root table.
+    #[must_use]
+    pub fn new() -> Option<Self> {
+        let root = frame::alloc()?;
+        zero_table(root);
+        Some(Self { root })
+    }
+
+    /// Physical address of the root page table.
+    #[must_use]
+    pub fn root(&self) -> usize {
+        self.root
+    }
+
+    /// The `satp` value selecting this address space (sv39 mode).
+    #[must_use]
+    pub fn satp(&self) -> u64 {
+        SATP_MODE_SV39 | (self.root as u64 >> 12)
+    }
+
+    /// Maps `[va, va+size)` -> `[pa, ...)` with `flags`, allocating intermediate
+    /// tables as needed.
+    pub fn map(&mut self, va: usize, pa: usize, size: usize, flags: u64) {
+        map_region(self.root, va, pa, size, flags);
+    }
+
+    /// Unmaps `[va, va+size)` by clearing leaf PTEs and flushing the TLB. The
+    /// backing physical pages and intermediate tables are left intact (the
+    /// caller owns the pages; `destroy` reclaims the tables).
+    pub fn unmap(&mut self, va: usize, size: usize) {
+        let mut done = 0usize;
+        while done < size {
+            let cva = va + done;
+            if let Some((entry, level)) = self.leaf_entry(cva) {
+                // SAFETY: `entry` is a live leaf PTE slot in this space's tables.
+                unsafe { *entry = 0 };
+                flush_tlb_page(cva);
+                done += 1usize << (12 + 9 * level);
+            } else {
+                done += FRAME_SIZE;
+            }
+        }
+    }
+
+    /// Translates `va` within this space without activating it.
+    #[must_use]
+    pub fn translate(&self, va: usize) -> Option<(usize, u64)> {
+        translate_in(self.root, va)
+    }
+
+    /// Switches the current hart to this address space.
+    ///
+    /// # Safety
+    /// This space must map everything the current execution path needs (PC,
+    /// stack, the trap vector, and any data touched before the next switch).
+    pub unsafe fn activate(&self) {
+        let satp = self.satp();
+        // SAFETY: caller guarantees the space maps the live execution context.
+        unsafe {
+            asm!("csrw satp, {0}", "sfence.vma", in(reg) satp, options(nostack));
+        }
+    }
+
+    /// Frees the page-table frames (root + intermediates) and returns the count
+    /// freed. Backing leaf pages are NOT freed — the mapper owns them.
+    pub fn destroy(self) -> usize {
+        free_table_tree(self.root, 2)
+    }
+
+    /// Returns the leaf PTE slot and its level for `va`, if mapped.
+    fn leaf_entry(&self, va: usize) -> Option<(*mut u64, usize)> {
+        let mut table = self.root;
+        let mut level: i32 = 2;
+        while level >= 0 {
+            let entry = (table + vpn(va, level as usize) * 8) as *mut u64;
+            // SAFETY: walking this space's live page-table frames.
+            let pte = unsafe { *entry };
+            if pte & PTE_V == 0 {
+                return None;
+            }
+            if pte & (PTE_R | PTE_W | PTE_X) != 0 {
+                return Some((entry, level as usize));
+            }
+            table = (((pte >> 10) & ((1 << 44) - 1)) << 12) as usize;
+            level -= 1;
+        }
+        None
+    }
+}
+
+/// Recursively frees the intermediate page tables under `table` (a node at
+/// sv39 `level`) and `table` itself. Leaf entries' backing pages are not freed.
+fn free_table_tree(table: usize, level: usize) -> usize {
+    let mut freed = 0usize;
+    if level > 0 {
+        for i in 0..ENTRIES {
+            // SAFETY: reading a PTE slot in a live table frame.
+            let pte = unsafe { *((table + i * 8) as *const u64) };
+            if pte & PTE_V != 0 && pte & (PTE_R | PTE_W | PTE_X) == 0 {
+                let child = (((pte >> 10) & ((1 << 44) - 1)) << 12) as usize;
+                freed += free_table_tree(child, level - 1);
+            }
+        }
+    }
+    frame::free(table);
+    freed + 1
 }
 
 /// Decodes a PTE's R/W/X permission bits.
