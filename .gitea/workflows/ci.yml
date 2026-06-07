@@ -66,6 +66,7 @@ jobs:
             -display none -monitor none -serial "file:$log" \
             -drive file="$nvme_img",if=none,id=nvm0,format=raw \
             -device nvme,serial=feox0,drive=nvm0 \
+            -global virtio-mmio.force-legacy=false \
             -netdev user,id=net0 -device virtio-net-device,netdev=net0 \
             -bios default -kernel "$elf" -no-reboot </dev/null >/dev/null 2>&1 || true
           echo "----- serial log -----"; cat "$log"; echo "----------------------"

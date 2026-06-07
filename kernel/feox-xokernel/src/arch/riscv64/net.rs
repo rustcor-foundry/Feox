@@ -206,15 +206,23 @@ impl VirtioNet {
             crate::kprintln!("[feox] net: no virtio-net transport found");
             return None;
         }
+        let version = mmio_r(base, R_VERSION);
         crate::kprintln!(
             "[feox] net: virtio-mmio @ {:#x} version={} qnummax={}",
             base,
-            mmio_r(base, R_VERSION),
+            version,
             {
                 mmio_w(base, R_QUEUE_SEL, 0);
                 mmio_r(base, R_QUEUE_NUM_MAX)
             }
         );
+        // This driver implements only the modern (version 2) transport. QEMU's
+        // virtio-mmio defaults to legacy; run it with
+        // `-global virtio-mmio.force-legacy=false`.
+        if version != 2 {
+            crate::kprintln!("[feox] net: legacy virtio-mmio (v{version}) unsupported", version = version);
+            return None;
+        }
 
         // Reset, then ACKNOWLEDGE + DRIVER.
         mmio_w(base, R_STATUS, 0);
