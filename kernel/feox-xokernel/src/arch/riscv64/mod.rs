@@ -8,6 +8,7 @@
 pub mod cpu;
 pub mod fdt;
 pub mod frame;
+pub mod net;
 pub mod nvme;
 pub mod paging;
 pub mod panic;
@@ -86,8 +87,12 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // device-tree-derived driver for later.
     if on_qemu {
         discover_pci();
+        // Milestone 8a: bring up virtio-net and prove the link with an ARP
+        // round-trip. On real hardware this is the JH7110 dwmac driver behind
+        // the same NetDevice interface.
+        net::selftest();
     } else {
-        crate::kprintln!("[feox] pcie: skipped (non-QEMU platform; DT-derived driver TODO)");
+        crate::kprintln!("[feox] pcie/net: skipped (non-QEMU; DT-derived drivers TODO)");
     }
 
     // Milestone 7: bring up the secondary harts via the SBI HSM extension.
