@@ -1,7 +1,8 @@
 # riscv64 Port Plan
 
-Status: **Milestone 1 complete** — Feox boots in S-mode under QEMU `virt`,
-prints its banner over the SBI console, and parks the boot hart.
+Status: **Milestone 2 complete** — Feox boots in S-mode under QEMU `virt`,
+prints its banner over the SBI console, installs a supervisor trap vector,
+takes and recovers from a deliberate `ebreak`, and parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -53,8 +54,12 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
 ## Roadmap (incremental, each builds on the last)
 
 1. **Banner boot** ✅ — S-mode `_start`, SBI `console_putchar`, `wfi` halt.
-2. **Trap handling** — `stvec`/`scause`/`sepc` + trap frame; route exceptions
-   and the timer interrupt; this is the riscv64 analogue of the x86 IDT setup.
+2. **Trap handling** ✅ — direct-mode `stvec` -> `trap_entry` (saves a 31-GPR
+   `TrapFrame` + `sepc`/`sstatus`/`scause`/`stval`), Rust `trap_dispatch`
+   decodes `scause`, handles the breakpoint exception (advancing `sepc` past
+   the trapping instruction, RVC-length-aware) and resumes via `sret`;
+   everything else panics. Proven by a deliberate `ebreak` in the boot path.
+   Timer/external interrupts and the `ecall` syscall path build on this.
 3. **sv39 paging** — page-table walk/build, `satp` switch, `sfence.vma`
    invalidation. Wires up `arch::invalidate_page` /
    `arch::switch_page_table_root_and_jump` for riscv64.
