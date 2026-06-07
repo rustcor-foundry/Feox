@@ -1,9 +1,10 @@
 # riscv64 Port Plan
 
-Status: **Milestone 3 complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 4a complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
-recovers from a deliberate `ebreak`, enables sv39 paging via an identity map
-and keeps running translated, then parks the boot hart.
+recovers from a deliberate `ebreak`, enables sv39 paging via an identity map,
+parses the device tree for the real RAM map, stands up a physical frame
+allocator, runs an alloc/free self-check, then parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -69,6 +70,12 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    section permissions arrive with the memory pass.
 4. **Memory** — device-tree intake (parse `a1` DTB for RAM regions) replacing
    the x86 ACPI/RSDP + loader memory map; un-gate `memory`.
+   - **4a** ✅ — hand-rolled FDT reader (`fdt.rs`) finds the `/memory` region;
+     a bump + free-list physical frame allocator (`frame.rs`) manages the RAM
+     between the kernel image and the DTB. Proven by an alloc/free self-check.
+   - **4b** (next) — multi-level sv39 walker + per-section permissions backed by
+     the frame allocator; reserve the memory-reservation block; begin
+     un-gating the shared `memory` module for riscv64.
 5. **Runtime** — bring `feox-async` up on riscv64; re-enable the `runtime`
    feature for this target.
 6. **NVMe** — QEMU `virt` exposes an NVMe device; exercise `feox-nvme` over it.
