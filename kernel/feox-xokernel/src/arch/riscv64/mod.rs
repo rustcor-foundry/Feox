@@ -108,7 +108,7 @@ fn init_memory(dtb: usize) -> bool {
         crate::kprintln!("[feox] WARNING: invalid or missing DTB at {:#x}", dtb);
         return false;
     };
-    let on_qemu = tree.root_compatible_contains(b"qemu");
+    let on_qemu = tree.machine_is_qemu();
     crate::kprintln!(
         "[feox] dtb: base={:#x} size={} bytes (machine={})",
         dtb,

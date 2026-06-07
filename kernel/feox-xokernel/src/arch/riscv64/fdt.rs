@@ -50,11 +50,11 @@ impl Fdt {
         self.total_size
     }
 
-    /// Returns true if the root node's `compatible` property contains `needle`
-    /// (e.g. `b"qemu"` to detect the QEMU virt machine). The property is a list
-    /// of NUL-separated strings; this searches the raw bytes.
+    /// Returns true if the root node's `prop` property value contains `needle`.
+    /// String properties are NUL-terminated (lists are NUL-separated); this
+    /// searches the raw value bytes.
     #[must_use]
-    pub fn root_compatible_contains(&self, needle: &[u8]) -> bool {
+    pub fn root_prop_contains(&self, prop: &[u8], needle: &[u8]) -> bool {
         let mut p = offset(self.base, self.struct_off as usize);
         let strings = offset(self.base, self.strings_off as usize);
         let mut depth: i32 = 0;
@@ -77,7 +77,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
-                    if depth == 1 && bytes_eq(offset(strings, nameoff), b"compatible") {
+                    if depth == 1 && bytes_eq(offset(strings, nameoff), prop) {
                         return bytes_contain(value, len, needle);
                     }
                     p = offset(p, align4(len));
@@ -88,6 +88,14 @@ impl Fdt {
             }
         }
         false
+    }
+
+    /// Detects the QEMU `virt` machine. QEMU sets the root `compatible` to
+    /// `"riscv-virtio"` and the `model` to `"riscv-virtio,qemu"`, so check both.
+    #[must_use]
+    pub fn machine_is_qemu(&self) -> bool {
+        self.root_prop_contains(b"compatible", b"riscv-virtio")
+            || self.root_prop_contains(b"model", b"qemu")
     }
 
     /// Returns the first `/memory` region as `(base, size)` in bytes, decoding
