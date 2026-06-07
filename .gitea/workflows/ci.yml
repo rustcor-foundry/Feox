@@ -76,6 +76,8 @@ jobs:
             || { echo "::error::Feox riscv64 sv39-paging marker not found"; exit 1; }
           grep -q 'frame allocator online' "$log" \
             || { echo "::error::Feox riscv64 frame-allocator marker not found"; exit 1; }
+          grep -q 'kernel heap online' "$log" \
+            || { echo "::error::Feox riscv64 kernel-heap marker not found"; exit 1; }
           grep -q 'sv39 walker' "$log" \
             || { echo "::error::Feox riscv64 sv39-walker marker not found"; exit 1; }
           grep -q 'text  : va=.* \[r-x\]' "$log" \

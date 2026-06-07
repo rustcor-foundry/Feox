@@ -8,6 +8,11 @@
 #[cfg(test)]
 extern crate std;
 
+// riscv64 has a global allocator (arch::riscv64::heap), so `alloc` is available
+// there. The x86_64 path stays alloc-free for now.
+#[cfg(target_arch = "riscv64")]
+extern crate alloc;
+
 pub mod arch;
 pub mod console;
 

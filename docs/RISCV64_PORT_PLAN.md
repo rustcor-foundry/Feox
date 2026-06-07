@@ -160,8 +160,25 @@ Still required before it can boot on the RV:
    a few ticks. First interrupt source handled — foundation for preemption and
    interrupt-driven I/O.
 
+10. **Kernel heap** ✅ — a hand-rolled first-fit linked-list allocator
+    (`heap.rs`) over an 8 MiB region carved from the frame pool, wired as the
+    `#[global_allocator]` (spinlock-guarded). `alloc` (Box/Vec/collections) now
+    works on riscv64. Limitation: no free-coalescing / front-padding reclaim yet
+    (documented follow-up). First rung of the Route-B exokernel build-out.
+
+## Toward apps (Route B — capability-based U-mode, hand-rolled)
+
+Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
+Ladder after the heap: VM abstraction (create/map address spaces) -> U-mode
+execution (`sret`/`ecall`/`sscratch`) -> ASI syscall dispatch + capability table
+(un-gate `capability.rs`, wire `feox-asi`) -> process/thread + preemptive
+scheduler (m9 timer) -> ELF loader -> libOS + app delivery -> first U-mode app;
+then NIC-as-capability + hand-rolled TCP in the network-service app, then the
+RV2 hardware tail.
+
 ## Other follow-ups
 
+- Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.
 - **PLIC** (external interrupts) — claim/complete, route a device IRQ
   (virtio-net/UART) so RX/completions are interrupt-driven instead of polled.
 - Integrate `feox-nvme` (enable the `storage` feature) to replace the
