@@ -53,13 +53,15 @@ jobs:
         run: |
           set -euo pipefail
           elf=target/riscv64gc-unknown-none-elf/debug/feox-xokernel
-          # The boot hart parks in wfi, so bound the run; capture serial and
-          # assert the bring-up banner reached the SBI console.
-          out=$(timeout -k 2 15 qemu-system-riscv64 \
+          log=$(mktemp)
+          # The boot hart parks in wfi, so bound the run. Capture serial to a
+          # file (robust under CI's non-interactive stdio, unlike -serial stdio)
+          # and assert the bring-up banner reached the SBI console.
+          timeout -k 2 15 qemu-system-riscv64 \
             -machine virt -cpu rv64 -smp 1 -m 256M \
-            -display none -monitor none -serial stdio \
-            -bios default -kernel "$elf" -no-reboot || true)
-          echo "$out"
-          echo "$out" | grep -q 'riscv64 bring-up alive' \
+            -display none -monitor none -serial "file:$log" \
+            -bios default -kernel "$elf" -no-reboot </dev/null >/dev/null 2>&1 || true
+          echo "----- serial log -----"; cat "$log"; echo "----------------------"
+          grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
           echo "riscv64 smoke-boot marker observed."
