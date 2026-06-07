@@ -1,13 +1,13 @@
 # riscv64 Port Plan
 
-Status: **Milestone 6b complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 6c complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
 recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
 tree for the real RAM map, stands up a physical frame allocator, builds a
 fine-grained kernel address space with per-section W^X permissions, drives the
-portable `feox-async` executor, enumerates PCIe over ECAM, assigns the NVMe
-controller's BAR and brings it to the enabled/ready state, and parks the boot
-hart.
+portable `feox-async` executor, enumerates PCIe over ECAM, brings the NVMe
+controller to ready, completes an admin Identify command round-trip (reading
+the controller's model/serial via DMA), and parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -100,9 +100,14 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
      window, read CAP/VS, run the reset/enable handshake (clear CC.EN -> wait
      CSTS.RDY=0 -> program AQA/ASQ/ACQ admin queues -> set CC.EN -> wait
      CSTS.RDY=1). Self-contained MMIO; no `feox-nvme` yet.
-   - **6c** (next) — admin Identify + an I/O queue + a real block read via
-     `feox-nvme` (enable the `storage` feature); needs doorbells (CAP.DSTRD)
-     and completion-queue phase handling.
+   - **6c** ✅ — admin Identify Controller round-trip: build a 64-byte SQE, ring
+     the SQ doorbell, the controller DMAs the 4 KiB identify structure, poll the
+     CQ phase bit, check status, advance + ring the CQ doorbell, and read back
+     the model/serial strings. Proves the full command/completion/DMA cycle
+     (doorbells at `BAR + 0x1000`, stride `4 << DSTRD`).
+   - **6d** (next) — Create I/O CQ/SQ (admin commands) + a real block Read into
+     a frame; integrate `feox-nvme` (enable the `storage` feature) for the
+     queue/inflight logic.
 7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
    replacing the x86 AP trampoline.
 
