@@ -229,6 +229,14 @@ pub fn build_kernel_address_space(frame_pool_end: usize, dtb: usize, dtb_size: u
         super::pci::ECAM_SIZE,
         PTE_R | PTE_W,
     );
+    // PCIe MMIO window, where the kernel assigns device BARs (milestone 6b).
+    map_region(
+        root,
+        super::pci::MMIO_BASE,
+        super::pci::MMIO_BASE,
+        super::pci::MMIO_MAP_SIZE,
+        PTE_R | PTE_W,
+    );
 
     let satp = SATP_MODE_SV39 | (root as u64 >> 12);
     // SAFETY: the new map covers PC (text), stack/data, the frame pool, and the
