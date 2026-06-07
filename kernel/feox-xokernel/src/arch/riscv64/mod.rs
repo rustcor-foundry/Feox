@@ -6,6 +6,7 @@
 //! path that bypasses the x86-shaped `boot::bootstrap` flow.
 
 pub mod cpu;
+pub mod paging;
 pub mod panic;
 pub mod serial;
 pub mod trap;
@@ -42,6 +43,15 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         core::arch::asm!("ebreak");
     }
     crate::kprintln!("[feox] breakpoint trap handled; execution resumed.");
+
+    // Milestone 3: switch on sv39 paging via an identity map. Printing after
+    // the `satp` switch proves instruction fetch, the stack, and the SBI
+    // console all keep working under hardware address translation.
+    paging::enable_identity_map();
+    crate::kprintln!(
+        "[feox] sv39 paging enabled (satp={:#x}); running translated.",
+        paging::read_satp()
+    );
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

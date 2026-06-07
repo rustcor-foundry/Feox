@@ -187,9 +187,43 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
 
     // Anything else is unexpected at this stage; surface it loudly.
     panic!(
-        "unhandled riscv64 trap: interrupt={} code={} scause={:#x} sepc={:#x} stval={:#x}",
-        is_interrupt, code, frame.scause, frame.sepc, frame.stval
+        "unhandled riscv64 trap: {} (interrupt={} code={}) scause={:#x} sepc={:#x} stval={:#x}",
+        cause_name(is_interrupt, code),
+        is_interrupt,
+        code,
+        frame.scause,
+        frame.sepc,
+        frame.stval
     );
+}
+
+/// Human-readable name for a trap cause, for diagnostics.
+fn cause_name(is_interrupt: bool, code: usize) -> &'static str {
+    if is_interrupt {
+        match code {
+            1 => "supervisor software interrupt",
+            5 => "supervisor timer interrupt",
+            9 => "supervisor external interrupt",
+            _ => "interrupt",
+        }
+    } else {
+        match code {
+            0 => "instruction address misaligned",
+            1 => "instruction access fault",
+            2 => "illegal instruction",
+            3 => "breakpoint",
+            4 => "load address misaligned",
+            5 => "load access fault",
+            6 => "store/AMO address misaligned",
+            7 => "store/AMO access fault",
+            8 => "environment call from U-mode",
+            9 => "environment call from S-mode",
+            12 => "instruction page fault",
+            13 => "load page fault",
+            15 => "store/AMO page fault",
+            _ => "exception",
+        }
+    }
 }
 
 /// Returns the byte length of the instruction at `pc` (2 for compressed RVC,

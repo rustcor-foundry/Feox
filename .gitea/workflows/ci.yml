@@ -64,6 +64,8 @@ jobs:
           echo "----- serial log -----"; cat "$log"; echo "----------------------"
           grep -q 'breakpoint trap handled' "$log" \
             || { echo "::error::Feox riscv64 trap-handling marker not found"; exit 1; }
+          grep -q 'sv39 paging enabled' "$log" \
+            || { echo "::error::Feox riscv64 sv39-paging marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot markers observed (boot + trap handling)."
+          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 paging)."

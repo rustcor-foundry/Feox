@@ -1,8 +1,9 @@
 # riscv64 Port Plan
 
-Status: **Milestone 2 complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 3 complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
-takes and recovers from a deliberate `ebreak`, and parks the boot hart.
+recovers from a deliberate `ebreak`, enables sv39 paging via an identity map
+and keeps running translated, then parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -60,9 +61,12 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    the trapping instruction, RVC-length-aware) and resumes via `sret`;
    everything else panics. Proven by a deliberate `ebreak` in the boot path.
    Timer/external interrupts and the `ecall` syscall path build on this.
-3. **sv39 paging** — page-table walk/build, `satp` switch, `sfence.vma`
-   invalidation. Wires up `arch::invalidate_page` /
-   `arch::switch_page_table_root_and_jump` for riscv64.
+3. **sv39 paging** ✅ — single root table of 1 GiB leaf gigapages
+   identity-mapping the low 4 GiB (device space RW, RAM RWX); `satp` switched to
+   sv39 with an `sfence.vma`, execution continues translated. `flush_tlb_all` /
+   `flush_tlb_page` provide the `sfence.vma` primitives behind a future
+   `arch::invalidate_page`. Next: a multi-level walker + frame allocator + per
+   section permissions arrive with the memory pass.
 4. **Memory** — device-tree intake (parse `a1` DTB for RAM regions) replacing
    the x86 ACPI/RSDP + loader memory map; un-gate `memory`.
 5. **Runtime** — bring `feox-async` up on riscv64; re-enable the `runtime`
