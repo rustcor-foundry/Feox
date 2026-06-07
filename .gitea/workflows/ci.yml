@@ -39,3 +39,27 @@ jobs:
         with:
           targets: x86_64-unknown-uefi
       - run: cargo loader
+
+  kernel-riscv:
+    name: Build + smoke-boot riscv64 kernel
+    runs-on: lx-ws01
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-none-elf
+      - run: cargo kernel-riscv
+      - name: Smoke-boot under QEMU (OpenSBI -> S-mode banner)
+        run: |
+          set -euo pipefail
+          elf=target/riscv64gc-unknown-none-elf/debug/feox-xokernel
+          # The boot hart parks in wfi, so bound the run; capture serial and
+          # assert the bring-up banner reached the SBI console.
+          out=$(timeout -k 2 15 qemu-system-riscv64 \
+            -machine virt -cpu rv64 -smp 1 -m 256M \
+            -display none -monitor none -serial stdio \
+            -bios default -kernel "$elf" -no-reboot || true)
+          echo "$out"
+          echo "$out" | grep -q 'riscv64 bring-up alive' \
+            || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
+          echo "riscv64 smoke-boot marker observed."
