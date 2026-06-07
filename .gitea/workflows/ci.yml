@@ -82,6 +82,8 @@ jobs:
             || { echo "::error::Feox riscv64 async-runtime marker not found"; exit 1; }
           grep -q 'NVMe controller discovered' "$log" \
             || { echo "::error::Feox riscv64 PCIe/NVMe discovery marker not found"; exit 1; }
+          grep -q 'NVMe controller enabled' "$log" \
+            || { echo "::error::Feox riscv64 NVMe controller-enable marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async + pcie)."
+          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async + pcie + nvme)."

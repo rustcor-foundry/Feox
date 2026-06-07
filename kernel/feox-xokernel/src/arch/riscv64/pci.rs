@@ -13,7 +13,7 @@
 //! BAR assignment, and the admin/IO queues land in 6b. The ECAM window must be
 //! mapped before use (see `paging::build_kernel_address_space`).
 
-use core::ptr::read_volatile;
+use core::ptr::{read_volatile, write_volatile};
 
 /// QEMU virt PCIe ECAM base (`pci-host-ecam-generic`).
 ///
@@ -22,6 +22,18 @@ use core::ptr::read_volatile;
 pub const ECAM_BASE: usize = 0x3000_0000;
 /// ECAM window size on QEMU virt (256 buses x 1 MiB).
 pub const ECAM_SIZE: usize = 0x1000_0000;
+
+/// QEMU virt 32-bit PCIe MMIO window base, where device BARs are placed (no
+/// firmware ran enumeration, so the kernel assigns BARs from here).
+pub const MMIO_BASE: usize = 0x4000_0000;
+/// Portion of the MMIO window the kernel maps for BARs (the full window is
+/// 1 GiB; only the low part is needed for the controllers we bring up).
+pub const MMIO_MAP_SIZE: usize = 0x40_0000;
+
+/// PCI command register: Memory Space Enable bit.
+const CMD_MEMORY_SPACE: u32 = 1 << 1;
+/// PCI command register: Bus Master Enable bit (required for DMA).
+const CMD_BUS_MASTER: u32 = 1 << 2;
 
 /// NVMe class code: mass storage (0x01) / NVM Express (0x08) / prog-if 0x02.
 pub const CLASS_NVME: u32 = 0x01_0802;
@@ -98,4 +110,53 @@ pub fn scan_for_class(target: u32) -> Option<PciDevice> {
 #[must_use]
 pub fn bar_raw(device: &PciDevice, index: u8) -> u32 {
     config_read32(device.bus, device.device, device.function, 0x10 + u16::from(index) * 4)
+}
+
+/// Writes a 32-bit config-space register (offset must be 4-byte aligned).
+fn config_write32(bus: u8, device: u8, function: u8, offset: u16, value: u32) {
+    // SAFETY: the ECAM window is mapped R/W as device memory; the address lies
+    // within it. Config writes program the device's header.
+    unsafe { write_volatile(ecam_addr(bus, device, function, offset) as *mut u32, value) }
+}
+
+/// Determines the size of the 64-bit memory BAR pair at `index` by writing all
+/// ones and reading back the writable bits, restoring the original value.
+#[must_use]
+pub fn size_bar64(device: &PciDevice, index: u8) -> u64 {
+    let off = 0x10 + u16::from(index) * 4;
+    let (b, d, f) = (device.bus, device.device, device.function);
+    let orig_lo = config_read32(b, d, f, off);
+    let orig_hi = config_read32(b, d, f, off + 4);
+
+    config_write32(b, d, f, off, 0xFFFF_FFFF);
+    config_write32(b, d, f, off + 4, 0xFFFF_FFFF);
+    let mask_lo = config_read32(b, d, f, off);
+    let mask_hi = config_read32(b, d, f, off + 4);
+
+    config_write32(b, d, f, off, orig_lo);
+    config_write32(b, d, f, off + 4, orig_hi);
+
+    // Clear the low type bits, combine, then size = ~mask + 1.
+    let mask = ((u64::from(mask_hi)) << 32) | (u64::from(mask_lo) & !0xF_u64);
+    if mask == 0 { 0 } else { (!mask).wrapping_add(1) }
+}
+
+/// Assigns the 64-bit memory BAR pair at `index` to physical address `base`
+/// (which must be aligned to the BAR's size), preserving the low type bits.
+pub fn set_bar64(device: &PciDevice, index: u8, base: u64) {
+    let off = 0x10 + u16::from(index) * 4;
+    let (b, d, f) = (device.bus, device.device, device.function);
+    let type_bits = config_read32(b, d, f, off) & 0xF;
+    config_write32(b, d, f, off, (base as u32 & !0xF) | type_bits);
+    config_write32(b, d, f, off + 4, (base >> 32) as u32);
+}
+
+/// Enables memory-space decoding and bus mastering (DMA) for a device by
+/// setting the corresponding bits in its command register.
+pub fn enable_memory_and_bus_master(device: &PciDevice) {
+    let (b, d, f) = (device.bus, device.device, device.function);
+    // Bits 31:16 are the status register (RW1C); writing the read-back value
+    // leaves it unchanged while we set the command bits in 15:0.
+    let current = config_read32(b, d, f, 0x04);
+    config_write32(b, d, f, 0x04, current | CMD_MEMORY_SPACE | CMD_BUS_MASTER);
 }

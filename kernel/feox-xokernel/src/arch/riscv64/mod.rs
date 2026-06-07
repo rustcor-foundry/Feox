@@ -8,6 +8,7 @@
 pub mod cpu;
 pub mod fdt;
 pub mod frame;
+pub mod nvme;
 pub mod paging;
 pub mod panic;
 pub mod pci;
@@ -217,6 +218,9 @@ fn discover_pci() {
             );
             crate::kprintln!("[feox]   BAR0 raw={:#010x}", pci::bar_raw(&dev, 0));
             crate::kprintln!("[feox] milestone 6a: PCIe ECAM up; NVMe controller discovered.");
+
+            // Milestone 6b: assign the BAR and bring the controller to ready.
+            let _ = nvme::init(&dev);
         }
         None => {
             crate::kprintln!("[feox] pcie: no NVMe controller found on the root bus");

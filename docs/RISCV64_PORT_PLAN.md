@@ -1,12 +1,13 @@
 # riscv64 Port Plan
 
-Status: **Milestone 6a complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 6b complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
 recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
 tree for the real RAM map, stands up a physical frame allocator, builds a
 fine-grained kernel address space with per-section W^X permissions, drives the
-portable `feox-async` executor, enumerates PCIe over ECAM to discover the NVMe
-controller, and parks the boot hart.
+portable `feox-async` executor, enumerates PCIe over ECAM, assigns the NVMe
+controller's BAR and brings it to the enabled/ready state, and parks the boot
+hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -94,10 +95,14 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
      and the raw BAR0. The ECAM window is mapped R/W in the kernel address
      space. First non-SBI device MMIO on riscv64. (ECAM base hardcoded for QEMU
      virt; DTB-derived on real hardware.)
-   - **6b** (next) — assign BAR0 from the PCIe MMIO window (no UEFI/U-Boot did
-     it), map controller registers, reset + enable, admin queue + Identify;
-     enable the `storage` feature to bring in `feox-nvme`.
-   - **6c** — I/O queue + a real block read via `feox-nvme`.
+   - **6b** ✅ — assign the 64-bit BAR from the PCIe MMIO window (`nvme.rs` +
+     `pci::size_bar64`/`set_bar64`/`enable_memory_and_bus_master`), map the
+     window, read CAP/VS, run the reset/enable handshake (clear CC.EN -> wait
+     CSTS.RDY=0 -> program AQA/ASQ/ACQ admin queues -> set CC.EN -> wait
+     CSTS.RDY=1). Self-contained MMIO; no `feox-nvme` yet.
+   - **6c** (next) — admin Identify + an I/O queue + a real block read via
+     `feox-nvme` (enable the `storage` feature); needs doorbells (CAP.DSTRD)
+     and completion-queue phase handling.
 7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
    replacing the x86 AP trampoline.
 
