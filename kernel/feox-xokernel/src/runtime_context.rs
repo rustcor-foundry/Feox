@@ -640,8 +640,22 @@ mod tests {
     };
     use feox_asi::{CapHandle, CoreId, MapFlags, MappedRegion};
 
+    // These tests exercise the global bootstrap-context singleton (the
+    // `BOOTSTRAP_*` statics) and `reset_for_tests` zeroes all of it, so they
+    // must not run concurrently. `cargo test` runs tests in parallel threads by
+    // default; this mutex serializes every test in this module. Hold the
+    // returned guard for the whole test body. Poisoning is tolerated (a panic
+    // in one test already fails the run) so one failure doesn't cascade.
+    static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use]
+    fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        TEST_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn runtime_service_state_round_trips() {
+        let _serial = serial_guard();
         claim_bootstrap_context(CoreId(0));
         let service_state = RuntimeServiceState {
             owner_core: CoreId(0),
@@ -657,6 +671,7 @@ mod tests {
 
     #[test]
     fn runtime_service_report_round_trips() {
+        let _serial = serial_guard();
         claim_bootstrap_context(CoreId(0));
         let report = RuntimeServiceReport {
             kernel_window_bytes: 0x1b000,
@@ -671,6 +686,7 @@ mod tests {
 
     #[test]
     fn runtime_service_heartbeat_round_trips() {
+        let _serial = serial_guard();
         claim_bootstrap_context(CoreId(0));
         let heartbeat = RuntimeServiceHeartbeat {
             beats: 1,
@@ -685,6 +701,7 @@ mod tests {
 
     #[test]
     fn runtime_readiness_round_trips() {
+        let _serial = serial_guard();
         claim_bootstrap_context(CoreId(0));
         let readiness = RuntimeReadinessState {
             ready: true,
@@ -699,6 +716,7 @@ mod tests {
 
     #[test]
     fn runtime_ready_summary_round_trips() {
+        let _serial = serial_guard();
         claim_bootstrap_context(CoreId(0));
         let summary = RuntimeReadySummary {
             active_root: 0x124000,
@@ -713,6 +731,7 @@ mod tests {
 
     #[test]
     fn runtime_service_commands_round_trip_in_fifo_order() {
+        let _serial = serial_guard();
         claim_bootstrap_context(CoreId(0));
         assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshSnapshot), Ok(()));
         assert_eq!(enqueue_command(RuntimeServiceCommand::RefreshAccounting), Ok(()));
@@ -752,6 +771,7 @@ mod tests {
 
     #[test]
     fn runtime_service_command_queue_rejects_overflow_and_recovers_after_drain() {
+        let _serial = serial_guard();
         reset_for_tests();
 
         assert_eq!(
@@ -817,6 +837,7 @@ mod tests {
 
     #[test]
     fn retained_events_roll_forward_in_oldest_to_newest_order() {
+        let _serial = serial_guard();
         reset_for_tests();
 
         push_event("event-0");
@@ -847,6 +868,7 @@ mod tests {
 
     #[test]
     fn bootstrap_vm_mapping_round_trips_and_removes_by_region() {
+        let _serial = serial_guard();
         reset_for_tests();
         let mapping = BootstrapVmMapping {
             region: MappedRegion {
@@ -869,6 +891,7 @@ mod tests {
 
     #[test]
     fn bootstrap_vm_lookup_matches_handle_and_address() {
+        let _serial = serial_guard();
         reset_for_tests();
         let mapping = BootstrapVmMapping {
             region: MappedRegion {

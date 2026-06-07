@@ -4,6 +4,10 @@
 
 //! Top-level facade for the Feox xokernel prototype.
 
+// The host test harness needs std; the kernel itself stays no_std.
+#[cfg(test)]
+extern crate std;
+
 pub mod arch;
 pub mod console;
 
