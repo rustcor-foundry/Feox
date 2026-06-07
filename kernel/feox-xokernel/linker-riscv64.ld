@@ -19,18 +19,24 @@ SECTIONS
 
     .text : ALIGN(4K)
     {
+        __stext = .;
         KEEP(*(.text.boot))
         *(.text .text.*)
     }
 
+    /* Each section is 4 KiB-aligned so the kernel can be mapped with
+       per-section sv39 permissions (text R-X, rodata R--, data/bss RW-)
+       without two permission classes sharing a page. */
     .rodata : ALIGN(4K)
     {
+        __srodata = .;
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     }
 
     .data : ALIGN(4K)
     {
+        __sdata = .;
         *(.data .data.*)
         *(.sdata .sdata.*)
     }
