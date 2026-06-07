@@ -54,12 +54,18 @@ jobs:
           set -euo pipefail
           elf=target/riscv64gc-unknown-none-elf/debug/feox-xokernel
           log=$(mktemp)
+          # Backing image so QEMU exposes an NVMe controller on the PCIe bus
+          # for the kernel's milestone-6 device discovery.
+          nvme_img=$(mktemp)
+          truncate -s 16M "$nvme_img"
           # The boot hart parks in wfi, so bound the run. Capture serial to a
           # file (robust under CI's non-interactive stdio, unlike -serial stdio)
           # and assert the bring-up banner reached the SBI console.
           timeout -k 2 15 qemu-system-riscv64 \
             -machine virt -cpu rv64 -smp 1 -m 256M \
             -display none -monitor none -serial "file:$log" \
+            -drive file="$nvme_img",if=none,id=nvm0,format=raw \
+            -device nvme,serial=feox0,drive=nvm0 \
             -bios default -kernel "$elf" -no-reboot </dev/null >/dev/null 2>&1 || true
           echo "----- serial log -----"; cat "$log"; echo "----------------------"
           grep -q 'breakpoint trap handled' "$log" \
@@ -74,6 +80,8 @@ jobs:
             || { echo "::error::Feox riscv64 kernel text is not mapped r-x (W^X check)"; exit 1; }
           grep -q 'feox-async executor drained' "$log" \
             || { echo "::error::Feox riscv64 async-runtime marker not found"; exit 1; }
+          grep -q 'NVMe controller discovered' "$log" \
+            || { echo "::error::Feox riscv64 PCIe/NVMe discovery marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async)."
+          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async + pcie)."

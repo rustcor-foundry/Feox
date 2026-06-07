@@ -1,12 +1,12 @@
 # riscv64 Port Plan
 
-Status: **Milestone 5 complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 6a complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
 recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
 tree for the real RAM map, stands up a physical frame allocator, builds a
 fine-grained kernel address space with per-section W^X permissions, drives the
-portable `feox-async` executor (two self-waking tasks run to completion), and
-parks the boot hart.
+portable `feox-async` executor, enumerates PCIe over ECAM to discover the NVMe
+controller, and parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -88,7 +88,16 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    executor) builds for riscv64 with the `runtime` feature on; `runtime.rs`
    spawns two self-waking `Yield` tasks on a `SingleCoreExecutor` and runs them
    to completion, proving the executor schedules futures on riscv64.
-6. **NVMe** — QEMU `virt` exposes an NVMe device; exercise `feox-nvme` over it.
+6. **NVMe** — QEMU `virt` exposes an NVMe device (`-device nvme`); exercise it.
+   - **6a** ✅ — memory-mapped ECAM config access (`pci.rs`); enumerate the root
+     bus, find the NVMe controller (class `0x010802`), read vendor/device/class
+     and the raw BAR0. The ECAM window is mapped R/W in the kernel address
+     space. First non-SBI device MMIO on riscv64. (ECAM base hardcoded for QEMU
+     virt; DTB-derived on real hardware.)
+   - **6b** (next) — assign BAR0 from the PCIe MMIO window (no UEFI/U-Boot did
+     it), map controller registers, reset + enable, admin queue + Identify;
+     enable the `storage` feature to bring in `feox-nvme`.
+   - **6c** — I/O queue + a real block read via `feox-nvme`.
 7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
    replacing the x86 AP trampoline.
 
