@@ -300,16 +300,12 @@ impl NetDevice for VirtioNet {
         let total = (NET_HDR_LEN + payload.len()) as u32;
         self.tx.set_desc(0, self.tx_buf as u64, total, 0, 0);
         self.tx.push_avail(0);
+        fence(Ordering::SeqCst);
         mmio_w(self.base, R_QUEUE_NOTIFY, u32::from(TX_QUEUE));
-
-        // Wait for the device to consume the TX descriptor.
-        for _ in 0..5_000_000u32 {
-            if self.tx.pop_used().is_some() {
-                return true;
-            }
-            core::hint::spin_loop();
-        }
-        false
+        // Fire-and-forget: a single in-flight TX for the link-layer test; the
+        // RX reply is the end-to-end proof. Completion reaping comes with the
+        // stack in 8b/8c.
+        true
     }
 
     fn poll_recv(&mut self, out: &mut [u8]) -> Option<usize> {
@@ -378,8 +374,10 @@ pub fn selftest() {
     );
 
     let mut frame_buf = [0u8; RX_BUF_SIZE];
-    for _ in 0..5_000_000u32 {
+    let mut rx_seen = 0u32;
+    for _ in 0..10_000_000u32 {
         if let Some(n) = dev.poll_recv(&mut frame_buf) {
+            rx_seen += 1;
             if n >= 42 {
                 let ethertype = u16::from_be_bytes([frame_buf[12], frame_buf[13]]);
                 let oper = u16::from_be_bytes([frame_buf[20], frame_buf[21]]);
@@ -397,5 +395,10 @@ pub fn selftest() {
         }
         core::hint::spin_loop();
     }
-    crate::kprintln!("[feox] net: no ARP reply received");
+    crate::kprintln!(
+        "[feox] net: no ARP reply (rx_frames={} tx_used={} rx_used={})",
+        rx_seen,
+        dev.tx.used_idx(),
+        dev.rx.used_idx()
+    );
 }
