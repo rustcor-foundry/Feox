@@ -117,15 +117,18 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    with an atomic online counter. Replaces the x86 AP trampoline. (CI runs QEMU
    `-smp 4`.)
 
-8. **Networking** — virtio-net now (CI), JH7110 `dwmac` on real hardware, both
-   behind the `net::NetDevice` trait so the IP/UDP stack is device-agnostic.
+8. **Networking** ✅ (QEMU) — virtio-net now (CI), JH7110 `dwmac` on real
+   hardware, both behind the `net::NetDevice` trait so the stack is
+   device-agnostic. ARP + IPv4/ICMP ping + UDP/DHCP lease all verified.
    - **8a** ✅ — virtio-net over virtio-mmio (`net.rs`): probe the transport,
      negotiate features (VERSION_1 + NET_MAC), set up split RX/TX virtqueues,
      and prove the link with an ARP round-trip (who-has the slirp gateway ->
      receive its MAC). Gated to QEMU; CI runs `-netdev user -device
      virtio-net-device`.
-   - **8b** (next) — minimal IPv4 + ICMP echo (ping).
-   - **8c** — UDP + DHCP (obtain a lease, UDP echo).
+   - **8b** ✅ — minimal IPv4 + ICMP: build an IP/ICMP echo request (with
+     Internet checksums) and ping the slirp gateway, matching the echo reply.
+   - **8c** ✅ — UDP + DHCP: a DISCOVER/OFFER/REQUEST/ACK exchange (UDP/BOOTP)
+     obtains a lease from slirp's DHCP server; `build_dhcp` + option parsing.
    - **8-hw** — JH7110 `dwmac` GMAC driver behind `NetDevice` (board-only; not
      QEMU-modellable).
 

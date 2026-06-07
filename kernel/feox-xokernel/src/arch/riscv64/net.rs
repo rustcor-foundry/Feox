@@ -326,9 +326,15 @@ impl NetDevice for VirtioNet {
         self.tx.push_avail(0);
         fence(Ordering::SeqCst);
         mmio_w(self.base, R_QUEUE_NOTIFY, u32::from(TX_QUEUE));
-        // Fire-and-forget: a single in-flight TX for the link-layer test; the
-        // RX reply is the end-to-end proof. Completion reaping comes with the
-        // stack in 8b/8c.
+        // Reap the completion so the single TX buffer/descriptor is free to
+        // reuse for the next packet (DHCP sends several). Best-effort: proceed
+        // even if no completion is seen within the bound.
+        for _ in 0..1_000_000u32 {
+            if self.tx.pop_used().is_some() {
+                break;
+            }
+            core::hint::spin_loop();
+        }
         true
     }
 
@@ -350,79 +356,306 @@ impl NetDevice for VirtioNet {
     }
 }
 
-// ---- link-layer self-test (ARP) --------------------------------------------
+// ---- minimal IPv4 / ICMP / UDP / DHCP stack --------------------------------
 
 /// QEMU user-net guest address and gateway (slirp defaults).
 const GUEST_IP: [u8; 4] = [10, 0, 2, 15];
 const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 
 const ETHERTYPE_ARP: u16 = 0x0806;
+const ETHERTYPE_IPV4: u16 = 0x0800;
+const IP_PROTO_ICMP: u8 = 1;
+const IP_PROTO_UDP: u8 = 17;
+const BROADCAST_MAC: [u8; 6] = [0xFF; 6];
+/// Ethernet header (14) + IPv4 (20) + UDP (8) — start of the BOOTP/DHCP body.
+const DHCP_OFFSET: usize = 42;
+const DHCP_MAGIC: [u8; 4] = [0x63, 0x82, 0x53, 0x63];
 
-/// Builds an ARP "who-has `target_ip`" request from `mac`/`GUEST_IP` into `out`,
-/// returning its length.
+/// Internet checksum (RFC 1071): one's-complement sum of 16-bit words.
+fn checksum16(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u32::from(u16::from_be_bytes([data[i], data[i + 1]]));
+        i += 2;
+    }
+    if i < data.len() {
+        sum += u32::from(data[i]) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Polls the device until a received frame satisfies `pred`, leaving it in
+/// `buf`; returns the frame length, or `None` after a bounded spin.
+fn poll_match(dev: &mut VirtioNet, buf: &mut [u8], pred: impl Fn(&[u8]) -> bool) -> Option<usize> {
+    for _ in 0..10_000_000u32 {
+        if let Some(n) = dev.poll_recv(buf) {
+            if pred(&buf[..n]) {
+                return Some(n);
+            }
+        }
+        core::hint::spin_loop();
+    }
+    None
+}
+
+/// Builds an ARP "who-has `target_ip`" request into `out`.
 fn build_arp_request(mac: [u8; 6], target_ip: [u8; 4], out: &mut [u8; 42]) {
-    out[0..6].copy_from_slice(&[0xFF; 6]); // dst: broadcast
-    out[6..12].copy_from_slice(&mac); // src
+    out[0..6].copy_from_slice(&BROADCAST_MAC);
+    out[6..12].copy_from_slice(&mac);
     out[12..14].copy_from_slice(&ETHERTYPE_ARP.to_be_bytes());
-    // ARP body.
     out[14..16].copy_from_slice(&1u16.to_be_bytes()); // htype: ethernet
-    out[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // ptype: IPv4
+    out[16..18].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes()); // ptype: IPv4
     out[18] = 6; // hlen
     out[19] = 4; // plen
     out[20..22].copy_from_slice(&1u16.to_be_bytes()); // oper: request
-    out[22..28].copy_from_slice(&mac); // sender HW
-    out[28..32].copy_from_slice(&GUEST_IP); // sender proto
-    out[32..38].copy_from_slice(&[0; 6]); // target HW (unknown)
-    out[38..42].copy_from_slice(&target_ip); // target proto
+    out[22..28].copy_from_slice(&mac);
+    out[28..32].copy_from_slice(&GUEST_IP);
+    out[32..38].copy_from_slice(&[0; 6]);
+    out[38..42].copy_from_slice(&target_ip);
 }
 
-/// Brings up virtio-net and performs an ARP round-trip with the gateway,
-/// proving link-layer TX and RX. Gated to QEMU by the caller.
+/// Resolves `target_ip` to a MAC via ARP (8a).
+fn arp_resolve(dev: &mut VirtioNet, target_ip: [u8; 4]) -> Option<[u8; 6]> {
+    let mut req = [0u8; 42];
+    build_arp_request(dev.mac(), target_ip, &mut req);
+    dev.send(&req);
+    let mut buf = [0u8; RX_BUF_SIZE];
+    poll_match(dev, &mut buf, |f| {
+        f.len() >= 42
+            && u16::from_be_bytes([f[12], f[13]]) == ETHERTYPE_ARP
+            && u16::from_be_bytes([f[20], f[21]]) == 2
+    })?;
+    let mut mac = [0u8; 6];
+    mac.copy_from_slice(&buf[22..28]);
+    Some(mac)
+}
+
+/// Sends an ICMP echo request to `dst_ip` (via `dst_mac`) and waits for the
+/// echo reply (8b).
+fn icmp_ping(dev: &mut VirtioNet, dst_mac: [u8; 6], dst_ip: [u8; 4]) -> bool {
+    let src_mac = dev.mac();
+    let mut pkt = [0u8; 42]; // eth(14) + ip(20) + icmp(8)
+    pkt[0..6].copy_from_slice(&dst_mac);
+    pkt[6..12].copy_from_slice(&src_mac);
+    pkt[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+    // IPv4 header (14..34).
+    pkt[14] = 0x45; // version 4, IHL 5
+    pkt[16..18].copy_from_slice(&28u16.to_be_bytes()); // total length
+    pkt[18..20].copy_from_slice(&1u16.to_be_bytes()); // id
+    pkt[22] = 64; // TTL
+    pkt[23] = IP_PROTO_ICMP;
+    pkt[26..30].copy_from_slice(&GUEST_IP);
+    pkt[30..34].copy_from_slice(&dst_ip);
+    let ip_csum = checksum16(&pkt[14..34]);
+    pkt[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+    // ICMP (34..42): echo request.
+    pkt[34] = 8;
+    pkt[38..40].copy_from_slice(&0xfe0fu16.to_be_bytes()); // id
+    pkt[40..42].copy_from_slice(&1u16.to_be_bytes()); // seq
+    let icmp_csum = checksum16(&pkt[34..42]);
+    pkt[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
+    dev.send(&pkt);
+
+    let mut buf = [0u8; RX_BUF_SIZE];
+    poll_match(dev, &mut buf, |f| {
+        if f.len() < 34 || u16::from_be_bytes([f[12], f[13]]) != ETHERTYPE_IPV4 {
+            return false;
+        }
+        if (f[14] >> 4) != 4 || f[23] != IP_PROTO_ICMP {
+            return false;
+        }
+        let ihl = ((f[14] & 0x0f) as usize) * 4;
+        f.len() >= 14 + ihl + 1 && f[14 + ihl] == 0 // echo reply
+    })
+    .is_some()
+}
+
+/// Builds an Ethernet/IPv4/UDP/DHCP packet into `out`, returning its length.
+fn build_dhcp(
+    mac: [u8; 6],
+    xid: u32,
+    msg_type: u8,
+    requested_ip: Option<[u8; 4]>,
+    server_id: Option<[u8; 4]>,
+    out: &mut [u8],
+) -> usize {
+    for b in out.iter_mut() {
+        *b = 0;
+    }
+    // Ethernet.
+    out[0..6].copy_from_slice(&BROADCAST_MAC);
+    out[6..12].copy_from_slice(&mac);
+    out[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
+    // BOOTP at DHCP_OFFSET.
+    let b = DHCP_OFFSET;
+    out[b] = 1; // op: BOOTREQUEST
+    out[b + 1] = 1; // htype: ethernet
+    out[b + 2] = 6; // hlen
+    out[b + 4..b + 8].copy_from_slice(&xid.to_be_bytes());
+    out[b + 10..b + 12].copy_from_slice(&0x8000u16.to_be_bytes()); // flags: broadcast
+    out[b + 28..b + 34].copy_from_slice(&mac); // chaddr
+    out[b + 236..b + 240].copy_from_slice(&DHCP_MAGIC);
+    // Options.
+    let mut o = b + 240;
+    out[o] = 53; // DHCP message type
+    out[o + 1] = 1;
+    out[o + 2] = msg_type;
+    o += 3;
+    out[o] = 55; // parameter request list: subnet, router, DNS
+    out[o + 1] = 3;
+    out[o + 2] = 1;
+    out[o + 3] = 3;
+    out[o + 4] = 6;
+    o += 5;
+    if let Some(ip) = requested_ip {
+        out[o] = 50;
+        out[o + 1] = 4;
+        out[o + 2..o + 6].copy_from_slice(&ip);
+        o += 6;
+    }
+    if let Some(sid) = server_id {
+        out[o] = 54;
+        out[o + 1] = 4;
+        out[o + 2..o + 6].copy_from_slice(&sid);
+        o += 6;
+    }
+    out[o] = 255; // end
+    o += 1;
+
+    let dhcp_len = o - b;
+    let udp_len = 8 + dhcp_len;
+    // UDP (34..42): bootpc(68) -> bootps(67), checksum 0 (optional for IPv4).
+    out[34..36].copy_from_slice(&68u16.to_be_bytes());
+    out[36..38].copy_from_slice(&67u16.to_be_bytes());
+    out[38..40].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    // IPv4 (14..34).
+    let ip_total = 20 + udp_len;
+    out[14] = 0x45;
+    out[16..18].copy_from_slice(&(ip_total as u16).to_be_bytes());
+    out[18..20].copy_from_slice(&((xid & 0xFFFF) as u16).to_be_bytes()); // id
+    out[22] = 64; // TTL
+    out[23] = IP_PROTO_UDP;
+    out[26..30].copy_from_slice(&[0, 0, 0, 0]); // src 0.0.0.0
+    out[30..34].copy_from_slice(&[255, 255, 255, 255]); // dst broadcast
+    let ip_csum = checksum16(&out[14..34]);
+    out[24..26].copy_from_slice(&ip_csum.to_be_bytes());
+
+    14 + ip_total
+}
+
+/// Returns the DHCP option `code`'s value bytes from a received frame.
+fn dhcp_option(f: &[u8], code: u8) -> Option<&[u8]> {
+    let mut i = DHCP_OFFSET + 240;
+    while i < f.len() {
+        match f[i] {
+            255 => break,    // end
+            0 => i += 1,     // pad
+            opt => {
+                if i + 1 >= f.len() {
+                    break;
+                }
+                let len = f[i + 1] as usize;
+                if i + 2 + len > f.len() {
+                    break;
+                }
+                if opt == code {
+                    return Some(&f[i + 2..i + 2 + len]);
+                }
+                i += 2 + len;
+            }
+        }
+    }
+    None
+}
+
+/// Returns `yiaddr` (the offered/assigned address) from a received DHCP frame.
+fn dhcp_yiaddr(f: &[u8]) -> [u8; 4] {
+    let y = DHCP_OFFSET + 16;
+    [f[y], f[y + 1], f[y + 2], f[y + 3]]
+}
+
+/// Tests whether `f` is a DHCP reply for `xid` with message type `msg_type`.
+fn dhcp_reply_is(f: &[u8], xid: u32, msg_type: u8) -> bool {
+    if f.len() < DHCP_OFFSET + 240
+        || u16::from_be_bytes([f[12], f[13]]) != ETHERTYPE_IPV4
+        || f[23] != IP_PROTO_UDP
+        || u16::from_be_bytes([f[36], f[37]]) != 68 // UDP dst port (bootpc)
+    {
+        return false;
+    }
+    let cookie = DHCP_OFFSET + 236;
+    if f[cookie..cookie + 4] != DHCP_MAGIC {
+        return false;
+    }
+    let x = DHCP_OFFSET + 4;
+    if u32::from_be_bytes([f[x], f[x + 1], f[x + 2], f[x + 3]]) != xid {
+        return false;
+    }
+    dhcp_option(f, 53).is_some_and(|v| v.first() == Some(&msg_type))
+}
+
+/// Runs a DHCP DISCOVER/OFFER/REQUEST/ACK exchange and returns the leased
+/// address (8c). DHCP is UDP, so this exercises the UDP path too.
+fn dhcp_lease(dev: &mut VirtioNet) -> Option<[u8; 4]> {
+    let mac = dev.mac();
+    let xid = 0xF0E0_0042u32;
+    let mut pkt = [0u8; 400];
+    let mut buf = [0u8; RX_BUF_SIZE];
+
+    let len = build_dhcp(mac, xid, 1, None, None, &mut pkt); // DISCOVER
+    dev.send(&pkt[..len]);
+    poll_match(dev, &mut buf, |f| dhcp_reply_is(f, xid, 2))?; // OFFER
+    let offered = dhcp_yiaddr(&buf);
+    let mut server_id = None;
+    if let Some(sid) = dhcp_option(&buf, 54) {
+        if sid.len() == 4 {
+            server_id = Some([sid[0], sid[1], sid[2], sid[3]]);
+        }
+    }
+
+    let len = build_dhcp(mac, xid, 3, Some(offered), server_id, &mut pkt); // REQUEST
+    dev.send(&pkt[..len]);
+    poll_match(dev, &mut buf, |f| dhcp_reply_is(f, xid, 5))?; // ACK
+    Some(dhcp_yiaddr(&buf))
+}
+
+/// Brings up virtio-net and exercises the stack: ARP (link, 8a), ICMP ping
+/// (IPv4, 8b), and a DHCP lease (UDP, 8c). Gated to QEMU by the caller.
 pub fn selftest() {
     let Some(mut dev) = VirtioNet::probe() else {
         return;
     };
 
-    let mut request = [0u8; 42];
-    build_arp_request(dev.mac(), GATEWAY_IP, &mut request);
-    if !dev.send(&request) {
-        crate::kprintln!("[feox] net: ARP request TX timed out");
+    let Some(gw_mac) = arp_resolve(&mut dev, GATEWAY_IP) else {
+        crate::kprintln!("[feox] net: no ARP reply");
         return;
-    }
+    };
     crate::kprintln!(
-        "[feox] net: ARP who-has {}.{}.{}.{} sent",
-        GATEWAY_IP[0],
-        GATEWAY_IP[1],
-        GATEWAY_IP[2],
-        GATEWAY_IP[3]
+        "[feox] net: ARP reply — gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3],
+        gw_mac[0], gw_mac[1], gw_mac[2], gw_mac[3], gw_mac[4], gw_mac[5]
     );
+    crate::kprintln!("[feox] milestone 8a: virtio-net link up (ARP round-trip).");
 
-    let mut frame_buf = [0u8; RX_BUF_SIZE];
-    let mut rx_seen = 0u32;
-    for _ in 0..10_000_000u32 {
-        if let Some(n) = dev.poll_recv(&mut frame_buf) {
-            rx_seen += 1;
-            if n >= 42 {
-                let ethertype = u16::from_be_bytes([frame_buf[12], frame_buf[13]]);
-                let oper = u16::from_be_bytes([frame_buf[20], frame_buf[21]]);
-                if ethertype == ETHERTYPE_ARP && oper == 2 {
-                    let m = &frame_buf[22..28]; // sender HW = gateway MAC
-                    crate::kprintln!(
-                        "[feox] net: ARP reply — gateway {}.{}.{}.{} is at {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                        GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3],
-                        m[0], m[1], m[2], m[3], m[4], m[5]
-                    );
-                    crate::kprintln!("[feox] milestone 8a: virtio-net link up (ARP round-trip).");
-                    return;
-                }
-            }
-        }
-        core::hint::spin_loop();
+    if icmp_ping(&mut dev, gw_mac, GATEWAY_IP) {
+        crate::kprintln!(
+            "[feox] net: ICMP echo reply from {}.{}.{}.{}",
+            GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3]
+        );
+        crate::kprintln!("[feox] milestone 8b: IPv4/ICMP ping ok.");
+    } else {
+        crate::kprintln!("[feox] net: no ICMP echo reply");
     }
-    crate::kprintln!(
-        "[feox] net: no ARP reply (rx_frames={} tx_used={} rx_used={})",
-        rx_seen,
-        dev.tx.used_idx(),
-        dev.rx.used_idx()
-    );
+
+    if let Some(ip) = dhcp_lease(&mut dev) {
+        crate::kprintln!("[feox] net: DHCP lease {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        crate::kprintln!("[feox] milestone 8c: UDP/DHCP lease obtained.");
+        crate::kprintln!("[feox] milestone 8: networking complete.");
+    } else {
+        crate::kprintln!("[feox] net: DHCP failed");
+    }
 }
