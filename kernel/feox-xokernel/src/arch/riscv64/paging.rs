@@ -35,6 +35,8 @@ pub const PTE_R: u64 = 1 << 1;
 pub const PTE_W: u64 = 1 << 2;
 /// PTE executable.
 pub const PTE_X: u64 = 1 << 3;
+/// PTE user-accessible (U-mode may access; S-mode only with sstatus.SUM).
+pub const PTE_U: u64 = 1 << 4;
 /// PTE accessed (set ahead of time so we don't need the A/D-update fault path).
 const PTE_A: u64 = 1 << 6;
 /// PTE dirty (ditto).
@@ -314,6 +316,16 @@ impl AddressSpace {
         let root = frame::alloc()?;
         zero_table(root);
         Some(Self { root })
+    }
+
+    /// Wraps the currently active address space (the `satp` root) so the kernel
+    /// map can be modified through the same API. Do NOT `destroy()` the result —
+    /// it borrows the live kernel tables.
+    #[must_use]
+    pub fn from_active() -> Self {
+        Self {
+            root: (read_satp() & ((1 << 44) - 1)) << 12,
+        }
     }
 
     /// Physical address of the root page table.

@@ -43,6 +43,8 @@ const SCAUSE_INTERRUPT: usize = 1 << 63;
 const EXC_BREAKPOINT: usize = 3;
 /// Interrupt cause code for the supervisor timer.
 const INT_SUPERVISOR_TIMER: usize = 5;
+/// Synchronous-exception cause code for an environment call from U-mode.
+const EXC_ECALL_FROM_U: usize = 8;
 
 unsafe extern "C" {
     /// Assembly trap vector; installed into `stvec`. Never called directly.
@@ -176,6 +178,14 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
         // Interrupts resume the interrupted instruction, so sepc is left as-is.
         super::time::on_timer_interrupt();
         return;
+    }
+
+    if !is_interrupt && code == EXC_ECALL_FROM_U {
+        // The U-mode demo's syscall: log it and longjmp back to the kernel
+        // (resume_kernel never returns here). Real ASI dispatch lands in M13.
+        crate::kprintln!("[feox] umode: ecall from U-mode at sepc={:#x}", frame.sepc);
+        // SAFETY: reached only from the U-mode excursion started by enter_user.
+        unsafe { super::umode::resume_to_kernel() };
     }
 
     if !is_interrupt && code == EXC_BREAKPOINT {

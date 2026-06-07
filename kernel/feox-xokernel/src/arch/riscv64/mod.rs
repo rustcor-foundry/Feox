@@ -20,6 +20,7 @@ pub mod serial;
 pub mod smp;
 pub mod time;
 pub mod trap;
+pub mod umode;
 
 use core::ptr::addr_of;
 
@@ -114,6 +115,9 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         "[feox] timer: {} ticks taken; milestone 9: supervisor timer interrupts.",
         time::ticks()
     );
+
+    // Milestone 12: drop to U-mode, take the user's ecall, return to the kernel.
+    umode::demo();
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
