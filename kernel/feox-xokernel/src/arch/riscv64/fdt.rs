@@ -98,6 +98,51 @@ impl Fdt {
             || self.root_prop_contains(b"model", b"qemu")
     }
 
+    /// Reads a big-endian `u32` property `prop` from the depth-1 node named
+    /// `node` (e.g. `node_u32(b"cpus", b"timebase-frequency")`).
+    #[must_use]
+    pub fn node_u32(&self, node: &[u8], prop: &[u8]) -> Option<u32> {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+        let mut depth: i32 = 0;
+        let mut in_node = false;
+        loop {
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    depth += 1;
+                    in_node = depth == 2 && bytes_eq(p, node);
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    depth -= 1;
+                    in_node = false;
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    if in_node && len >= 4 && bytes_eq(offset(strings, nameoff), prop) {
+                        return Some(be_u32(value));
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        None
+    }
+
+    /// Returns the system timebase frequency (Hz) from `/cpus`, if present.
+    #[must_use]
+    pub fn timebase_hz(&self) -> Option<u32> {
+        self.node_u32(b"cpus", b"timebase-frequency")
+    }
+
     /// Returns the first `/memory` region as `(base, size)` in bytes, decoding
     /// `reg` with the root node's `#address-cells` / `#size-cells`.
     #[must_use]
