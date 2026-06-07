@@ -172,11 +172,19 @@ Still required before it can boot on the RV:
     R/W/X flags are public. Proven by a scratch space (map non-identity VAs ->
     translate -> unmap -> destroy). Foundation for per-process U-mode spaces.
 
+12. **U-mode execution** ✅ — `umode.rs`: `enter_user` saves a setjmp-style
+    kernel context, sets `sstatus` (SPP=0 to return to U, SUM=1 so the trap path
+    can use the user stack) and `sret`s to a user code+stack page (mapped `U`+R+X
+    / `U`+R+W at an unused 4 GiB VA); the user's `ecall` traps and the dispatcher
+    longjmps back via `resume_kernel`. Proves the S↔U round trip; the longjmp is
+    the context-switch primitive for the scheduler (M14). (Uses SUM for now; a
+    per-thread `sscratch` kernel-stack swap arrives with multiple processes.)
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
-Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution
-(`sret`/`ecall`/`sscratch`) -> M13 ASI syscall dispatch + capability table
+Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
+M13 ASI syscall dispatch + capability table
 (un-gate `capability.rs`, wire `feox-asi`) -> M14 process/thread + preemptive
 scheduler (m9 timer) -> M15 ELF loader -> M16 libOS + app delivery -> M17 first
 U-mode app; then NIC-as-capability + hand-rolled TCP in the network-service app,
