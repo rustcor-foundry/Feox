@@ -50,6 +50,46 @@ impl Fdt {
         self.total_size
     }
 
+    /// Returns true if the root node's `compatible` property contains `needle`
+    /// (e.g. `b"qemu"` to detect the QEMU virt machine). The property is a list
+    /// of NUL-separated strings; this searches the raw bytes.
+    #[must_use]
+    pub fn root_compatible_contains(&self, needle: &[u8]) -> bool {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+        let mut depth: i32 = 0;
+        loop {
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    depth += 1;
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    if depth == 1 && bytes_eq(offset(strings, nameoff), b"compatible") {
+                        return bytes_contain(value, len, needle);
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        false
+    }
+
     /// Returns the first `/memory` region as `(base, size)` in bytes, decoding
     /// `reg` with the root node's `#address-cells` / `#size-cells`.
     #[must_use]
@@ -171,4 +211,15 @@ fn advance_past_cstr(p: *const u8) -> *const u8 {
 /// Rounds `x` up to the next multiple of 4.
 const fn align4(x: usize) -> usize {
     (x + 3) & !3
+}
+
+/// Returns true if the `len`-byte region at `p` contains `needle` as a
+/// contiguous subsequence.
+fn bytes_contain(p: *const u8, len: usize, needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > len {
+        return false;
+    }
+    // SAFETY: callers pass a pointer/length within the DTB blob.
+    let hay = unsafe { core::slice::from_raw_parts(p, len) };
+    hay.windows(needle.len()).any(|w| w == needle)
 }

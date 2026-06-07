@@ -47,11 +47,10 @@ const SATP_MODE_SV39: u64 = 8 << 60;
 const ENTRIES: usize = 512;
 /// Bytes mapped by one root-level (gigapage) entry: 1 GiB.
 const GIGAPAGE: u64 = 1 << 30;
-/// How many low gigapages to identity-map (0..4 GiB covers QEMU virt's device
-/// space and the RAM the kernel and firmware live in).
+/// How many low gigapages to identity-map for the bootstrap map (0..4 GiB
+/// covers the device space and the low RAM where the kernel loads on both QEMU
+/// virt (RAM @ 2 GiB) and the JH7110 (RAM @ 1 GiB)).
 const MAPPED_GIGAPAGES: usize = 4;
-/// Gigapage index that holds RAM on QEMU virt (`0x8000_0000` = 2 GiB).
-const RAM_GIGAPAGE: usize = 2;
 
 /// QEMU virt NS16550 UART base (mapped for the future native console).
 const UART0_BASE: usize = 0x1000_0000;
@@ -83,14 +82,11 @@ pub fn enable_identity_map() {
 
     for gib in 0..MAPPED_GIGAPAGES {
         let pa = (gib as u64) * GIGAPAGE;
-        // RAM is executable (kernel text + stacks live here); device space is
-        // read/write but never executed.
-        let flags = if gib == RAM_GIGAPAGE {
-            PTE_R | PTE_W | PTE_X
-        } else {
-            PTE_R | PTE_W
-        };
-        root.entries[gib] = gigapage_pte(pa, flags);
+        // Bootstrap map: every gigapage R-W-X so the kernel runs wherever it was
+        // loaded (RAM base differs per platform). This map is transient — the
+        // fine-grained per-section W^X map in build_kernel_address_space
+        // replaces it before the kernel does any real work.
+        root.entries[gib] = gigapage_pte(pa, PTE_R | PTE_W | PTE_X);
     }
 
     // Pre-paging, the static's link address is its physical address (no
@@ -189,10 +185,18 @@ fn zero_table(frame: usize) {
 /// switches `satp` to it, replacing the bootstrap gigapage identity map.
 ///
 /// The kernel image is mapped per section with W^X permissions (text R-X,
-/// rodata R--, data/bss RW-); the frame pool, the DTB (read-only), and the
-/// UART page are mapped as well. Identity (VA == PA) is preserved, so pointers
-/// stay valid across the switch. Returns the physical address of the new root.
-pub fn build_kernel_address_space(frame_pool_end: usize, dtb: usize, dtb_size: usize) -> usize {
+/// rodata R--, data/bss RW-); the frame pool and the DTB (read-only) are mapped
+/// as well. When `map_devices` is set (QEMU virt), the fixed UART/PCIe device
+/// windows are mapped too; on other platforms those addresses differ (and the
+/// PCIe MMIO window even overlaps RAM), so they are left out and derived from
+/// the device tree when those drivers are ported. Identity (VA == PA) is
+/// preserved. Returns the physical address of the new root.
+pub fn build_kernel_address_space(
+    frame_pool_end: usize,
+    dtb: usize,
+    dtb_size: usize,
+    map_devices: bool,
+) -> usize {
     let root = frame::alloc().expect("root page-table allocation failed");
     zero_table(root);
 
@@ -212,31 +216,32 @@ pub fn build_kernel_address_space(frame_pool_end: usize, dtb: usize, dtb_size: u
         map_region(root, pool_start, pool_start, frame_pool_end - pool_start, PTE_R | PTE_W);
     }
 
-    // Keep the DTB readable, and map the UART page for future native console
-    // and to exercise device-memory mapping.
+    // Keep the DTB readable (always — it's platform-independent).
     if dtb != 0 {
         let dtb_start = align_down(dtb, FRAME_SIZE);
         let dtb_end = align_up(dtb + dtb_size, FRAME_SIZE);
         map_region(root, dtb_start, dtb_start, dtb_end - dtb_start, PTE_R);
     }
-    map_region(root, UART0_BASE, UART0_BASE, FRAME_SIZE, PTE_R | PTE_W);
 
-    // PCIe ECAM config space, for device discovery (milestone 6).
-    map_region(
-        root,
-        super::pci::ECAM_BASE,
-        super::pci::ECAM_BASE,
-        super::pci::ECAM_SIZE,
-        PTE_R | PTE_W,
-    );
-    // PCIe MMIO window, where the kernel assigns device BARs (milestone 6b).
-    map_region(
-        root,
-        super::pci::MMIO_BASE,
-        super::pci::MMIO_BASE,
-        super::pci::MMIO_MAP_SIZE,
-        PTE_R | PTE_W,
-    );
+    if map_devices {
+        // QEMU virt fixed device windows: UART (future native console), PCIe
+        // ECAM config space, and the PCIe MMIO window for BAR assignment.
+        map_region(root, UART0_BASE, UART0_BASE, FRAME_SIZE, PTE_R | PTE_W);
+        map_region(
+            root,
+            super::pci::ECAM_BASE,
+            super::pci::ECAM_BASE,
+            super::pci::ECAM_SIZE,
+            PTE_R | PTE_W,
+        );
+        map_region(
+            root,
+            super::pci::MMIO_BASE,
+            super::pci::MMIO_BASE,
+            super::pci::MMIO_MAP_SIZE,
+            PTE_R | PTE_W,
+        );
+    }
 
     let satp = SATP_MODE_SV39 | (root as u64 >> 12);
     // SAFETY: the new map covers PC (text), stack/data, the frame pool, and the

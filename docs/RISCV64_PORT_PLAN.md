@@ -117,13 +117,33 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    with an atomic online counter. Replaces the x86 AP trampoline. (CI runs QEMU
    `-smp 4`.)
 
-## Remaining cleanup / follow-ups
+## Real-hardware readiness (Orange Pi RV / JH7110)
+
+Portability cleanups done (QEMU stays green; these no-op safely off-QEMU):
+
+- Bootstrap identity map is all-R-W-X, so the kernel runs wherever it is loaded
+  (JH7110 RAM is at `0x4000_0000`, not QEMU's `0x8000_0000`).
+- The fixed QEMU device windows (UART/ECAM/PCIe-MMIO) and the PCIe/NVMe probe
+  are gated behind a device-tree machine check (`root_compatible_contains(b"qemu")`),
+  since the PCIe MMIO window even overlaps RAM on the JH7110.
+
+Still required before it can boot on the RV:
+
+- **Link/load address** — a JH7110 linker base (RAM `0x4000_0000`); we build
+  static/non-PIE, so link address must equal U-Boot's load address.
+- **Flat Image + RISC-V Image header** so U-Boot `booti` accepts it (we emit an
+  ELF today, which only QEMU `-kernel` takes).
+- **Deploy**: the RV boots openSUSE from the NVMe/Optane, so the target is to
+  place the Image + DTB on the NVMe boot partition with an extlinux entry.
+- StarFive PCIe controller bring-up (clocks/resets/PHY) before NVMe works on the
+  RV — a device-tree-derived driver, not ECAM poking.
+
+## Other follow-ups
 
 - Integrate `feox-nvme` (enable the `storage` feature) to replace the
   hand-rolled NVMe queue logic.
 - Un-gate the shared `memory` / `capability` modules for riscv64.
 - PLIC + timer (CLINT/sstc) interrupts; per-hart interrupt enable.
-- Deploy on real Orange Pi RV hardware via U-Boot/extlinux.
 
 ## Interrupt-controller note
 
