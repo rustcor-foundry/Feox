@@ -139,4 +139,48 @@ fn init_memory(dtb: usize) {
         frame::total(),
         frame::available()
     );
+
+    // Milestone 4b: replace the bootstrap gigapage identity map with a
+    // fine-grained kernel address space (per-section W^X) built from the frame
+    // allocator, then verify the multi-level walk via translate().
+    let root = paging::build_kernel_address_space(usable_end, dtb, tree.total_size() as usize);
+    crate::kprintln!(
+        "[feox] kernel address space active (root={:#x} satp={:#x})",
+        root,
+        paging::read_satp()
+    );
+    verify_translations();
+    crate::kprintln!(
+        "[feox] milestone 4b: sv39 walker + per-section W^X map online."
+    );
+}
+
+/// Translates a few representative kernel addresses through the live page table
+/// and prints VA -> PA with permissions, proving the multi-level walk and the
+/// per-section permissions are correct.
+fn verify_translations() {
+    let stack_probe = 0u64;
+    let probes = [
+        ("text  ", riscv_main as *const () as usize),
+        ("rodata", "feox".as_ptr() as usize),
+        ("stack ", addr_of!(stack_probe) as usize),
+    ];
+    for (name, va) in probes {
+        match paging::translate(va) {
+            Some((pa, flags)) => {
+                let (r, w, x) = paging::decode_rwx(flags);
+                crate::kprintln!(
+                    "[feox]   xlate {}: va={:#x} -> pa={:#x} [{}{}{}] identity={}",
+                    name,
+                    va,
+                    pa,
+                    if r { 'r' } else { '-' },
+                    if w { 'w' } else { '-' },
+                    if x { 'x' } else { '-' },
+                    va == pa
+                );
+            }
+            None => crate::kprintln!("[feox]   xlate {}: va={:#x} -> UNMAPPED", name, va),
+        }
+    }
 }

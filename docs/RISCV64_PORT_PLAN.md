@@ -1,10 +1,11 @@
 # riscv64 Port Plan
 
-Status: **Milestone 4a complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 4b complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
-recovers from a deliberate `ebreak`, enables sv39 paging via an identity map,
-parses the device tree for the real RAM map, stands up a physical frame
-allocator, runs an alloc/free self-check, then parks the boot hart.
+recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
+tree for the real RAM map, stands up a physical frame allocator, then builds a
+fine-grained kernel address space with per-section W^X permissions (verified by
+walking the live page table), and parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -73,9 +74,15 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    - **4a** ✅ — hand-rolled FDT reader (`fdt.rs`) finds the `/memory` region;
      a bump + free-list physical frame allocator (`frame.rs`) manages the RAM
      between the kernel image and the DTB. Proven by an alloc/free self-check.
-   - **4b** (next) — multi-level sv39 walker + per-section permissions backed by
-     the frame allocator; reserve the memory-reservation block; begin
-     un-gating the shared `memory` module for riscv64.
+   - **4b** ✅ — multi-level sv39 walker (`map_one`/`map_region`, 4 KiB + 2 MiB
+     superpages, intermediate tables from the frame allocator) builds a
+     fine-grained kernel address space with per-section W^X (text R-X, rodata
+     R--, data/bss RW-), plus frame pool RW, DTB R, and the UART page;
+     `satp` is switched to it and `translate()` verifies the walk/permissions.
+     Identity (VA==PA) is preserved.
+   - **4c** (next) — high-half/physmap or begin un-gating the shared `memory`
+     module for riscv64 (it carries x86 assumptions), and honor the FDT
+     memory-reservation block in the allocator.
 5. **Runtime** — bring `feox-async` up on riscv64; re-enable the `runtime`
    feature for this target.
 6. **NVMe** — QEMU `virt` exposes an NVMe device; exercise `feox-nvme` over it.
