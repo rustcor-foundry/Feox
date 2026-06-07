@@ -69,8 +69,9 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     );
 
     // Milestone 4: parse the device tree for the real RAM map and stand up a
-    // physical frame allocator over the usable window.
-    init_memory(dtb);
+    // physical frame allocator over the usable window. Returns whether we are
+    // on QEMU virt (whose fixed device/PCIe windows we may touch).
+    let on_qemu = init_memory(dtb);
 
     // Milestone 5: drive the portable feox-async executor on riscv64.
     #[cfg(feature = "runtime")]
@@ -79,8 +80,15 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         runtime::demo();
     }
 
-    // Milestone 6a: enumerate PCIe over ECAM and discover the NVMe controller.
-    discover_pci();
+    // Milestone 6: enumerate PCIe over ECAM and exercise the NVMe controller.
+    // The ECAM/MMIO windows are QEMU-virt-specific (and the MMIO window overlaps
+    // RAM on other SoCs), so only do this on QEMU; real-hardware PCIe is a
+    // device-tree-derived driver for later.
+    if on_qemu {
+        discover_pci();
+    } else {
+        crate::kprintln!("[feox] pcie: skipped (non-QEMU platform; DT-derived driver TODO)");
+    }
 
     // Milestone 7: bring up the secondary harts via the SBI HSM extension.
     smp::bring_up_secondary_harts(hartid);
@@ -92,17 +100,25 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
 /// Parses the DTB for the RAM region and initializes the frame allocator over
 /// the RAM above the kernel image (and below the DTB, which sits high in RAM on
-/// QEMU virt). Runs a small alloc/free self-check as proof of life.
-fn init_memory(dtb: usize) {
+/// QEMU virt). Runs a small alloc/free self-check as proof of life. Returns
+/// whether the machine is QEMU virt (so fixed device/PCIe windows are safe to
+/// map and probe).
+fn init_memory(dtb: usize) -> bool {
     let Some(tree) = fdt::parse(dtb) else {
         crate::kprintln!("[feox] WARNING: invalid or missing DTB at {:#x}", dtb);
-        return;
+        return false;
     };
-    crate::kprintln!("[feox] dtb: base={:#x} size={} bytes", dtb, tree.total_size());
+    let on_qemu = tree.root_compatible_contains(b"qemu");
+    crate::kprintln!(
+        "[feox] dtb: base={:#x} size={} bytes (machine={})",
+        dtb,
+        tree.total_size(),
+        if on_qemu { "qemu-virt" } else { "other" }
+    );
 
     let Some((ram_base, ram_size)) = tree.memory() else {
         crate::kprintln!("[feox] WARNING: no /memory node found in DTB");
-        return;
+        return false;
     };
     let ram_end = ram_base + ram_size;
     crate::kprintln!(
@@ -161,7 +177,8 @@ fn init_memory(dtb: usize) {
     // Milestone 4b: replace the bootstrap gigapage identity map with a
     // fine-grained kernel address space (per-section W^X) built from the frame
     // allocator, then verify the multi-level walk via translate().
-    let root = paging::build_kernel_address_space(usable_end, dtb, tree.total_size() as usize);
+    let root =
+        paging::build_kernel_address_space(usable_end, dtb, tree.total_size() as usize, on_qemu);
     crate::kprintln!(
         "[feox] kernel address space active (root={:#x} satp={:#x})",
         root,
@@ -171,6 +188,8 @@ fn init_memory(dtb: usize) {
     crate::kprintln!(
         "[feox] milestone 4b: sv39 walker + per-section W^X map online."
     );
+
+    on_qemu
 }
 
 /// Translates a few representative kernel addresses through the live page table
