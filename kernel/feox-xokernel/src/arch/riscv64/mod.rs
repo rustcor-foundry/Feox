@@ -6,12 +6,22 @@
 //! path that bypasses the x86-shaped `boot::bootstrap` flow.
 
 pub mod cpu;
+pub mod fdt;
+pub mod frame;
 pub mod paging;
 pub mod panic;
 pub mod serial;
 pub mod trap;
 
+use core::ptr::addr_of;
+
 use crate::{PROJECT_NAME, PROJECT_STYLE};
+
+unsafe extern "C" {
+    /// End of the kernel image, defined by the linker script. Its address (not
+    /// its value) marks the first byte of RAM free for the frame allocator.
+    static __kernel_end: u8;
+}
 
 /// Minimal S-mode bring-up entry for the riscv64 milestone-1 path.
 ///
@@ -53,7 +63,80 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         paging::read_satp()
     );
 
+    // Milestone 4: parse the device tree for the real RAM map and stand up a
+    // physical frame allocator over the usable window.
+    init_memory(dtb);
+
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
     cpu::hlt_loop()
+}
+
+/// Parses the DTB for the RAM region and initializes the frame allocator over
+/// the RAM above the kernel image (and below the DTB, which sits high in RAM on
+/// QEMU virt). Runs a small alloc/free self-check as proof of life.
+fn init_memory(dtb: usize) {
+    let Some(tree) = fdt::parse(dtb) else {
+        crate::kprintln!("[feox] WARNING: invalid or missing DTB at {:#x}", dtb);
+        return;
+    };
+    crate::kprintln!("[feox] dtb: base={:#x} size={} bytes", dtb, tree.total_size());
+
+    let Some((ram_base, ram_size)) = tree.memory() else {
+        crate::kprintln!("[feox] WARNING: no /memory node found in DTB");
+        return;
+    };
+    let ram_end = ram_base + ram_size;
+    crate::kprintln!(
+        "[feox] ram: {:#x}..{:#x} ({} MiB)",
+        ram_base,
+        ram_end,
+        ram_size >> 20
+    );
+
+    // Usable RAM starts just past the kernel image. The DTB sits high in RAM
+    // on QEMU virt, so cap the window below it (everything at/above the DTB is
+    // left reserved for now); otherwise run to the end of RAM.
+    let kernel_end = addr_of!(__kernel_end) as usize;
+    let usable_end = if (dtb as u64) > kernel_end as u64 && (dtb as u64) < ram_end {
+        dtb
+    } else {
+        ram_end as usize
+    };
+
+    frame::init(kernel_end, usable_end);
+    crate::kprintln!(
+        "[feox] frames: {:#x}..{:#x} ({} frames, {} MiB usable)",
+        kernel_end,
+        usable_end,
+        frame::total(),
+        (frame::total() * frame::FRAME_SIZE) >> 20
+    );
+
+    // Self-check: allocate three frames, free the middle one, and confirm the
+    // next allocation recycles it (proves both bump and free-list paths).
+    let f0 = frame::alloc();
+    let f1 = frame::alloc();
+    let f2 = frame::alloc();
+    crate::kprintln!(
+        "[feox] frame alloc: {:#x} {:#x} {:#x}",
+        f0.unwrap_or(0),
+        f1.unwrap_or(0),
+        f2.unwrap_or(0)
+    );
+    if let Some(addr) = f1 {
+        frame::free(addr);
+    }
+    let f3 = frame::alloc();
+    crate::kprintln!(
+        "[feox] freed middle frame; realloc={:#x} recycled={}",
+        f3.unwrap_or(0),
+        f3 == f1
+    );
+
+    crate::kprintln!(
+        "[feox] milestone 4: frame allocator online ({} frames, {} available)",
+        frame::total(),
+        frame::available()
+    );
 }
