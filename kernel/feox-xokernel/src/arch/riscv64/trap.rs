@@ -41,6 +41,8 @@ const REG_RA: usize = 0;
 const SCAUSE_INTERRUPT: usize = 1 << 63;
 /// Synchronous-exception cause code for `ebreak` / breakpoint.
 const EXC_BREAKPOINT: usize = 3;
+/// Interrupt cause code for the supervisor timer.
+const INT_SUPERVISOR_TIMER: usize = 5;
 
 unsafe extern "C" {
     /// Assembly trap vector; installed into `stvec`. Never called directly.
@@ -169,6 +171,12 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
 
     let is_interrupt = frame.scause & SCAUSE_INTERRUPT != 0;
     let code = frame.scause & !SCAUSE_INTERRUPT;
+
+    if is_interrupt && code == INT_SUPERVISOR_TIMER {
+        // Interrupts resume the interrupted instruction, so sepc is left as-is.
+        super::time::on_timer_interrupt();
+        return;
+    }
 
     if !is_interrupt && code == EXC_BREAKPOINT {
         crate::kprintln!(

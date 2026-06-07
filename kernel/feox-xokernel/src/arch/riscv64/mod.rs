@@ -17,6 +17,7 @@ pub mod pci;
 pub mod runtime;
 pub mod serial;
 pub mod smp;
+pub mod time;
 pub mod trap;
 
 use core::ptr::addr_of;
@@ -97,6 +98,21 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
     // Milestone 7: bring up the secondary harts via the SBI HSM extension.
     smp::bring_up_secondary_harts(hartid);
+
+    // Milestone 9: enable supervisor timer interrupts and take a few ticks.
+    let timebase = fdt::parse(dtb)
+        .and_then(|tree| tree.timebase_hz())
+        .map_or(10_000_000, u64::from);
+    crate::kprintln!("[feox] timer: arming (timebase {} Hz)...", timebase);
+    time::enable(timebase);
+    while time::ticks() < 5 {
+        cpu::halt();
+    }
+    time::disable();
+    crate::kprintln!(
+        "[feox] timer: {} ticks taken; milestone 9: supervisor timer interrupts.",
+        time::ticks()
+    );
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

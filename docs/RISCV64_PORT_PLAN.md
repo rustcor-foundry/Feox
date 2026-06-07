@@ -153,12 +153,20 @@ Still required before it can boot on the RV:
 - StarFive PCIe controller bring-up (clocks/resets/PHY) before NVMe works on the
   RV — a device-tree-derived driver, not ECAM poking.
 
+9. **Timer interrupts** ✅ — supervisor timer via SBI `set_timer` (`time.rs`):
+   `enable()` arms the deadline and sets `sie.STIE` + `sstatus.SIE`;
+   `trap_dispatch` handles the timer interrupt (cause 5), counting + re-arming;
+   the timebase comes from the DTB `/cpus/timebase-frequency`. Proven by taking
+   a few ticks. First interrupt source handled — foundation for preemption and
+   interrupt-driven I/O.
+
 ## Other follow-ups
 
+- **PLIC** (external interrupts) — claim/complete, route a device IRQ
+  (virtio-net/UART) so RX/completions are interrupt-driven instead of polled.
 - Integrate `feox-nvme` (enable the `storage` feature) to replace the
   hand-rolled NVMe queue logic.
 - Un-gate the shared `memory` / `capability` modules for riscv64.
-- PLIC + timer (CLINT/sstc) interrupts; per-hart interrupt enable.
 
 ## QA-identified hardening (deferred — none fire on current QEMU paths)
 
