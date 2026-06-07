@@ -10,6 +10,7 @@ pub mod fdt;
 pub mod frame;
 pub mod paging;
 pub mod panic;
+pub mod pci;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod serial;
@@ -75,6 +76,9 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         crate::kprintln!("[feox] starting feox-async runtime demo...");
         runtime::demo();
     }
+
+    // Milestone 6a: enumerate PCIe over ECAM and discover the NVMe controller.
+    discover_pci();
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
@@ -190,6 +194,32 @@ fn verify_translations() {
                 );
             }
             None => crate::kprintln!("[feox]   xlate {}: va={:#x} -> UNMAPPED", name, va),
+        }
+    }
+}
+
+/// Enumerates PCIe over ECAM and reports the NVMe controller, if present.
+///
+/// Milestone 6a: proves memory-mapped device access works on riscv64 (the first
+/// non-SBI hardware access) and surfaces the raw BAR0 so the controller-init
+/// pass (6b) knows whether the firmware assigned it.
+fn discover_pci() {
+    match pci::scan_for_class(pci::CLASS_NVME) {
+        Some(dev) => {
+            crate::kprintln!(
+                "[feox] pcie: NVMe controller at {:02x}:{:02x}.{} vendor={:#06x} device={:#06x} class={:#08x}",
+                dev.bus,
+                dev.device,
+                dev.function,
+                dev.vendor_id,
+                dev.device_id,
+                dev.class_code
+            );
+            crate::kprintln!("[feox]   BAR0 raw={:#010x}", pci::bar_raw(&dev, 0));
+            crate::kprintln!("[feox] milestone 6a: PCIe ECAM up; NVMe controller discovered.");
+        }
+        None => {
+            crate::kprintln!("[feox] pcie: no NVMe controller found on the root bus");
         }
     }
 }

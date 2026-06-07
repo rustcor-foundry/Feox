@@ -221,6 +221,15 @@ pub fn build_kernel_address_space(frame_pool_end: usize, dtb: usize, dtb_size: u
     }
     map_region(root, UART0_BASE, UART0_BASE, FRAME_SIZE, PTE_R | PTE_W);
 
+    // PCIe ECAM config space, for device discovery (milestone 6).
+    map_region(
+        root,
+        super::pci::ECAM_BASE,
+        super::pci::ECAM_BASE,
+        super::pci::ECAM_SIZE,
+        PTE_R | PTE_W,
+    );
+
     let satp = SATP_MODE_SV39 | (root as u64 >> 12);
     // SAFETY: the new map covers PC (text), stack/data, the frame pool, and the
     // page tables; switching satp keeps execution valid, and sfence.vma flushes
