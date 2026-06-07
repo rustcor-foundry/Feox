@@ -160,6 +160,25 @@ Still required before it can boot on the RV:
 - Un-gate the shared `memory` / `capability` modules for riscv64.
 - PLIC + timer (CLINT/sstc) interrupts; per-hart interrupt enable.
 
+## QA-identified hardening (deferred — none fire on current QEMU paths)
+
+A review pass (all milestones) found no live bugs beyond the small fixes already
+applied (sv39 `translate` PPN mask; net diagnostics/`&buf[..n]` cleanup;
+frame-allocator invariant doc). These remain for when the relevant paths grow:
+
+- **Frame allocator + SMP:** `FRAME_ALLOCATOR` is a `static mut` accessed only by
+  the bootstrap hart. Add a spinlock before any secondary hart allocates.
+- **`frame::free` robustness:** no double-free / multi-frame guard; freeing a
+  frame from an `alloc_contiguous` block would underflow `in_use`. Add a
+  `free_contiguous` / validation when freeing becomes common.
+- **NVMe queue depth:** clamp admin/IO depths to `CAP.MQES` for real
+  controllers (QEMU's max far exceeds our 64/8).
+- **Traps for U-mode:** `trap_entry` carves the frame on the current `sp` and
+  `instruction_len_at` reads the trapping PC; add an `sscratch` kernel-stack
+  swap and care for faulting reads before user/page-fault traps land.
+- **SMP probe:** distinguish `sbi_hart_start` error codes instead of treating any
+  nonzero as "no more harts"; free the AP stack/boot-block on a failed start.
+
 ## Interrupt-controller note
 
 x86 LAPIC/IOAPIC → riscv64 **PLIC** (external interrupts) + **CLINT/aclint**

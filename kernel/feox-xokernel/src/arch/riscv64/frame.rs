@@ -113,16 +113,18 @@ impl FrameAllocator {
     }
 }
 
-/// Global early-boot frame allocator (single-hart until SMP adds a lock).
+/// Global early-boot frame allocator.
+///
+/// Invariant: only the bootstrap hart allocates. Secondary harts (brought up in
+/// `smp`) run `ap_main`, which deliberately does not touch this allocator, so no
+/// concurrent access occurs. A spinlock must be added before any AP allocates.
 static mut FRAME_ALLOCATOR: FrameAllocator = FrameAllocator::empty();
 
 /// Returns an exclusive reference to the global allocator.
-///
-/// Safe at this stage because only the boot hart runs; SMP will replace this
-/// with a locked accessor.
 #[allow(static_mut_refs)]
 fn allocator() -> &'static mut FrameAllocator {
-    // SAFETY: single-threaded early boot; no aliasing references exist.
+    // SAFETY: only the bootstrap hart allocates (see the invariant above); no
+    // aliasing `&mut` exists because APs never call into this module.
     unsafe { &mut FRAME_ALLOCATOR }
 }
 

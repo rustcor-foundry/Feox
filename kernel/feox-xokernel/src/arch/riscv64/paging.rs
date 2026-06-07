@@ -279,7 +279,9 @@ pub fn translate(va: usize) -> Option<(usize, u64)> {
         if pte & (PTE_R | PTE_X) != 0 {
             let level_bits = 12 + 9 * (level as usize);
             let mask = (1usize << level_bits) - 1;
-            let ppn = (pte >> 10) as usize;
+            // Mask the PPN to 44 bits (matching the non-leaf path) so reserved
+            // / PBMT / N bits above bit 53 never leak into the address.
+            let ppn = ((pte >> 10) & ((1 << 44) - 1)) as usize;
             let pa = ((ppn << 12) & !mask) | (va & mask);
             return Some((pa, pte & 0x3ff));
         }

@@ -46,7 +46,6 @@ const R_DEVICE_FEATURES_SEL: usize = 0x014;
 const R_DRIVER_FEATURES: usize = 0x020;
 const R_DRIVER_FEATURES_SEL: usize = 0x024;
 const R_QUEUE_SEL: usize = 0x030;
-const R_QUEUE_NUM_MAX: usize = 0x034;
 const R_QUEUE_NUM: usize = 0x038;
 const R_QUEUE_READY: usize = 0x044;
 const R_QUEUE_NOTIFY: usize = 0x050;
@@ -206,21 +205,12 @@ impl VirtioNet {
             crate::kprintln!("[feox] net: no virtio-net transport found");
             return None;
         }
-        let version = mmio_r(base, R_VERSION);
-        crate::kprintln!(
-            "[feox] net: virtio-mmio @ {:#x} version={} qnummax={}",
-            base,
-            version,
-            {
-                mmio_w(base, R_QUEUE_SEL, 0);
-                mmio_r(base, R_QUEUE_NUM_MAX)
-            }
-        );
         // This driver implements only the modern (version 2) transport. QEMU's
         // virtio-mmio defaults to legacy; run it with
         // `-global virtio-mmio.force-legacy=false`.
+        let version = mmio_r(base, R_VERSION);
         if version != 2 {
-            crate::kprintln!("[feox] net: legacy virtio-mmio (v{version}) unsupported", version = version);
+            crate::kprintln!("[feox] net: legacy virtio-mmio (v{}) unsupported", version);
             return None;
         }
 
@@ -265,7 +255,6 @@ impl VirtioNet {
         // DRIVER_OK — device is live. Per spec, queues must be configured
         // before this, and only used (notified) after it.
         mmio_w(base, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK);
-        let status = mmio_r(base, R_STATUS);
 
         let mut dev = Self {
             base,
@@ -289,8 +278,6 @@ impl VirtioNet {
         }
         fence(Ordering::SeqCst);
         mmio_w(base, R_QUEUE_NOTIFY, u32::from(RX_QUEUE));
-
-        crate::kprintln!("[feox] net: status={:#x} after DRIVER_OK", status);
 
         crate::kprintln!(
             "[feox] net: virtio-net @ {:#x} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -608,19 +595,17 @@ fn dhcp_lease(dev: &mut VirtioNet) -> Option<[u8; 4]> {
 
     let len = build_dhcp(mac, xid, 1, None, None, &mut pkt); // DISCOVER
     dev.send(&pkt[..len]);
-    poll_match(dev, &mut buf, |f| dhcp_reply_is(f, xid, 2))?; // OFFER
-    let offered = dhcp_yiaddr(&buf);
-    let mut server_id = None;
-    if let Some(sid) = dhcp_option(&buf, 54) {
-        if sid.len() == 4 {
-            server_id = Some([sid[0], sid[1], sid[2], sid[3]]);
-        }
-    }
+    let offer_len = poll_match(dev, &mut buf, |f| dhcp_reply_is(f, xid, 2))?; // OFFER
+    let offer = &buf[..offer_len];
+    let offered = dhcp_yiaddr(offer);
+    let server_id = dhcp_option(offer, 54).and_then(|sid| {
+        <[u8; 4]>::try_from(sid).ok()
+    });
 
     let len = build_dhcp(mac, xid, 3, Some(offered), server_id, &mut pkt); // REQUEST
     dev.send(&pkt[..len]);
-    poll_match(dev, &mut buf, |f| dhcp_reply_is(f, xid, 5))?; // ACK
-    Some(dhcp_yiaddr(&buf))
+    let ack_len = poll_match(dev, &mut buf, |f| dhcp_reply_is(f, xid, 5))?; // ACK
+    Some(dhcp_yiaddr(&buf[..ack_len]))
 }
 
 /// Brings up virtio-net and exercises the stack: ARP (link, 8a), ICMP ping
