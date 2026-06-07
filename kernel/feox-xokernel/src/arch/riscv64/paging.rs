@@ -54,6 +54,9 @@ const MAPPED_GIGAPAGES: usize = 4;
 
 /// QEMU virt NS16550 UART base (mapped for the future native console).
 const UART0_BASE: usize = 0x1000_0000;
+/// Size of the low-MMIO window mapped on QEMU: UART (0x1000_0000) plus the
+/// virtio-mmio transports (0x1000_1000..0x1000_9000). 64 KiB covers both.
+const LOW_MMIO_SIZE: usize = 0x1_0000;
 
 /// A hardware page table: 512 64-bit PTEs, 4 KiB and 4 KiB-aligned.
 #[repr(C, align(4096))]
@@ -224,9 +227,10 @@ pub fn build_kernel_address_space(
     }
 
     if map_devices {
-        // QEMU virt fixed device windows: UART (future native console), PCIe
-        // ECAM config space, and the PCIe MMIO window for BAR assignment.
-        map_region(root, UART0_BASE, UART0_BASE, FRAME_SIZE, PTE_R | PTE_W);
+        // QEMU virt fixed device windows: the low-MMIO block (UART at
+        // 0x1000_0000 + the 8 virtio-mmio transports at 0x1000_1000..),
+        // PCIe ECAM config space, and the PCIe MMIO window for BAR assignment.
+        map_region(root, UART0_BASE, UART0_BASE, LOW_MMIO_SIZE, PTE_R | PTE_W);
         map_region(
             root,
             super::pci::ECAM_BASE,

@@ -66,6 +66,7 @@ jobs:
             -display none -monitor none -serial "file:$log" \
             -drive file="$nvme_img",if=none,id=nvm0,format=raw \
             -device nvme,serial=feox0,drive=nvm0 \
+            -netdev user,id=net0 -device virtio-net-device,netdev=net0 \
             -bios default -kernel "$elf" -no-reboot </dev/null >/dev/null 2>&1 || true
           echo "----- serial log -----"; cat "$log"; echo "----------------------"
           grep -q 'breakpoint trap handled' "$log" \
@@ -92,6 +93,8 @@ jobs:
             || { echo "::error::Feox riscv64 secondary-hart marker not found"; exit 1; }
           grep -q 'SMP secondary harts up' "$log" \
             || { echo "::error::Feox riscv64 SMP marker not found"; exit 1; }
+          grep -q 'virtio-net link up' "$log" \
+            || { echo "::error::Feox riscv64 virtio-net ARP round-trip marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async + pcie + nvme + identify + block-io + smp)."
+          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async + pcie + nvme + identify + block-io + smp + net)."
