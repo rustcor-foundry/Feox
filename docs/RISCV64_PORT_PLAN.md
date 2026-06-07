@@ -1,14 +1,13 @@
 # riscv64 Port Plan
 
-Status: **Milestone 6d complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 7 complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
 recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
 tree for the real RAM map, stands up a physical frame allocator, builds a
 fine-grained kernel address space with per-section W^X permissions, drives the
 portable `feox-async` executor, enumerates PCIe over ECAM, brings the NVMe
-controller to ready, identifies it and its namespace, creates an I/O queue
-pair, and verifies real block I/O (writes a pattern to LBA 0 and reads it back),
-then parks the boot hart.
+controller to ready and verifies real block I/O, brings up the secondary harts
+via the SBI HSM extension, and parks all harts.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -111,8 +110,20 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
      1), then a write-then-read-back-and-compare of LBA 0 proves real block I/O.
      Still hand-rolled MMIO/DMA — `feox-nvme` integration is a later cleanup.
 
-7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
-   replacing the x86 AP trampoline. **(next)**
+7. **SMP** ✅ — secondary harts via the SBI HSM extension (`smp.rs`):
+   `sbi_hart_start` enters each AP at `_ap_start` (S-mode, paging off), which
+   loads a per-hart stack + the shared kernel `satp` from a boot block, turns
+   paging on, installs the trap vector, and reports online. Serialized bring-up
+   with an atomic online counter. Replaces the x86 AP trampoline. (CI runs QEMU
+   `-smp 4`.)
+
+## Remaining cleanup / follow-ups
+
+- Integrate `feox-nvme` (enable the `storage` feature) to replace the
+  hand-rolled NVMe queue logic.
+- Un-gate the shared `memory` / `capability` modules for riscv64.
+- PLIC + timer (CLINT/sstc) interrupts; per-hart interrupt enable.
+- Deploy on real Orange Pi RV hardware via U-Boot/extlinux.
 
 ## Interrupt-controller note
 

@@ -75,6 +75,21 @@ impl FrameAllocator {
         }
     }
 
+    /// Allocates `count` physically contiguous frames (bump only — the free
+    /// list is not consulted, since recycled frames may not be adjacent).
+    /// Returns the base physical address. Used for multi-page regions like
+    /// per-hart stacks.
+    pub fn alloc_contiguous(&mut self, count: usize) -> Option<usize> {
+        let bytes = count * FRAME_SIZE;
+        if count == 0 || self.next + bytes > self.end {
+            return None;
+        }
+        let base = self.next;
+        self.next += bytes;
+        self.in_use += count;
+        Some(base)
+    }
+
     /// Returns a previously allocated frame to the free list.
     pub fn free(&mut self, frame: usize) {
         // SAFETY: `frame` is a frame this allocator handed out (identity-mapped
@@ -119,6 +134,11 @@ pub fn init(start: usize, end: usize) {
 /// Allocates a physical frame from the global allocator.
 pub fn alloc() -> Option<usize> {
     allocator().alloc()
+}
+
+/// Allocates `count` physically contiguous frames from the global allocator.
+pub fn alloc_contiguous(count: usize) -> Option<usize> {
+    allocator().alloc_contiguous(count)
 }
 
 /// Frees a physical frame back to the global allocator.

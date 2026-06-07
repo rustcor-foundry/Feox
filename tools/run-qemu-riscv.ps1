@@ -6,7 +6,7 @@ param(
 
     [int]$MemoryMiB = 256,
 
-    [int]$Cores = 1,
+    [int]$Cores = 4,
 
     [switch]$SkipBuild,
 
