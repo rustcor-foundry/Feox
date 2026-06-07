@@ -8,6 +8,7 @@
 pub mod cpu;
 pub mod fdt;
 pub mod frame;
+pub mod heap;
 pub mod net;
 pub mod nvme;
 pub mod paging;
@@ -194,6 +195,34 @@ fn init_memory(dtb: usize) -> bool {
         frame::total(),
         frame::available()
     );
+
+    // Milestone 10: carve a heap region from the frame pool and bring up the
+    // global allocator, then stress it (Vec growth + Box) to prove `alloc`.
+    const HEAP_FRAMES: usize = 2048; // 8 MiB
+    if let Some(heap_base) = frame::alloc_contiguous(HEAP_FRAMES) {
+        let heap_size = HEAP_FRAMES * frame::FRAME_SIZE;
+        // SAFETY: a fresh, contiguous, identity-mapped frame-pool region handed
+        // out exactly once.
+        unsafe { heap::init(heap_base, heap_size) };
+        let mut v = alloc::vec::Vec::new();
+        for i in 0..1000u64 {
+            v.push(i * i);
+        }
+        let sum: u64 = v.iter().sum();
+        let boxed = alloc::boxed::Box::new(0xFEu64);
+        crate::kprintln!(
+            "[feox] heap: {} MiB online; Vec(len={}) sum={}, Box={:#x}",
+            heap_size >> 20,
+            v.len(),
+            sum,
+            *boxed
+        );
+        drop(v);
+        drop(boxed);
+        crate::kprintln!("[feox] milestone 10: kernel heap online.");
+    } else {
+        crate::kprintln!("[feox] heap: out of frames for the kernel heap");
+    }
 
     // Milestone 4b: replace the bootstrap gigapage identity map with a
     // fine-grained kernel address space (per-section W^X) built from the frame
