@@ -39,12 +39,14 @@ const VIRTIO_ID_NET: u32 = 1;
 
 // virtio-mmio registers.
 const R_MAGIC: usize = 0x000;
+const R_VERSION: usize = 0x004;
 const R_DEVICE_ID: usize = 0x008;
 const R_DEVICE_FEATURES: usize = 0x010;
 const R_DEVICE_FEATURES_SEL: usize = 0x014;
 const R_DRIVER_FEATURES: usize = 0x020;
 const R_DRIVER_FEATURES_SEL: usize = 0x024;
 const R_QUEUE_SEL: usize = 0x030;
+const R_QUEUE_NUM_MAX: usize = 0x034;
 const R_QUEUE_NUM: usize = 0x038;
 const R_QUEUE_READY: usize = 0x044;
 const R_QUEUE_NOTIFY: usize = 0x050;
@@ -204,6 +206,15 @@ impl VirtioNet {
             crate::kprintln!("[feox] net: no virtio-net transport found");
             return None;
         }
+        crate::kprintln!(
+            "[feox] net: virtio-mmio @ {:#x} version={} qnummax={}",
+            base,
+            mmio_r(base, R_VERSION),
+            {
+                mmio_w(base, R_QUEUE_SEL, 0);
+                mmio_r(base, R_QUEUE_NUM_MAX)
+            }
+        );
 
         // Reset, then ACKNOWLEDGE + DRIVER.
         mmio_w(base, R_STATUS, 0);
@@ -243,6 +254,11 @@ impl VirtioNet {
         Self::queue_setup(base, RX_QUEUE, rx_frame);
         Self::queue_setup(base, TX_QUEUE, tx_frame);
 
+        // DRIVER_OK — device is live. Per spec, queues must be configured
+        // before this, and only used (notified) after it.
+        mmio_w(base, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK);
+        let status = mmio_r(base, R_STATUS);
+
         let mut dev = Self {
             base,
             mac,
@@ -252,7 +268,7 @@ impl VirtioNet {
             tx_buf,
         };
 
-        // Post one receive buffer per descriptor.
+        // Post one receive buffer per descriptor, then notify (after DRIVER_OK).
         for i in 0..QSIZE {
             let Some(buf) = frame::alloc() else {
                 crate::kprintln!("[feox] net: out of frames for RX buffers");
@@ -263,10 +279,10 @@ impl VirtioNet {
                 .set_desc(i, buf as u64, RX_BUF_SIZE as u32, DESC_F_WRITE, 0);
             dev.rx.push_avail(i);
         }
+        fence(Ordering::SeqCst);
         mmio_w(base, R_QUEUE_NOTIFY, u32::from(RX_QUEUE));
 
-        // DRIVER_OK — device is live.
-        mmio_w(base, R_STATUS, S_ACKNOWLEDGE | S_DRIVER | S_FEATURES_OK | S_DRIVER_OK);
+        crate::kprintln!("[feox] net: status={:#x} after DRIVER_OK", status);
 
         crate::kprintln!(
             "[feox] net: virtio-net @ {:#x} mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
