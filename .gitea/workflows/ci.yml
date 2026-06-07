@@ -89,7 +89,7 @@ jobs:
             || { echo "::error::Feox riscv64 NVMe identify round-trip marker not found"; exit 1; }
           grep -q 'NVMe block I/O verified' "$log" \
             || { echo "::error::Feox riscv64 NVMe block-I/O marker not found"; exit 1; }
-          grep -q 'hart 1 alive' "$log" \
+          grep -q 'alive (S-mode' "$log" \
             || { echo "::error::Feox riscv64 secondary-hart marker not found"; exit 1; }
           grep -q 'SMP secondary harts up' "$log" \
             || { echo "::error::Feox riscv64 SMP marker not found"; exit 1; }
