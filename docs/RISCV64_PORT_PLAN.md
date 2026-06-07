@@ -1,11 +1,12 @@
 # riscv64 Port Plan
 
-Status: **Milestone 4b complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 5 complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
 recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
-tree for the real RAM map, stands up a physical frame allocator, then builds a
-fine-grained kernel address space with per-section W^X permissions (verified by
-walking the live page table), and parks the boot hart.
+tree for the real RAM map, stands up a physical frame allocator, builds a
+fine-grained kernel address space with per-section W^X permissions, drives the
+portable `feox-async` executor (two self-waking tasks run to completion), and
+parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -83,8 +84,10 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
    - **4c** (next) — high-half/physmap or begin un-gating the shared `memory`
      module for riscv64 (it carries x86 assumptions), and honor the FDT
      memory-reservation block in the allocator.
-5. **Runtime** — bring `feox-async` up on riscv64; re-enable the `runtime`
-   feature for this target.
+5. **Runtime** ✅ — `feox-async` (arch-agnostic, no-alloc, static-storage
+   executor) builds for riscv64 with the `runtime` feature on; `runtime.rs`
+   spawns two self-waking `Yield` tasks on a `SingleCoreExecutor` and runs them
+   to completion, proving the executor schedules futures on riscv64.
 6. **NVMe** — QEMU `virt` exposes an NVMe device; exercise `feox-nvme` over it.
 7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
    replacing the x86 AP trampoline.

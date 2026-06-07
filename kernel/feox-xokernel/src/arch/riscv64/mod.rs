@@ -10,6 +10,8 @@ pub mod fdt;
 pub mod frame;
 pub mod paging;
 pub mod panic;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 pub mod serial;
 pub mod trap;
 
@@ -66,6 +68,13 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // Milestone 4: parse the device tree for the real RAM map and stand up a
     // physical frame allocator over the usable window.
     init_memory(dtb);
+
+    // Milestone 5: drive the portable feox-async executor on riscv64.
+    #[cfg(feature = "runtime")]
+    {
+        crate::kprintln!("[feox] starting feox-async runtime demo...");
+        runtime::demo();
+    }
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

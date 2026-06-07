@@ -72,6 +72,8 @@ jobs:
             || { echo "::error::Feox riscv64 sv39-walker marker not found"; exit 1; }
           grep -q 'text  : va=.* \[r-x\]' "$log" \
             || { echo "::error::Feox riscv64 kernel text is not mapped r-x (W^X check)"; exit 1; }
+          grep -q 'feox-async executor drained' "$log" \
+            || { echo "::error::Feox riscv64 async-runtime marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X map)."
+          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async)."
