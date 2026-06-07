@@ -220,9 +220,16 @@ fn discover_pci() {
             crate::kprintln!("[feox] milestone 6a: PCIe ECAM up; NVMe controller discovered.");
 
             // Milestone 6b: assign the BAR and bring the controller to ready.
-            // Milestone 6c: issue an admin Identify command round-trip.
+            // Milestone 6c: admin Identify round-trip.
+            // Milestone 6d: identify namespace, create an I/O queue, and verify
+            // block I/O by writing a pattern to LBA 0 and reading it back.
             if let Some(mut controller) = nvme::init(&dev) {
-                let _ = controller.identify_controller();
+                if controller.identify_controller()
+                    && controller.identify_namespace()
+                    && controller.create_io_queues()
+                {
+                    let _ = controller.block_io_selftest();
+                }
             }
         }
         None => {
