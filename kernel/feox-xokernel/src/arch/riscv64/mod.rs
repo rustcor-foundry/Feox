@@ -8,6 +8,7 @@
 pub mod cpu;
 pub mod panic;
 pub mod serial;
+pub mod trap;
 
 use crate::{PROJECT_NAME, PROJECT_STYLE};
 
@@ -28,6 +29,20 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     crate::kprintln!("arch: riscv64 (S-mode)");
     crate::kprintln!("boot hart: {}", hartid);
     crate::kprintln!("device tree: {:#x}", dtb);
+
+    // Milestone 2: install the supervisor trap vector and prove the full
+    // save -> dispatch -> resume cycle by taking a deliberate breakpoint. If
+    // the trap path were wrong this would never return; reaching the line
+    // after `ebreak` is the proof of life.
+    trap::init();
+    crate::kprintln!("[feox] traps installed (stvec -> trap_entry); testing ebreak...");
+    // SAFETY: `ebreak` raises a synchronous breakpoint exception, which the
+    // installed handler catches and resumes past. No memory or stack effects.
+    unsafe {
+        core::arch::asm!("ebreak");
+    }
+    crate::kprintln!("[feox] breakpoint trap handled; execution resumed.");
+
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
     cpu::hlt_loop()

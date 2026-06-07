@@ -62,6 +62,8 @@ jobs:
             -display none -monitor none -serial "file:$log" \
             -bios default -kernel "$elf" -no-reboot </dev/null >/dev/null 2>&1 || true
           echo "----- serial log -----"; cat "$log"; echo "----------------------"
+          grep -q 'breakpoint trap handled' "$log" \
+            || { echo "::error::Feox riscv64 trap-handling marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot marker observed."
+          echo "riscv64 smoke-boot markers observed (boot + trap handling)."
