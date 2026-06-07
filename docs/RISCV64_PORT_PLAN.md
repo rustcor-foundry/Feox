@@ -166,15 +166,21 @@ Still required before it can boot on the RV:
     works on riscv64. Limitation: no free-coalescing / front-padding reclaim yet
     (documented follow-up). First rung of the Route-B exokernel build-out.
 
+11. **VM abstraction** ✅ — `paging::AddressSpace` (`new`/`map`/`unmap`/
+    `translate`/`activate`/`destroy`): build/teardown arbitrary sv39 spaces and
+    walk them without activating. `translate` is now root-parameterized; PTE
+    R/W/X flags are public. Proven by a scratch space (map non-identity VAs ->
+    translate -> unmap -> destroy). Foundation for per-process U-mode spaces.
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
-Ladder after the heap: VM abstraction (create/map address spaces) -> U-mode
-execution (`sret`/`ecall`/`sscratch`) -> ASI syscall dispatch + capability table
-(un-gate `capability.rs`, wire `feox-asi`) -> process/thread + preemptive
-scheduler (m9 timer) -> ELF loader -> libOS + app delivery -> first U-mode app;
-then NIC-as-capability + hand-rolled TCP in the network-service app, then the
-RV2 hardware tail.
+Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution
+(`sret`/`ecall`/`sscratch`) -> M13 ASI syscall dispatch + capability table
+(un-gate `capability.rs`, wire `feox-asi`) -> M14 process/thread + preemptive
+scheduler (m9 timer) -> M15 ELF loader -> M16 libOS + app delivery -> M17 first
+U-mode app; then NIC-as-capability + hand-rolled TCP in the network-service app,
+then the RV2 hardware tail.
 
 ## Other follow-ups
 
