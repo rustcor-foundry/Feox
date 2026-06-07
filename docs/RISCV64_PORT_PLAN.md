@@ -1,13 +1,14 @@
 # riscv64 Port Plan
 
-Status: **Milestone 6c complete** — Feox boots in S-mode under QEMU `virt`,
+Status: **Milestone 6d complete** — Feox boots in S-mode under QEMU `virt`,
 prints its banner over the SBI console, installs a supervisor trap vector,
 recovers from a deliberate `ebreak`, brings up sv39 paging, parses the device
 tree for the real RAM map, stands up a physical frame allocator, builds a
 fine-grained kernel address space with per-section W^X permissions, drives the
 portable `feox-async` executor, enumerates PCIe over ECAM, brings the NVMe
-controller to ready, completes an admin Identify command round-trip (reading
-the controller's model/serial via DMA), and parks the boot hart.
+controller to ready, identifies it and its namespace, creates an I/O queue
+pair, and verifies real block I/O (writes a pattern to LBA 0 and reads it back),
+then parks the boot hart.
 
 ## Boot model (how riscv64 differs from x86_64)
 
@@ -105,11 +106,13 @@ SBI-console bring-up. The x86-coupled top-level modules (`acpi`, `lapic`,
      CQ phase bit, check status, advance + ring the CQ doorbell, and read back
      the model/serial strings. Proves the full command/completion/DMA cycle
      (doorbells at `BAR + 0x1000`, stride `4 << DSTRD`).
-   - **6d** (next) — Create I/O CQ/SQ (admin commands) + a real block Read into
-     a frame; integrate `feox-nvme` (enable the `storage` feature) for the
-     queue/inflight logic.
+   - **6d** ✅ — a `Queue` abstraction (submit + phase-poll) shared by admin and
+     I/O; Identify Namespace (LBA size + capacity), Create I/O CQ/SQ (queue id
+     1), then a write-then-read-back-and-compare of LBA 0 proves real block I/O.
+     Still hand-rolled MMIO/DMA — `feox-nvme` integration is a later cleanup.
+
 7. **SMP** — secondary harts via the SBI HSM extension (`hart_start`),
-   replacing the x86 AP trampoline.
+   replacing the x86 AP trampoline. **(next)**
 
 ## Interrupt-controller note
 
