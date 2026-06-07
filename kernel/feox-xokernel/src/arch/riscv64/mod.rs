@@ -15,6 +15,7 @@ pub mod pci;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod serial;
+pub mod smp;
 pub mod trap;
 
 use core::ptr::addr_of;
@@ -80,6 +81,9 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
     // Milestone 6a: enumerate PCIe over ECAM and discover the NVMe controller.
     discover_pci();
+
+    // Milestone 7: bring up the secondary harts via the SBI HSM extension.
+    smp::bring_up_secondary_harts(hartid);
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
