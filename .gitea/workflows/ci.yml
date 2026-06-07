@@ -96,6 +96,10 @@ jobs:
             || { echo "::error::Feox riscv64 SMP marker not found"; exit 1; }
           grep -q 'virtio-net link up' "$log" \
             || { echo "::error::Feox riscv64 virtio-net ARP round-trip marker not found"; exit 1; }
+          grep -q 'IPv4/ICMP ping ok' "$log" \
+            || { echo "::error::Feox riscv64 ICMP ping marker not found"; exit 1; }
+          grep -q 'networking complete' "$log" \
+            || { echo "::error::Feox riscv64 UDP/DHCP marker not found"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
-          echo "riscv64 smoke-boot markers observed (boot + trap + sv39 + frames + W^X + async + pcie + nvme + identify + block-io + smp + net)."
+          echo "riscv64 smoke-boot markers observed (boot..smp + net: arp/icmp/dhcp)."
