@@ -416,9 +416,21 @@ bootstrap identity map raised to 16 GiB so a high control DTB on an 8 GB
 board is readable; UART `status="disabled"` filtering (a clock-gated UART
 MMIO read stalls the bus past any poll bound); and frame-pool capping below
 firmware-reserved ranges (memreserve block + `/reserved-memory` nodes — a
-store fault on the Ky X1, invisible on QEMU). The same review's correctness
-findings (PTE_U on copy-out, NVMe SQ N-1, doorbell/virtio fences, ELF
-bounds) are tracked for the follow-on hardening PRs.
+store fault on the Ky X1, invisible on QEMU). QA hardening (M29): the review's headline correctness finding fixed — every
+ASI lane validates user pointers against the caller's `PTE_U` mappings before
+the kernel touches them. The trap runs in S-mode with `sstatus.SUM` set, and
+S-mode can write *any* mapped page (kernel `U=0` pages included) regardless of
+SUM, so an app passing a kernel VA as an output slot or event-slot could make
+the kernel write/increment kernel state. `user_range_ok`/`user_out_ok`
+page-walk the range requiring `PTE_U` (+R/W); a central args check in
+`dispatch` covers every lane's input read, per-site checks cover the five
+output pointers (mem_map out_region, mem_vtop out_physical_address,
+net_get_info out_info, storage_poll out_completion, cap_list buffer), and the
+IrqAttach/ThreadPark slot translations now require `PTE_U`. Validation is
+gated on a `from_user` flag so the kernel boot self-test (trusted pointers)
+still works. Also fixed in passing: the mem_map VA bump leaked the window on
+the overflow path (now reserve-on-success). Remaining review findings (NVMe
+SQ N-1, doorbell/virtio fences, ELF bounds) are the next hardening PR.
 
 26. **DT-derived PLIC + interrupt numbers** ✅ — the last hardcoded QEMU
     interrupt assumption removed. `fdt.rs` gains `plic()` (compatible

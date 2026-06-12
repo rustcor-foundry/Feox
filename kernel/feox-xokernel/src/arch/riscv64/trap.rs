@@ -311,6 +311,7 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
             frame.regs[REG_A0] as *const u8,
             frame.regs[REG_A1] as u64,
             &mut value,
+            true, // from U-mode: validate the caller's pointers
         );
         crate::kprintln!(
             "[feox] asi: ecall op={:#x} -> code={:#x} value={}",
