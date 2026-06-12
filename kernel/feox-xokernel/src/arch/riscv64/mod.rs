@@ -16,6 +16,7 @@ pub mod panic;
 pub mod pci;
 #[cfg(feature = "runtime")]
 pub mod runtime;
+pub mod sched;
 pub mod serial;
 pub mod smp;
 pub mod syscall;
@@ -107,7 +108,7 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         .and_then(|tree| tree.timebase_hz())
         .map_or(10_000_000, u64::from);
     crate::kprintln!("[feox] timer: arming (timebase {} Hz)...", timebase);
-    time::enable(timebase);
+    time::enable(timebase, 10);
     while time::ticks() < 5 {
         cpu::halt();
     }
@@ -123,6 +124,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // Milestone 13: ASI syscall dispatch over the shared capability table —
     // kernel-side cap_request self-test, then a U-mode CapList round trip.
     syscall::demo();
+
+    // Milestone 14: threads + preemptive round-robin scheduler (timer-driven
+    // trap-level context switching over the M12 longjmp primitive).
+    sched::demo(timebase);
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

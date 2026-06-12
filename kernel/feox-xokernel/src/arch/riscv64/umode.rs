@@ -45,22 +45,32 @@ global_asm!(
     "sd s9, 88(t0)",
     "sd s10, 96(t0)",
     "sd s11, 104(t0)",
-    // sstatus: clear SPP (bit 8) so sret returns to U-mode, clear SPIE (bit 5)
-    // so interrupts stay masked in U-mode for this demo.
-    "li t1, 0x120",
+    // sstatus: clear SPP (bit 8) so sret returns to U-mode, and SIE (bit 1)
+    // so no S-mode interrupt can land between arming sscratch below and the
+    // sret (it would be misclassified as from-U). Set SPIE (bit 5) and SUM
+    // (bit 18, so S-mode trap code may access user memory). S-level interrupt
+    // sources unmasked in sie (the scheduler's timer) deliver in U-mode
+    // regardless of SIE.
+    "li t1, 0x102",
     "csrc sstatus, t1",
-    // set SUM (bit 18) so S-mode trap code may access user memory.
-    "li t1, 0x40000",
+    "li t1, 0x40020",
     "csrs sstatus, t1",
+    // Arm sscratch with the trap-stack top: traps taken from U-mode switch to
+    // the dedicated kernel trap stack (see trap.rs).
+    "la t1, {trap_stack_top}",
+    "ld t1, 0(t1)",
+    "csrw sscratch, t1",
     "csrw sepc, a0",
     "mv sp, a1",
     "sret",
-    // resume_kernel(): clear SUM, restore the saved kernel context, and return
-    // to enter_user's caller (longjmp). Never returns to its own caller.
+    // resume_kernel(): clear SUM, zero sscratch (back in S-mode for good),
+    // restore the saved kernel context, and return to enter_user's caller
+    // (longjmp). Never returns to its own caller.
     ".global resume_kernel",
     "resume_kernel:",
     "li t1, 0x40000",
     "csrc sstatus, t1",
+    "csrw sscratch, zero",
     "la t0, {ctx}",
     "ld ra, 0(t0)",
     "ld sp, 8(t0)",
@@ -78,12 +88,13 @@ global_asm!(
     "ld s11, 104(t0)",
     "ret",
     ctx = sym KERNEL_CONTEXT,
+    trap_stack_top = sym super::trap::TRAP_STACK_TOP,
 );
 
 unsafe extern "C" {
     /// Enters U-mode at `entry` with stack `user_sp`; returns (via the trap
     /// dispatcher's `resume_kernel`) once the user exits.
-    fn enter_user(entry: usize, user_sp: usize);
+    pub(super) fn enter_user(entry: usize, user_sp: usize);
     /// Longjmp back into the kernel at the point `enter_user` was called.
     fn resume_kernel() -> !;
 }
