@@ -127,6 +127,8 @@ jobs:
             || { echo "::error::Feox riscv64 net-lane marker not found (or U-mode ARP check failed)"; exit 1; }
           grep -q 'user-space TCP.*ok=true' "$log" \
             || { echo "::error::Feox riscv64 TCP marker not found (or handshake/echo check failed)"; exit 1; }
+          grep -q 'RFS on NVMe.*ok=true' "$log" \
+            || { echo "::error::Feox riscv64 RFS marker not found (or format/remount/read-back failed)"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
           echo "riscv64 smoke-boot markers observed (boot..smp + net + timer irq)."

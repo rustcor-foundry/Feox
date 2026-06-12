@@ -7,7 +7,7 @@ loader-arm = "build -p feox-loader-uefi --bin feox-loader-uefi --target aarch64-
 # `runtime` (feox-async executor) and `storage` (feox-nvme: the riscv64 NVMe
 # driver is built on the crate's QueueRing data path since M22) features are
 # on; the remaining default-feature surface stays x86-shaped.
-kernel-riscv = "build -p feox-xokernel --bin feox-xokernel --target riscv64gc-unknown-none-elf --no-default-features --features runtime,storage"
+kernel-riscv = "build -p feox-xokernel --bin feox-xokernel --target riscv64gc-unknown-none-elf --no-default-features --features runtime,storage,rfs"
 
 [target.x86_64-unknown-none]
 rustflags = [

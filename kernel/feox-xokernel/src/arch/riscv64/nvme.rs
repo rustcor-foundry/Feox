@@ -23,7 +23,8 @@ use core::ptr::{NonNull, read_volatile, write_volatile};
 use core::task::{Context, Poll, Waker};
 
 use feox_nvme::{
-    ControllerRegisters, NvmeError, QueueRing, SubmissionQueueEntry, parse_identify_namespace,
+    ControllerRegisters, NamespaceGeometry, NvmeError, QueueRing, SubmissionQueueEntry,
+    parse_identify_namespace,
 };
 
 use super::{frame, pci};
@@ -107,14 +108,17 @@ fn execute<const N: usize>(
     }
 }
 
+/// An I/O queue ring of this driver's depth (what RFS's adapter consumes).
+pub type IoRing = QueueRing<IO_QUEUE_DEPTH>;
+
 /// A brought-up NVMe controller with its admin ring (and, after setup, an
 /// I/O ring pair), all `feox-nvme` machinery.
 pub struct Controller {
     regs: ControllerRegisters,
     dstrd: u8,
     admin: QueueRing<ADMIN_QUEUE_DEPTH>,
-    io: Option<QueueRing<IO_QUEUE_DEPTH>>,
-    lba_size: usize,
+    io: Option<IoRing>,
+    geometry: NamespaceGeometry,
 }
 
 impl Controller {
@@ -153,7 +157,7 @@ impl Controller {
             crate::kprintln!("[feox] nvme: implausible Identify Namespace data");
             return false;
         };
-        self.lba_size = geometry.block_size;
+        self.geometry = geometry;
         crate::kprintln!(
             "[feox] nvme: namespace {} — {} blocks, {}-byte LBA",
             NSID,
@@ -163,31 +167,25 @@ impl Controller {
         true
     }
 
-    /// Creates the I/O completion + submission queue pair (queue id 1).
-    #[must_use]
-    pub fn create_io_queues(&mut self) -> bool {
-        let (Some(cq), Some(sq)) = (dma_frame("I/O CQ"), dma_frame("I/O SQ")) else {
-            return false;
-        };
+    /// Creates one I/O completion + submission queue pair with id `qid` and
+    /// returns its ring.
+    fn create_io_ring(&mut self, qid: u16) -> Option<IoRing> {
+        let (cq, sq) = (dma_frame("I/O CQ")?, dma_frame("I/O SQ")?);
 
-        let cq_cmd = SubmissionQueueEntry::create_io_completion_queue(
-            IO_QUEUE_ID,
-            IO_QUEUE_DEPTH as u16,
-            cq as u64,
-            0,
-        );
+        let cq_cmd =
+            SubmissionQueueEntry::create_io_completion_queue(qid, IO_QUEUE_DEPTH as u16, cq as u64, 0);
         if !execute(&mut self.admin, cq_cmd, "create-io-cq") {
-            return false;
+            return None;
         }
         let sq_cmd = SubmissionQueueEntry::create_io_submission_queue(
-            IO_QUEUE_ID,
+            qid,
             IO_QUEUE_DEPTH as u16,
-            IO_QUEUE_ID,
+            qid,
             sq as u64,
             0,
         );
         if !execute(&mut self.admin, sq_cmd, "create-io-sq") {
-            return false;
+            return None;
         }
 
         // SAFETY: both rings are zeroed, device-registered (the two admin
@@ -196,21 +194,53 @@ impl Controller {
         let ring = unsafe {
             QueueRing::new(
                 self.regs,
-                IO_QUEUE_ID,
+                qid,
                 self.dstrd,
                 NonNull::new_unchecked(sq as *mut SubmissionQueueEntry),
                 NonNull::new_unchecked(cq as *mut feox_nvme::CompletionQueueEntry),
             )
         };
-        self.io = Some(ring);
         crate::kprintln!(
             "[feox] nvme: I/O queue {} ready (SQ={:#x} CQ={:#x}, depth {})",
-            IO_QUEUE_ID,
+            qid,
             sq,
             cq,
             IO_QUEUE_DEPTH
         );
-        true
+        Some(ring)
+    }
+
+    /// Creates the primary I/O queue pair (queue id 1).
+    #[must_use]
+    pub fn create_io_queues(&mut self) -> bool {
+        match self.create_io_ring(IO_QUEUE_ID) {
+            Some(ring) => {
+                self.io = Some(ring);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Creates an additional I/O queue pair (e.g. for a second block-device
+    /// handle, like the RFS remount proof).
+    pub fn create_extra_io_ring(&mut self, qid: u16) -> Option<IoRing> {
+        self.create_io_ring(qid)
+    }
+
+    /// The namespace geometry from Identify Namespace.
+    #[must_use]
+    pub fn geometry(&self) -> NamespaceGeometry {
+        self.geometry
+    }
+
+    /// Consumes the controller, yielding the primary I/O ring + geometry —
+    /// the parts an `rfs-feox` block device is built from. (The admin ring
+    /// and registers are dropped; queues stay live at the controller until
+    /// reset, which never happens during bring-up.)
+    #[must_use]
+    pub fn into_io_ring(self) -> Option<(IoRing, NamespaceGeometry)> {
+        Some((self.io?, self.geometry))
     }
 
     /// Writes a known pattern to LBA 0, issues an NVM Flush barrier, then
@@ -227,7 +257,7 @@ impl Controller {
         else {
             return false;
         };
-        let len = self.lba_size.min(4096);
+        let len = self.geometry.block_size.min(4096);
         fill_pattern(write_buf, len);
 
         let write = SubmissionQueueEntry::nvm_write(NSID, 0, 0, write_buf as u64, 0);
@@ -334,7 +364,10 @@ pub fn init(device: &pci::PciDevice) -> Option<Controller> {
         dstrd,
         admin,
         io: None,
-        lba_size: DEFAULT_LBA_SIZE,
+        geometry: NamespaceGeometry {
+            block_count: 0,
+            block_size: DEFAULT_LBA_SIZE,
+        },
     })
 }
 

@@ -23,3 +23,9 @@ unsafe_op_in_unsafe_fn = "deny"
 module_name_repetitions = "allow"
 pedantic = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "deny"
+
+# rfs-feox (a git dependency from the RFS repo) itself depends on feox-nvme
+# via git on THIS repo; redirect that to the local path crate so there is one
+# feox-nvme and its types unify with the kernel's.
+[patch."https://github.com/rustcor-foundry/Feox.git"]
+feox-nvme = { path = "crates/feox-nvme" }
