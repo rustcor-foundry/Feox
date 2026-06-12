@@ -3,14 +3,18 @@ OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
 /*
- * QEMU `virt` (and the real Orange Pi RV via U-Boot) hands control to S-mode
- * with the firmware (OpenSBI) resident at 0x8000_0000. A `-kernel` payload is
- * loaded at 0x8020_0000, which is where we base the image so the ELF load
- * address matches the entry PC OpenSBI jumps to. No relocation is performed;
- * the kernel runs from its physical link address until sv39 paging is wired up.
+ * Orange Pi RV (StarFive JH7110): DRAM starts at 0x4000_0000, so the image
+ * links at DRAM base + the 2 MiB text_offset declared in the boot image
+ * header. U-Boot's `booti` relocates the Image there if needed and enters
+ * in S-mode with a0=hartid, a1=dtb (the RISC-V Linux boot protocol). No
+ * self-relocation is performed; the kernel runs from its physical link
+ * address until sv39 paging is wired up.
+ *
+ * Verify on the board before first boot: `bdinfo` in U-Boot shows the DRAM
+ * bank start; this BASE_ADDRESS must equal that start + 0x200000.
  */
 
-BASE_ADDRESS = 0x80200000;
+BASE_ADDRESS = 0x40200000;
 
 SECTIONS
 {

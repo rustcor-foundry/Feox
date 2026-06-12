@@ -369,6 +369,29 @@ snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
     `into_io_ring`/`geometry` for this. Follow-ups: zero-copy registered
     buffers; expose the volume to U-mode via a storage service.
 
+## The hardware tail (Orange Pi RV / RV2)
+
+24. **Hardware boot enablement + packaging** ✅ — the kernel boots real
+    boards through the RISC-V Linux boot protocol: a 64-byte boot image
+    header (so U-Boot `booti` loads the objcopy'd flat Image and enters with
+    a0=hartid/a1=dtb), bss self-zeroing in `_start` (ELF loaders zero bss;
+    `booti` does not), per-board linker scripts (`linker-riscv64-jh7110.ld`
+    @ 0x4020_0000 for the Orange Pi RV, `linker-riscv64-ky-x1.ld` @
+    0x0020_0000 for the Orange Pi RV2) built via `tools/build-board.*` (env
+    RUSTFLAGS — config rustflags would merge), SMP gated to QEMU (JH7110
+    hart 0 is the MMU-less S7; DT-driven hart selection is the follow-up),
+    and the frame pool clamped below the 4 GiB bootstrap identity map (RV2
+    boards carry 8 GB). CI's `package` job ships `feox-boot-images`: both
+    flat Images + the QEMU ELF + SHA256SUMS + `HARDWARE_BOOT.md` (boot
+    procedure, bdinfo verification, expected output, troubleshooting). On
+    hardware, the QEMU-window demos (PCIe/NVMe/net/PLIC/RFS) skip cleanly;
+    everything else (traps through ELF apps and IPC) runs unchanged.
+
+    Next on hardware: DT-driven SMP (honor `mmu-type`), native UART console,
+    DT-derived PLIC, then the board NICs (JH7110 dwmac / Ky X1 ethernet) and
+    storage behind the existing capability lanes — at which point the full
+    QEMU ladder (TCP, RFS) runs on silicon.
+
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.

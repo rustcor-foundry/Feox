@@ -40,6 +40,38 @@ jobs:
           targets: x86_64-unknown-uefi
       - run: cargo loader
 
+  package:
+    name: Package boot images (QEMU + Orange Pi RV/RV2)
+    runs-on: lx-ws01
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-none-elf
+          components: llvm-tools
+      - name: Build QEMU kernel (release ELF)
+        run: cargo build -p feox-xokernel --bin feox-xokernel --target riscv64gc-unknown-none-elf --no-default-features --features runtime,storage,rfs --release
+      - name: Build Orange Pi RV (JH7110) and RV2 (Ky X1) kernels
+        run: |
+          chmod +x tools/build-board.sh
+          tools/build-board.sh jh7110 --release
+          tools/build-board.sh ky-x1 --release
+      - name: Assemble dist (flat Images + checksums + boot guide)
+        run: |
+          set -euo pipefail
+          OBJCOPY=$(find "$(rustc --print sysroot)" -name llvm-objcopy | head -n1)
+          mkdir -p dist
+          cp target/riscv64gc-unknown-none-elf/release/feox-xokernel dist/feox-qemu.elf
+          "$OBJCOPY" -O binary target/jh7110/riscv64gc-unknown-none-elf/release/feox-xokernel dist/feox-jh7110-Image
+          "$OBJCOPY" -O binary target/ky-x1/riscv64gc-unknown-none-elf/release/feox-xokernel dist/feox-ky-x1-Image
+          cp docs/HARDWARE_BOOT.md dist/
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+      - uses: actions/upload-artifact@v3
+        with:
+          name: feox-boot-images
+          path: dist/
+
   kernel-riscv:
     name: Build + smoke-boot riscv64 kernel
     runs-on: lx-ws01

@@ -115,7 +115,15 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     };
 
     // Milestone 7: bring up the secondary harts via the SBI HSM extension.
-    smp::bring_up_secondary_harts(hartid);
+    // QEMU-only for now: on the JH7110 (VisionFive 2) hart 0 is the MMU-less
+    // S7 monitor core — blindly HSM-starting every other hart into our
+    // paging-on secondary entry would be fatal. DT-driven hart selection
+    // (mmu-type per cpu node) is the hardware follow-up.
+    if on_qemu {
+        smp::bring_up_secondary_harts(hartid);
+    } else {
+        crate::kprintln!("[feox] smp: skipped (non-QEMU; DT-driven hart selection TODO)");
+    }
 
     // Milestone 9: enable supervisor timer interrupts and take a few ticks.
     let timebase = fdt::parse(dtb)
@@ -213,8 +221,12 @@ fn init_memory(dtb: usize) -> bool {
 
     // Usable RAM starts just past the kernel image. The DTB sits high in RAM
     // on QEMU virt, so cap the window below it (everything at/above the DTB is
-    // left reserved for now); otherwise run to the end of RAM.
+    // left reserved for now); otherwise run to the end of RAM. Everything is
+    // additionally clamped below 4 GiB: the bootstrap identity map covers
+    // exactly four gigapages, and VisionFive 2 boards can carry 8 GB.
+    const IDENTITY_MAP_END: u64 = 4 << 30;
     let kernel_end = addr_of!(__kernel_end) as usize;
+    let ram_end = ram_end.min(IDENTITY_MAP_END);
     let usable_end = if (dtb as u64) > kernel_end as u64 && (dtb as u64) < ram_end {
         dtb
     } else {
