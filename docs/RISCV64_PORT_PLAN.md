@@ -442,8 +442,21 @@ write-before-MMIO barrier (`fence ow,ow` on riscv) when ringing the tail
 doorbell instead of a memory-only atomic fence (a reordering invisible on
 QEMU, real on hardware). The kernel's NVMe self-test skips a `>4 KiB` LBA
 format rather than DMA past its one-page buffer. Host-tested (the N-1 cap has
-a regression test). The remaining ELF-loader bounds + the park-timeout flake
-are the last hardening item.
+a regression test).
+
+QA hardening (M31): the last review items. The ELF loader uses overflow-safe
+`checked_add` on the segment file/vaddr arithmetic, constrains every PT_LOAD
+to the process VA window (slot 8) so a crafted/buggy segment can't map
+through a kernel-shared page-table subtree, and rejects segments that overlap
+a page (which `map_one` would silently orphan). The park `TIMEOUT` in both
+U-mode apps is lowered to 1 s (100 ticks) and the net/tcp/storage/irq/ipc
+demo budgets raised to 128 ticks, so a real stall now surfaces as the app's
+named diagnostic exit (`0xbNN`) instead of a silent budget stop — and a
+passing run is unaffected (it exits the moment the app calls ProcExit, well
+before any budget). This closes the four-agent review: the cleared-on-
+inspection items (trap save/restore, IDLE sentinel, destroy_user ordering,
+TCP close math, boot header, storage-lane no-move invariant) needed no
+change; everything actionable is fixed across M28-M31.
 
 26. **DT-derived PLIC + interrupt numbers** ✅ — the last hardcoded QEMU
     interrupt assumption removed. `fdt.rs` gains `plic()` (compatible

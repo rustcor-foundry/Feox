@@ -29,7 +29,11 @@ const GATEWAY_IP: [u8; 4] = [10, 0, 2, 2];
 const TX_OFF: u64 = 0;
 const RX_OFF: u64 = 2048;
 
-const TIMEOUT: Duration = Duration::from_nanos(2_000_000_000);
+/// Per-park timeout: 1 s (100 ticks at the 100 Hz scheduler). Well above any
+/// legitimate round trip (those resolve in a tick or two) but below every
+/// demo's run budget, so a genuine stall surfaces as the role's named
+/// diagnostic exit rather than a silent budget stop.
+const TIMEOUT: Duration = Duration::from_nanos(1_000_000_000);
 
 /// RX wake slot (bss; attached to the net RX interrupt).
 static SLOT: EventSlot = EventSlot::new();

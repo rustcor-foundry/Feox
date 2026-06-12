@@ -36,6 +36,14 @@ const PF_R: u32 = 4;
 const EHDR_SIZE: usize = 64;
 const PHDR_SIZE: usize = 56;
 
+/// The process VA window (sv39 root slot 8). Every `PT_LOAD` segment must map
+/// entirely within it: outside this window a segment's pages would walk a
+/// page-table subtree *shared* with the kernel (or other root slots), and a
+/// crafted/buggy ELF could overwrite live kernel mappings. Mirrors the
+/// kernel's mmap window bounds in `syscall.rs`.
+const PROC_WINDOW_BASE: usize = 0x2_0000_0000;
+const PROC_WINDOW_END: usize = 0x2_4000_0000;
+
 /// A loaded executable: its entry point and the leaf frames backing its
 /// segments (the caller frees them after the process is reaped — the address
 /// space's `destroy_user` only reclaims table frames).
@@ -101,9 +109,22 @@ pub fn load(space: &mut AddressSpace, image: &[u8]) -> Result<LoadedImage, &'sta
         let p_vaddr = read_u64(image, ph + 16).ok_or("truncated phdr")? as usize;
         let p_filesz = read_u64(image, ph + 32).ok_or("truncated phdr")? as usize;
         let p_memsz = read_u64(image, ph + 40).ok_or("truncated phdr")? as usize;
-        if p_filesz > p_memsz || image.len() < p_offset + p_filesz {
+        // File-range bounds, overflow-safe (a wrapping p_offset+p_filesz must
+        // not pass an unchecked `<` against image.len()).
+        let file_end = p_offset.checked_add(p_filesz);
+        if p_filesz > p_memsz || file_end.is_none_or(|end| end > image.len()) {
             free_frames(&frames);
             return Err("segment exceeds image bounds");
+        }
+        // Constrain the segment to the process window. Outside it, mapping
+        // would extend a kernel-shared page-table subtree.
+        let Some(vaddr_end) = p_vaddr.checked_add(p_memsz) else {
+            free_frames(&frames);
+            return Err("segment vaddr overflows");
+        };
+        if p_vaddr < PROC_WINDOW_BASE || vaddr_end > PROC_WINDOW_END {
+            free_frames(&frames);
+            return Err("segment vaddr outside the process window");
         }
 
         let mut flags = paging::PTE_U;
@@ -118,9 +139,17 @@ pub fn load(space: &mut AddressSpace, image: &[u8]) -> Result<LoadedImage, &'sta
         }
 
         let seg_start = align_down(p_vaddr);
-        let seg_end = align_up(p_vaddr + p_memsz);
+        let seg_end = align_up(vaddr_end);
         let mut page = seg_start;
         while page < seg_end {
+            // Reject overlapping segments: map_one would overwrite the leaf,
+            // silently orphaning the earlier segment's frame and losing its
+            // bytes. Our linker scripts page-align segments, so this only
+            // fires on a malformed image.
+            if space.translate(page).is_some() {
+                free_frames(&frames);
+                return Err("segments overlap a page");
+            }
             let Some(pa) = frame::alloc() else {
                 free_frames(&frames);
                 return Err("out of frames for a segment");
@@ -490,7 +519,7 @@ pub fn ipc_demo(timebase_hz: u64) {
 
     // Park/wake cycles resolve at tick granularity (~2 ticks per round plus
     // startup); give the run more headroom than the default budget.
-    sched::run_with_budget(timebase_hz, 64);
+    sched::run_with_budget(timebase_hz, 128);
 
     let (p_exited, p_value, _, _, p_parks) =
         sched::stats(producer.slot).unwrap_or((false, 0, 0, 0, 0));
@@ -555,7 +584,7 @@ pub fn irq_demo(timebase_hz: u64, on_qemu: bool) {
         super::net::irq_number().unwrap_or(0)
     );
 
-    sched::run_with_budget(timebase_hz, 64);
+    sched::run_with_budget(timebase_hz, 128);
 
     let (exited, value, _, _, parks) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
     let events = super::syscall::net_rx_events();
@@ -612,7 +641,7 @@ pub fn net_demo(timebase_hz: u64, on_qemu: bool) {
         NETAPP_ELF.len()
     );
 
-    sched::run_with_budget(timebase_hz, 64);
+    sched::run_with_budget(timebase_hz, 128);
 
     let (exited, value, _, _, parks) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
     let events = super::syscall::net_rx_events();
@@ -655,7 +684,7 @@ pub fn storage_demo(timebase_hz: u64, on_qemu: bool) {
     let expected = 0x5000 | (sig_sum & 0xFFF);
     crate::kprintln!("[feox] storage-lane: U-mode read of LBA 0...");
 
-    sched::run_with_budget(timebase_hz, 64);
+    sched::run_with_budget(timebase_hz, 128);
 
     let (exited, value, _, _, _) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
     let ok = exited && value == expected;
@@ -703,7 +732,7 @@ pub fn tcp_demo(timebase_hz: u64, on_qemu: bool) {
     let expected = 0x4000 | (payload_sum & 0xFFF);
     crate::kprintln!("[feox] tcp: U-mode TCP client -> 10.0.2.100:7777 (echo)...");
 
-    sched::run_with_budget(timebase_hz, 96);
+    sched::run_with_budget(timebase_hz, 128);
 
     let (exited, value, _, _, parks) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
     let events = super::syscall::net_rx_events();

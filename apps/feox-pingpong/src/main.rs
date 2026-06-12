@@ -18,10 +18,11 @@ use feox_libos as libos;
 /// Shared page VA (mapped into both processes by the kernel demo).
 const SHARED_VA: usize = 0x2_2000_0000;
 const ROUNDS: u64 = 4;
-/// Park timeout: 2 s (200 ticks at the 100 Hz scheduler) — far above the
-/// couple of ticks a wake actually takes, far below the run's tick budget…
-/// which would have stopped a stuck run long before this fires.
-const TIMEOUT: Duration = Duration::from_nanos(2_000_000_000);
+/// Park timeout: 1 s (100 ticks at the 100 Hz scheduler) — far above the
+/// couple of ticks a wake actually takes, but below the demo's run budget,
+/// so a stuck round surfaces as a named diagnostic exit rather than a silent
+/// budget stop.
+const TIMEOUT: Duration = Duration::from_nanos(1_000_000_000);
 
 // Shared page layout.
 fn data_slot() -> &'static EventSlot {
