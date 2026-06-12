@@ -112,6 +112,8 @@ jobs:
             || { echo "::error::Feox riscv64 ASI-syscall marker not found (or CapList mismatch)"; exit 1; }
           grep -q 'preemptive scheduler.*ok=true' "$log" \
             || { echo "::error::Feox riscv64 scheduler marker not found (or exits/preemption check failed)"; exit 1; }
+          grep -q 'ELF loader.*ok=true' "$log" \
+            || { echo "::error::Feox riscv64 ELF-loader marker not found (or isolation/exit check failed)"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
           echo "riscv64 smoke-boot markers observed (boot..smp + net + timer irq)."
