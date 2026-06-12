@@ -292,6 +292,20 @@ Still required before it can boot on the RV:
     (fixed PLIC base + virtio irq mapping; DT-derived bases with the
     hardware tail).
 
+20. **User-space NIC lanes** ✅ — the net device becomes a `CapType::NetDevice`
+    capability (minted at ecall-lane init; apps discover it via `CapList`),
+    driven through three new ASI ops: `NetSubmitTx` (transmit a frame from
+    capability-backed memory), `NetPollRx` (receive into capability memory;
+    value = length, 0 = none), `NetGetInfo` (MAC + MTU). `feox-asi` carries
+    the arg structs + `NetError` codes; the kernel verifies device-cap type +
+    permissions and bounds-checks buffer capabilities via `cap_to_phys_base`.
+    Proven by `apps/feox-netapp` role 0: a COMPLETE ARP round trip from
+    U-mode — the app builds the who-has itself in its mapped packet buffer,
+    transmits, parks on the RX interrupt (observed-before-poll ordering, so
+    frames can't be lost between poll and park), and parses the reply,
+    exiting with a gateway-MAC checksum the kernel predicts from its own M8
+    resolution.
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
@@ -300,9 +314,10 @@ M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
 scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
 app delivery ✅ -> M17 first real U-mode app (mem lane over capabilities) ✅
 -> M18 IPC events (EventSlot + ThreadPark) ✅ -> M19 external interrupts
-(PLIC + IrqAttach -> EventSlot) ✅; next: the network-service app — NIC
-RX/TX as ASI lanes over a net-device capability, hand-rolled TCP in user
-space — then the RV2 hardware tail.
+(PLIC + IrqAttach -> EventSlot) ✅ -> M20 user-space NIC lanes (NetDevice
+capability + NetSubmitTx/NetPollRx/NetGetInfo) ✅; next: M21 hand-rolled TCP
+in user space (against a QEMU guestfwd echo peer), then the RV2 hardware
+tail.
 
 ## Other follow-ups
 

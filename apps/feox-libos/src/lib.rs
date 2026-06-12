@@ -11,8 +11,9 @@
 use core::mem::size_of;
 
 use feox_asi::{
-    AsiOp, CapHandle, CapRequest, Duration, EventSlot, IrqAttachArgs, IrqDetachArgs, MapFlags,
-    MappedRegion, MemMapArgs, MemVtoPArgs, PageFlags, PhysicalAddress, SYSCALL_OK,
+    AsiOp, CapHandle, CapInfo, CapRequest, CapType, Duration, EventSlot, IrqAttachArgs,
+    IrqDetachArgs, MapFlags, MappedRegion, MemMapArgs, MemVtoPArgs, NetDeviceInfo,
+    NetGetInfoArgs, NetRxArgs, NetTxArgs, PageFlags, PhysicalAddress, SYSCALL_OK,
     ThreadParkArgs,
 };
 
@@ -119,6 +120,81 @@ pub fn mem_vtop(handle: CapHandle, virtual_address: u64) -> Option<u64> {
     };
     let (code, value) = syscall(AsiOp::MemVtoP, (&raw const args).cast(), size_of::<MemVtoPArgs>());
     (code == SYSCALL_OK).then_some(value)
+}
+
+/// Fills `out` with capability metadata; returns `(written, total)`.
+pub fn cap_list(out: &mut [CapInfo]) -> Option<(usize, u64)> {
+    let (code, total) = syscall(
+        AsiOp::CapList,
+        out.as_mut_ptr().cast(),
+        core::mem::size_of_val(out),
+    );
+    (code == SYSCALL_OK).then(|| (out.len().min(total as usize), total))
+}
+
+/// Finds the first capability of `cap_type` visible to this process.
+pub fn find_capability(cap_type: CapType) -> Option<CapHandle> {
+    let mut infos = [CapInfo::default(); 16];
+    let (written, _) = cap_list(&mut infos)?;
+    infos[..written]
+        .iter()
+        .find(|info| info.cap_type == cap_type)
+        .map(|info| info.handle)
+}
+
+/// Queries a net-device capability for its MAC and MTU.
+pub fn net_get_info(device: CapHandle) -> Option<NetDeviceInfo> {
+    let mut info = NetDeviceInfo::default();
+    let args = NetGetInfoArgs {
+        device,
+        out_info: &mut info,
+    };
+    let (code, _) = syscall(
+        AsiOp::NetGetInfo,
+        (&raw const args).cast(),
+        size_of::<NetGetInfoArgs>(),
+    );
+    (code == SYSCALL_OK).then_some(info)
+}
+
+/// Transmits one Ethernet frame from capability-backed memory.
+pub fn net_tx(device: CapHandle, buffer: CapHandle, offset: u64, length: u32) -> bool {
+    let args = NetTxArgs {
+        device,
+        buffer,
+        offset,
+        length,
+        _reserved: 0,
+    };
+    let (code, _) = syscall(AsiOp::NetSubmitTx, (&raw const args).cast(), size_of::<NetTxArgs>());
+    code == SYSCALL_OK
+}
+
+/// Receives one pending Ethernet frame into capability-backed memory.
+/// `Some(0)` means nothing was pending.
+pub fn net_rx(device: CapHandle, buffer: CapHandle, offset: u64) -> Option<u32> {
+    let args = NetRxArgs {
+        device,
+        buffer,
+        offset,
+    };
+    let (code, length) = syscall(AsiOp::NetPollRx, (&raw const args).cast(), size_of::<NetRxArgs>());
+    (code == SYSCALL_OK).then_some(length as u32)
+}
+
+/// Parks (repeatedly, tolerating spurious wakes) until `slot`'s counter
+/// reaches `target`. False on error or timeout.
+pub fn park_until(slot: &EventSlot, target: u64, timeout: Duration) -> bool {
+    loop {
+        let current = slot.load();
+        if current >= target {
+            return true;
+        }
+        match park(slot, current, timeout) {
+            Some(true) => {}
+            Some(false) | None => return false,
+        }
+    }
 }
 
 /// Attaches `slot` to an IRQ source (e.g. `feox_asi::IRQ_SOURCE_NET_RX`):

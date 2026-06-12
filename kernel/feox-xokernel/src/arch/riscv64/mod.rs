@@ -156,6 +156,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // device's RX interrupt (PLIC -> EventSlot signal).
     elf::irq_demo(timebase, on_qemu);
 
+    // Milestone 20: user-space NIC lanes — an app ARPs the gateway itself
+    // over NetSubmitTx/NetPollRx with a NetDevice capability.
+    elf::net_demo(timebase, on_qemu);
+
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
     cpu::hlt_loop()

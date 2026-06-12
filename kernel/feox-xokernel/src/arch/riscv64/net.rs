@@ -660,6 +660,45 @@ pub fn on_interrupt() -> bool {
     progressed
 }
 
+/// The live device's MMIO base (for capability registration).
+#[must_use]
+pub fn mmio_base() -> Option<usize> {
+    Some(active()?.dev.base)
+}
+
+/// The live device's MAC address.
+#[must_use]
+pub fn mac() -> Option<[u8; 6]> {
+    Some(active()?.dev.mac())
+}
+
+/// The gateway MAC resolved during the selftest (demo bookkeeping).
+#[must_use]
+pub fn gateway_mac() -> Option<[u8; 6]> {
+    Some(active()?.gw_mac)
+}
+
+/// Transmits one Ethernet frame on the live device (the net ASI lane's TX).
+pub fn tx_frame(frame_bytes: &[u8]) -> bool {
+    match active() {
+        Some(active) => active.dev.send(frame_bytes),
+        None => false,
+    }
+}
+
+/// Receives one pending Ethernet frame into `out` (the net ASI lane's RX).
+/// Returns the frame length, or `None` when nothing is pending.
+pub fn rx_frame(out: &mut [u8]) -> Option<usize> {
+    active()?.dev.poll_recv(out)
+}
+
+/// Discards every pending RX frame (so a demo starts from a quiet ring).
+pub fn drain_rx() {
+    let Some(active) = active() else { return };
+    let mut scratch = [0u8; RX_BUF_SIZE];
+    while active.dev.poll_recv(&mut scratch).is_some() {}
+}
+
 /// Sends one ICMP echo request to the gateway WITHOUT polling for the reply
 /// — the reply arrives as an RX interrupt (the M19 demo's wake stimulus).
 ///

@@ -112,6 +112,12 @@ pub enum AsiOp {
     StorageSubmitRead = 0x0500,
     /// Poll a previously submitted storage operation for completion.
     StoragePoll = 0x0501,
+    /// Transmit one Ethernet frame from capability-backed memory.
+    NetSubmitTx = 0x0600,
+    /// Receive one Ethernet frame into capability-backed memory.
+    NetPollRx = 0x0601,
+    /// Query a net-device capability for link information (MAC, MTU).
+    NetGetInfo = 0x0602,
     /// Submit many ASI operations in one syscall transition.
     AsiBatch = 0xFF00,
 }
@@ -141,6 +147,9 @@ impl AsiOp {
             0x0400 => Some(Self::DevEnumerate),
             0x0500 => Some(Self::StorageSubmitRead),
             0x0501 => Some(Self::StoragePoll),
+            0x0600 => Some(Self::NetSubmitTx),
+            0x0601 => Some(Self::NetPollRx),
+            0x0602 => Some(Self::NetGetInfo),
             0xFF00 => Some(Self::AsiBatch),
             _ => None,
         }
@@ -441,6 +450,8 @@ pub enum CapType {
     IpcEndpoint = 4,
     /// A storage device exposed through the storage ABI lane.
     StorageDevice = 5,
+    /// A network device exposed through the net ABI lane.
+    NetDevice = 6,
 }
 
 /// Capability permission bitset.
@@ -589,6 +600,79 @@ impl Default for EventSlot {
 /// Abstract IRQ source id for `IrqAttach`: the net device's RX events
 /// (used-ring progress on the receive queue).
 pub const IRQ_SOURCE_NET_RX: u32 = 1;
+
+/// Arguments for `NetSubmitTx` (0x0600): transmit `length` bytes starting at
+/// `offset` within `buffer`'s capability-backed memory as one Ethernet frame.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetTxArgs {
+    /// `CapType::NetDevice` capability (READ + WRITE).
+    pub device: CapHandle,
+    /// `CapType::PhysicalMemory` capability holding the frame (READ).
+    pub buffer: CapHandle,
+    /// Byte offset of the frame within the buffer capability.
+    pub offset: u64,
+    /// Frame length in bytes (14..=1514).
+    pub length: u32,
+    /// Reserved for future expansion while keeping a stable ABI footprint.
+    pub _reserved: u32,
+}
+
+/// Arguments for `NetPollRx` (0x0601): receive one pending Ethernet frame
+/// into `buffer` at `offset`. The syscall value register returns the frame
+/// length (0 = nothing pending).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetRxArgs {
+    /// `CapType::NetDevice` capability (READ + WRITE).
+    pub device: CapHandle,
+    /// `CapType::PhysicalMemory` capability receiving the frame (READ+WRITE).
+    pub buffer: CapHandle,
+    /// Byte offset within the buffer capability; at least 1514 bytes must
+    /// remain past it.
+    pub offset: u64,
+}
+
+/// Link information written by `NetGetInfo` (0x0602).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetDeviceInfo {
+    /// Device MAC address.
+    pub mac: [u8; 6],
+    /// Reserved for future expansion while keeping a stable ABI footprint.
+    pub _reserved: [u8; 2],
+    /// Maximum frame length accepted by `NetSubmitTx`.
+    pub mtu: u32,
+    /// Reserved for future expansion while keeping a stable ABI footprint.
+    pub _reserved2: u32,
+}
+
+/// Arguments for `NetGetInfo` (0x0602).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct NetGetInfoArgs {
+    /// `CapType::NetDevice` capability (READ).
+    pub device: CapHandle,
+    /// Writable output location for the link information.
+    pub out_info: *mut NetDeviceInfo,
+}
+
+/// Net syscall error codes returned as `0xFFFF_06XX`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum NetError {
+    /// The supplied capability is invalid, stale, or the wrong type.
+    InvalidCapability = 0,
+    /// No net device is initialized.
+    NotInitialized = 1,
+    /// The frame length or buffer bounds are invalid.
+    InvalidLength = 2,
+    /// The device rejected the transmit.
+    SubmitFailed = 3,
+}
+
+/// Base added to a [`NetError`] discriminant to form a syscall result code.
+pub const SYSCALL_NET_ERROR_BASE: u64 = 0xFFFF_0600;
 
 /// Arguments for `IrqAttach` (0x0200): deliver `source`'s interrupts as
 /// signals on `slot` (a user VA the caller can see; the kernel increments the
@@ -802,6 +886,18 @@ mod tests {
         // source (4) + reserved (4) + slot ptr (8)
         assert_eq!(size_of::<super::IrqAttachArgs>(), 16);
         assert_eq!(size_of::<super::IrqDetachArgs>(), 8);
+    }
+
+    #[test]
+    fn net_args_keep_expected_sizes() {
+        // device (8) + buffer (8) + offset (8) + length (4) + reserved (4)
+        assert_eq!(size_of::<super::NetTxArgs>(), 32);
+        // device (8) + buffer (8) + offset (8)
+        assert_eq!(size_of::<super::NetRxArgs>(), 24);
+        // mac (6) + pad (2) + mtu (4) + pad (4)
+        assert_eq!(size_of::<super::NetDeviceInfo>(), 16);
+        // device (8) + out ptr (8)
+        assert_eq!(size_of::<super::NetGetInfoArgs>(), 16);
     }
 
     #[test]
