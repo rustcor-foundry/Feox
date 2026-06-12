@@ -14,21 +14,22 @@ extern crate std;
 extern crate alloc;
 
 pub mod arch;
+// The capability table is arch-portable (core + atomics over feox-asi/feox-boot
+// types); both the x86_64 SYSCALL lane and the riscv64 ecall lane dispatch
+// into it.
+pub mod capability;
 pub mod console;
 
 // The remaining subsystems are still x86_64-shaped (ACPI/RSDP intake, LAPIC,
 // the GDT/IDT-aliased CR3 handoff in `boot`, the paging/memory/SMP stack). The
-// riscv64 milestone-1 build takes a minimal `arch::riscv64::riscv_main` path
-// that brings up the SBI console and parks, so these are gated to x86_64 until
-// their riscv64 backends land (traps -> sv39 -> memory -> runtime -> SMP).
+// riscv64 build takes the `arch::riscv64::riscv_main` bring-up path, so these
+// stay gated to x86_64 until their riscv64 backends land.
 #[cfg(target_arch = "x86_64")]
 pub mod acpi;
 #[cfg(target_arch = "x86_64")]
 pub mod block;
 #[cfg(target_arch = "x86_64")]
 pub mod boot;
-#[cfg(target_arch = "x86_64")]
-pub mod capability;
 #[cfg(target_arch = "x86_64")]
 pub mod lapic;
 #[cfg(target_arch = "x86_64")]

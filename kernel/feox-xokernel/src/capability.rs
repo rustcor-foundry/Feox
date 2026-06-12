@@ -6,7 +6,7 @@ extern crate std;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use crate::memory::MemoryRegionKind;
+use crate::bootabi::MemoryRegionKind;
 use feox_asi::{
     CapError, CapHandle, CapInfo, CapPermissions, CapRequest, CapType, PageFlags, PhysicalAddress,
     ProcessId,
@@ -682,9 +682,9 @@ fn request_physical_pages(num_pages: usize, flags: PageFlags) -> Result<CapHandl
         return Err(CapError::ResourceNotFound);
     }
 
-    let requested_bytes = (num_pages as u64).saturating_mul(crate::memory::PAGE_SIZE);
+    let requested_bytes = (num_pages as u64).saturating_mul(crate::bootabi::PAGE_SIZE);
     let alignment = if flags.contains(PageFlags::CONTIGUOUS) {
-        crate::memory::PAGE_SIZE
+        crate::bootabi::PAGE_SIZE
     } else {
         1
     };
@@ -933,7 +933,7 @@ mod tests {
         init_bootstrap_process(ProcessId(0));
         let root = register_bootstrap_memory_resource_with_kind(
             PhysicalAddress(0x8000),
-            crate::memory::PAGE_SIZE * 4,
+            crate::bootabi::PAGE_SIZE * 4,
             true,
         )
         .expect("allocatable resource");
@@ -959,13 +959,13 @@ mod tests {
         let root_resource = resource(root).expect("root resource");
 
         assert_eq!(first_resource.base, PhysicalAddress(0x8000));
-        assert_eq!(first_resource.size_bytes, crate::memory::PAGE_SIZE * 2);
+        assert_eq!(first_resource.size_bytes, crate::bootabi::PAGE_SIZE * 2);
         assert_eq!(
             second_resource.base,
-            PhysicalAddress(0x8000 + crate::memory::PAGE_SIZE * 2)
+            PhysicalAddress(0x8000 + crate::bootabi::PAGE_SIZE * 2)
         );
-        assert_eq!(second_resource.size_bytes, crate::memory::PAGE_SIZE);
-        assert_eq!(root_resource.allocated_bytes, crate::memory::PAGE_SIZE * 3);
+        assert_eq!(second_resource.size_bytes, crate::bootabi::PAGE_SIZE);
+        assert_eq!(root_resource.allocated_bytes, crate::bootabi::PAGE_SIZE * 3);
         assert_eq!(
             request_bootstrap_capability(&CapRequest::PhysicalPages {
                 num_pages: 2,

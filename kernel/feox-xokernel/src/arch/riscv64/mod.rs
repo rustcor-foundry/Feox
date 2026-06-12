@@ -18,6 +18,7 @@ pub mod pci;
 pub mod runtime;
 pub mod serial;
 pub mod smp;
+pub mod syscall;
 pub mod time;
 pub mod trap;
 pub mod umode;
@@ -118,6 +119,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
     // Milestone 12: drop to U-mode, take the user's ecall, return to the kernel.
     umode::demo();
+
+    // Milestone 13: ASI syscall dispatch over the shared capability table —
+    // kernel-side cap_request self-test, then a U-mode CapList round trip.
+    syscall::demo();
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

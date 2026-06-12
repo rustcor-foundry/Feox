@@ -47,6 +47,27 @@ pub struct CoreSet {
     pub bits: [u64; 4],
 }
 
+/// Syscall transport result code: success.
+pub const SYSCALL_OK: u64 = 0;
+/// Syscall transport result code: the opcode is recognized but not supported
+/// by the current lane.
+pub const SYSCALL_ERR_UNSUPPORTED: u64 = 0xFFFF_0001;
+/// Syscall transport result code: the raw opcode is not a valid [`AsiOp`].
+pub const SYSCALL_ERR_INVALID_OPCODE: u64 = 0xFFFF_0002;
+/// Syscall transport result code: the argument pointer/length pair is malformed.
+pub const SYSCALL_ERR_INVALID_ARGS: u64 = 0xFFFF_0003;
+/// Syscall transport result code: one operation in a batch failed (its index
+/// is returned in the value register).
+pub const SYSCALL_ERR_BATCH_FAILED: u64 = 0xFFFF_0004;
+/// Syscall transport result code: the transport is not initialized.
+pub const SYSCALL_ERR_NOT_READY: u64 = 0xFFFF_0005;
+/// Base added to a [`CapError`] discriminant to form a syscall result code.
+pub const SYSCALL_CAP_ERROR_BASE: u64 = 0x100;
+/// Base added to a [`MemError`] discriminant to form a syscall result code.
+pub const SYSCALL_MEM_ERROR_BASE: u64 = 0x200;
+/// Base added to a [`StorageError`] discriminant to form a syscall result code.
+pub const SYSCALL_STORAGE_ERROR_BASE: u64 = 0xFFFF_0500;
+
 /// Complete ASI opcode table for the current transport boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u64)]

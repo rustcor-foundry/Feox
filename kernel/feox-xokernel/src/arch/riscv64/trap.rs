@@ -33,9 +33,15 @@ pub struct TrapFrame {
     pub stval: usize,
 }
 
-// Indices into `TrapFrame::regs` for the registers we name in diagnostics.
-// (regs[n] == x(n + 1); ra is x1 -> index 0.)
+// Indices into `TrapFrame::regs` for the registers we name in diagnostics and
+// the syscall ABI. (regs[n] == x(n + 1); ra is x1 -> index 0.)
 const REG_RA: usize = 0;
+/// a0 (x10): syscall argument pointer in, result code out.
+const REG_A0: usize = 9;
+/// a1 (x11): syscall argument length in, call-specific value out.
+const REG_A1: usize = 10;
+/// a7 (x17): raw ASI opcode.
+const REG_A7: usize = 16;
 
 /// `scause` interrupt flag (bit 63 on rv64).
 const SCAUSE_INTERRUPT: usize = 1 << 63;
@@ -181,11 +187,38 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
     }
 
     if !is_interrupt && code == EXC_ECALL_FROM_U {
-        // The U-mode demo's syscall: log it and longjmp back to the kernel
-        // (resume_kernel never returns here). Real ASI dispatch lands in M13.
-        crate::kprintln!("[feox] umode: ecall from U-mode at sepc={:#x}", frame.sepc);
-        // SAFETY: reached only from the U-mode excursion started by enter_user.
-        unsafe { super::umode::resume_to_kernel() };
+        // ASI syscall: a7 = opcode, a0 = args pointer, a1 = args length.
+        let opcode = frame.regs[REG_A7];
+        if opcode == feox_asi::AsiOp::ProcExit as usize {
+            // Tear down the U-mode excursion: record the exit value (the
+            // user's a0) and longjmp back to enter_user's caller.
+            crate::kprintln!(
+                "[feox] asi: proc_exit from U-mode (value={})",
+                frame.regs[REG_A0]
+            );
+            // SAFETY: reached only from the U-mode excursion started by
+            // enter_user.
+            unsafe { super::umode::exit_to_kernel(frame.regs[REG_A0]) };
+        }
+        let mut value = 0u64;
+        let result = super::syscall::dispatch(
+            opcode as u64,
+            frame.regs[REG_A0] as *const u8,
+            frame.regs[REG_A1] as u64,
+            &mut value,
+        );
+        crate::kprintln!(
+            "[feox] asi: ecall op={:#x} -> code={:#x} value={}",
+            opcode,
+            result,
+            value
+        );
+        frame.regs[REG_A0] = result as usize;
+        frame.regs[REG_A1] = value as usize;
+        // Resume past the trapping instruction; `ecall` has no compressed
+        // form, so it is always 4 bytes.
+        frame.sepc += 4;
+        return;
     }
 
     if !is_interrupt && code == EXC_BREAKPOINT {

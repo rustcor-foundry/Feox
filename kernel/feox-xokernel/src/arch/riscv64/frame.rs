@@ -14,6 +14,8 @@ pub const FRAME_SIZE: usize = 4096;
 
 /// Bump + free-list physical frame allocator.
 pub struct FrameAllocator {
+    /// First frame of the managed window, 4 KiB-aligned.
+    start: usize,
     /// Next never-yet-allocated frame (bump pointer), 4 KiB-aligned.
     next: usize,
     /// One past the last usable frame.
@@ -32,6 +34,7 @@ impl FrameAllocator {
     /// An empty allocator (manages nothing until [`Self::init`]).
     pub const fn empty() -> Self {
         Self {
+            start: 0,
             next: 0,
             end: 0,
             free_list: 0,
@@ -46,6 +49,7 @@ impl FrameAllocator {
     pub fn init(&mut self, start: usize, end: usize) {
         let start = align_up(start, FRAME_SIZE);
         let end = align_down(end, FRAME_SIZE);
+        self.start = start;
         self.next = start;
         self.end = if end > start { end } else { start };
         self.free_list = 0;
@@ -111,6 +115,12 @@ impl FrameAllocator {
     pub fn available(&self) -> usize {
         (self.end - self.next) / FRAME_SIZE + self.free_count
     }
+
+    /// The managed physical window `[start, end)`, frame-aligned.
+    #[must_use]
+    pub fn window(&self) -> (usize, usize) {
+        (self.start, self.end)
+    }
 }
 
 /// Global early-boot frame allocator.
@@ -158,6 +168,12 @@ pub fn total() -> usize {
 #[must_use]
 pub fn available() -> usize {
     allocator().available()
+}
+
+/// The global allocator's managed physical window `[start, end)`.
+#[must_use]
+pub fn window() -> (usize, usize) {
+    allocator().window()
 }
 
 /// Rounds `x` up to a multiple of `align` (a power of two).
