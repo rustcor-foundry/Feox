@@ -8,7 +8,12 @@
 //! `ProcExit` never returns. The opcodes and result codes come from
 //! `feox-asi`, the shared ABI crate, so app and kernel cannot drift.
 
-use feox_asi::{AsiOp, SYSCALL_OK};
+use core::mem::size_of;
+
+use feox_asi::{
+    AsiOp, CapHandle, CapRequest, MapFlags, MappedRegion, MemMapArgs, MemVtoPArgs, PageFlags,
+    PhysicalAddress, SYSCALL_OK,
+};
 
 /// Raw ASI syscall. Returns `(result code, value)`.
 #[inline]
@@ -39,6 +44,80 @@ pub fn yield_now() {
 pub fn cap_count() -> Option<u64> {
     let (code, total) = syscall(AsiOp::CapList, core::ptr::null(), 0);
     (code == SYSCALL_OK).then_some(total)
+}
+
+/// Requests a capability over `num_pages` fresh physical pages.
+pub fn cap_request_pages(num_pages: usize, contiguous: bool) -> Option<CapHandle> {
+    let request = CapRequest::PhysicalPages {
+        num_pages,
+        flags: if contiguous {
+            PageFlags::CONTIGUOUS
+        } else {
+            PageFlags::empty()
+        },
+    };
+    let (code, packed) = syscall(
+        AsiOp::CapRequest,
+        (&raw const request).cast(),
+        size_of::<CapRequest>(),
+    );
+    (code == SYSCALL_OK).then(|| CapHandle {
+        id: packed as u32,
+        generation: (packed >> 32) as u32,
+    })
+}
+
+/// Releases a capability (cascading through any delegated children).
+pub fn cap_release(handle: CapHandle) -> bool {
+    let (code, _) = syscall(
+        AsiOp::CapRelease,
+        (&raw const handle).cast(),
+        size_of::<CapHandle>(),
+    );
+    code == SYSCALL_OK
+}
+
+/// Maps `length_bytes` of the capability's backing memory (from
+/// `offset_bytes`) into this process's address space at a kernel-chosen VA.
+pub fn mem_map(
+    handle: CapHandle,
+    offset_bytes: u64,
+    length_bytes: u64,
+    flags: MapFlags,
+) -> Option<MappedRegion> {
+    let mut region = MappedRegion::default();
+    let args = MemMapArgs {
+        handle,
+        offset_bytes,
+        length_bytes,
+        flags,
+        out_region: &mut region,
+    };
+    let (code, _) = syscall(AsiOp::MemMap, (&raw const args).cast(), size_of::<MemMapArgs>());
+    (code == SYSCALL_OK).then_some(region)
+}
+
+/// Unmaps a region previously returned by [`mem_map`].
+pub fn mem_unmap(region: MappedRegion) -> bool {
+    let (code, _) = syscall(
+        AsiOp::MemUnmap,
+        (&raw const region).cast(),
+        size_of::<MappedRegion>(),
+    );
+    code == SYSCALL_OK
+}
+
+/// Translates a mapped VA back to the physical address inside `handle`'s
+/// resource.
+pub fn mem_vtop(handle: CapHandle, virtual_address: u64) -> Option<u64> {
+    let mut physical = PhysicalAddress(0);
+    let args = MemVtoPArgs {
+        handle,
+        virtual_address,
+        out_physical_address: &mut physical,
+    };
+    let (code, value) = syscall(AsiOp::MemVtoP, (&raw const args).cast(), size_of::<MemVtoPArgs>());
+    (code == SYSCALL_OK).then_some(value)
 }
 
 /// Exits the current process with `value`. Never returns.

@@ -379,11 +379,14 @@ fn teardown(processes: Vec<Process>) {
 /// exactly the same loader path as the synthesized M15 image.
 static HELLO_ELF: &[u8] = include_bytes!(env!("FEOX_HELLO_ELF"));
 
-/// Milestone 16 demo: load and run `feox-hello`. The app yields, queries the
-/// capability table through the libOS, exercises its rodata and bss segments,
-/// and exits with `fib(10) + 1 + cap_count` — a value the kernel predicts
-/// independently, so a correct exit proves the whole chain: toolchain build,
-/// delivery, ELF load, per-segment permissions, syscalls, and exit.
+/// Milestones 16 + 17 demo: load and run `feox-hello`. The app runs the full
+/// exokernel memory workflow from user space — `cap_request` two physical
+/// pages, `mem_map` them, fill/sum `i^2` across a reschedule, `mem_vtop` the
+/// mapping, `mem_unmap`, `cap_release` — and exits with
+/// `sum(i^2, i<1024) % 65521`, which the kernel predicts independently here
+/// via the closed form. The capability ledger must balance: the table count
+/// after the run equals the count before it. Any failed step exits `0xbNN`
+/// (a step-naming code that cannot equal the checksum the kernel expects).
 pub fn app_demo(timebase_hz: u64) {
     let process = match Process::launch(HELLO_ELF) {
         Ok(process) => process,
@@ -392,7 +395,10 @@ pub fn app_demo(timebase_hz: u64) {
             return;
         }
     };
-    let expected = 55 + 1 + crate::capability::active_count();
+    // sum of i^2 for i in 0..1024 (two pages of u64), closed form, mod 65521.
+    let n: u64 = (2 * frame::FRAME_SIZE as u64 / 8) - 1;
+    let expected = ((n * (n + 1) * (2 * n + 1) / 6) % 65521) as usize;
+    let caps_before = crate::capability::active_count();
     crate::kprintln!(
         "[feox] libos: feox-hello ({} bytes) loaded, entry {:#x}; running...",
         HELLO_ELF.len(),
@@ -402,7 +408,8 @@ pub fn app_demo(timebase_hz: u64) {
     sched::run(timebase_hz);
 
     let (exited, value, _, yields) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0));
-    let ok = exited && value == expected && yields > 0;
+    let balanced = crate::capability::active_count() == caps_before;
+    let delivered = exited && value == expected && yields > 0;
     teardown(alloc::vec![process]);
 
     crate::kprintln!(
@@ -410,6 +417,11 @@ pub fn app_demo(timebase_hz: u64) {
         value,
         expected,
         yields,
-        ok
+        delivered
+    );
+    crate::kprintln!(
+        "[feox] milestone 17: first real U-mode app (cap_request -> mem_map -> compute -> vtop -> unmap -> release; caps balanced={}, ok={}).",
+        balanced,
+        delivered && balanced
     );
 }

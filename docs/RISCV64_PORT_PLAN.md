@@ -240,16 +240,32 @@ Still required before it can boot on the RV:
     syscalls, and exit end to end. Apps stay outside the workspace (own
     `[workspace]` tables); build.rs only fires for riscv64 kernel builds.
 
+17. **First real U-mode app** ✅ — the mem lane lands on riscv64:
+    `MemMap`/`MemUnmap`/`MemVtoP` in the ecall dispatcher, operating on the
+    *calling process's* address space (the trap leaves `satp` untouched, so
+    `AddressSpace::from_active()` is the caller's space; mappings extend its
+    private slot-8 subtree and die with `destroy_user`). VAs come from a
+    kernel-chosen monotonic mmap window (0x2_1000_0000+); flags are validated
+    (READ required, no EXEC/cache hints), capability permissions enforced via
+    `cap_to_phys_base` (READ + WRITE when mapping writable), bounds and page
+    alignment checked, with `feox-asi` `MemError` codes. `feox-libos` grows
+    `cap_request_pages`/`cap_release`/`mem_map`/`mem_unmap`/`mem_vtop`, and
+    `feox-hello` becomes the proof: cap_request 2 pages -> mem_map -> fill/sum
+    i^2 across a reschedule -> mem_vtop -> mem_unmap -> cap_release -> verify
+    the capability count is back to its starting value -> exit with
+    `sum % 65521` (kernel predicts it via the closed form; failed steps exit
+    distinct 0xbNN codes). The app's ELF now carries all three segment
+    classes (R+X text, R rodata, R+W bss).
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
 Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
 M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
 scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
-app delivery ✅ -> M17 first real U-mode app (grow feox-libos: mem_map,
-IPC/events; an app that does useful work over capabilities); then
-NIC-as-capability + hand-rolled TCP in the network-service app, then the RV2
-hardware tail.
+app delivery ✅ -> M17 first real U-mode app (mem lane over capabilities) ✅;
+next: IPC/events (EventSlot + ThreadPark) and NIC-as-capability + hand-rolled
+TCP in the network-service app, then the RV2 hardware tail.
 
 ## Other follow-ups
 

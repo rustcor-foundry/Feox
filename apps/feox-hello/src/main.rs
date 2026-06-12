@@ -1,45 +1,83 @@
 #![no_std]
 #![no_main]
 
-//! feox-hello: the first toolchain-built Feox U-mode app.
+//! feox-hello: the first real Feox U-mode app (M16 delivery, M17 workload).
 //!
-//! Delivered into the kernel by `feox-xokernel`'s build.rs and run through
-//! the M15 ELF loader in its own address space. It exercises every segment
-//! the loader maps — text (this code), rodata ([`TAG`]), and bss
-//! ([`COUNTER`], zero-initialized by the loader's `memsz > filesz` fill) —
-//! plus the libOS syscall surface, then exits with a value the kernel can
-//! predict: `fib(10) + COUNTER + cap_count` = 55 + 1 + the kernel's
-//! capability total.
+//! The exokernel workflow, end to end, from user space: request physical
+//! pages as a capability, map them into this process's address space, do real
+//! work in that memory across a reschedule, prove the translation, then unmap
+//! and release — leaving the kernel's capability ledger exactly as it was
+//! found. Exits with `sum(i^2 for i in 0..1024) % 65521`, which the kernel
+//! predicts independently; any step failure exits with a distinct `0xbNN`
+//! code instead, so a CI failure names the broken step.
 
+use feox_asi::MapFlags;
 use feox_libos as libos;
 
 /// rodata proof: mapped R-only by the loader; must read back intact.
 static TAG: [u8; 4] = *b"feox";
 
-/// bss proof: starts zero (loader zero-fill), incremented at runtime, so the
-/// data segment must be mapped writable.
+/// bss proof: starts zero (loader zero-fill), so the data segment must be
+/// mapped writable for the increment below.
 static mut COUNTER: usize = 0;
+
+const PAGES: usize = 2;
+const BYTES: u64 = (PAGES * 4096) as u64;
 
 #[unsafe(no_mangle)]
 extern "C" fn _start() -> ! {
     libos::yield_now();
-    let caps = libos::cap_count().unwrap_or(0) as usize;
-    // SAFETY: single-threaded process; no aliasing access to COUNTER.
-    let count = unsafe {
-        COUNTER += 1;
-        COUNTER
-    };
     if TAG != *b"feox" {
-        libos::exit(0xbad);
+        libos::exit(0xb01);
     }
-    libos::exit(fib(10) + count + caps)
-}
+    // SAFETY: single-threaded process; no aliasing access to COUNTER.
+    unsafe {
+        COUNTER += 1;
+        if COUNTER != 1 {
+            libos::exit(0xb02);
+        }
+    }
 
-/// Iterative Fibonacci — real computed Rust, fib(10) = 55.
-fn fib(n: u32) -> usize {
-    let (mut a, mut b) = (0usize, 1usize);
-    for _ in 0..n {
-        (a, b) = (b, a + b);
+    let Some(caps_before) = libos::cap_count() else {
+        libos::exit(0xb03);
+    };
+    let Some(handle) = libos::cap_request_pages(PAGES, true) else {
+        libos::exit(0xb04);
+    };
+    let Some(region) = libos::mem_map(handle, 0, BYTES, MapFlags::READ | MapFlags::WRITE) else {
+        libos::exit(0xb05);
+    };
+
+    // Real work in capability-backed memory: fill with i^2, hold the mapping
+    // across a reschedule, then sum it back.
+    let words = (region.length_bytes / 8) as usize;
+    let base = region.base as *mut u64;
+    for i in 0..words {
+        // SAFETY: the kernel mapped [base, base+length) R+W for this process.
+        unsafe { base.add(i).write_volatile((i as u64) * (i as u64)) };
     }
-    a
+    libos::yield_now();
+    let mut sum = 0u64;
+    for i in 0..words {
+        // SAFETY: as above; the mapping survives the reschedule.
+        sum += unsafe { base.add(i).read_volatile() };
+    }
+
+    // The mapped VA must translate back into the capability's resource.
+    if libos::mem_vtop(handle, region.base).is_none() {
+        libos::exit(0xb06);
+    }
+
+    // Clean up and prove the ledger balances.
+    if !libos::mem_unmap(region) {
+        libos::exit(0xb07);
+    }
+    if !libos::cap_release(handle) {
+        libos::exit(0xb08);
+    }
+    if libos::cap_count() != Some(caps_before) {
+        libos::exit(0xb09);
+    }
+
+    libos::exit((sum % 65521) as usize)
 }
