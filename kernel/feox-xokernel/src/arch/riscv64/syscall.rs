@@ -39,6 +39,51 @@ use crate::capability;
 /// Maximum Ethernet frame the net lane accepts (no jumbo frames).
 const NET_MAX_FRAME: usize = 1514;
 
+/// Whether the current dispatch originated in U-mode (set per call from the
+/// `from_user` argument). Kernel-side callers — the boot self-test — pass
+/// kernel pointers and are trusted, so validation is skipped for them. Single
+/// boot hart, interrupts masked during the trap, so no concurrency.
+static FROM_USER: AtomicBool = AtomicBool::new(false);
+
+/// Validates that `[va, va + len)` is entirely mapped U-accessible in the
+/// caller's address space with the `rw` permission bits (`PTE_R`/`PTE_W`).
+///
+/// This is the guard against confused-deputy writes: the trap runs in S-mode
+/// with `sstatus.SUM` set, and S-mode can read/write *any* mapped page —
+/// including supervisor-only (`U=0`) kernel pages — regardless of SUM. So
+/// every user-supplied pointer (input args and output slots alike) must be
+/// proven `PTE_U` before the kernel touches it, or an app could hand over a
+/// kernel VA and have the kernel read/write kernel state on its behalf. The
+/// whole range is checked page by page, not just the first byte. Returns
+/// `true` unconditionally for trusted kernel-side dispatch.
+fn user_range_ok(va: usize, len: usize, rw: u64) -> bool {
+    if !FROM_USER.load(Ordering::Relaxed) {
+        return true;
+    }
+    if len == 0 {
+        return true;
+    }
+    let Some(end) = va.checked_add(len) else {
+        return false;
+    };
+    let required = paging::PTE_U | rw;
+    let space = paging::AddressSpace::from_active();
+    let mut page = va & !(frame::FRAME_SIZE - 1);
+    while page < end {
+        match space.translate(page) {
+            Some((_, flags)) if flags & required == required => {}
+            _ => return false,
+        }
+        page += frame::FRAME_SIZE;
+    }
+    true
+}
+
+/// Validates a typed user output slot (non-null, `T`-sized, `PTE_U | PTE_W`).
+fn user_out_ok<T>(ptr: *const T) -> bool {
+    !ptr.is_null() && user_range_ok(ptr as usize, size_of::<T>(), paging::PTE_W)
+}
+
 /// User mmap window: kernel-chosen VAs for `MemMap`, inside sv39 root slot 8
 /// (the process VA window, private per process space) and above any app
 /// image/stack. A monotonic global bump — VAs are never reused, which keeps
@@ -137,9 +182,18 @@ pub fn init() {
 }
 
 /// Dispatches one ASI syscall from the riscv64 ecall lane. Called from the
-/// trap dispatcher for U-mode ecalls and directly by the kernel-side
-/// self-test, so both exercise the same validation + dispatch path.
-pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {
+/// trap dispatcher for U-mode ecalls (`from_user = true`) and directly by the
+/// kernel-side self-test (`from_user = false`), so both exercise the same
+/// dispatch path; only U-mode calls have their pointers validated against the
+/// caller's `PTE_U` mappings.
+pub fn dispatch(
+    opcode_raw: u64,
+    args_ptr: *const u8,
+    args_len: u64,
+    out_value: &mut u64,
+    from_user: bool,
+) -> u64 {
+    FROM_USER.store(from_user, Ordering::Relaxed);
     *out_value = 0;
     if !is_ready() {
         return SYSCALL_ERR_NOT_READY;
@@ -148,6 +202,14 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
     let Some(opcode) = AsiOp::from_raw(opcode_raw) else {
         return SYSCALL_ERR_INVALID_OPCODE;
     };
+
+    // Central input-args check: every lane reads its argument struct from
+    // `[args_ptr, args_len)`. Prove it is user-readable once here so each
+    // lane's `*(args_ptr.cast::<T>())` cannot read kernel memory. (Lanes that
+    // write back through `args_ptr`, like CapList, additionally check PTE_W.)
+    if !args_ptr.is_null() && !user_range_ok(args_ptr as usize, args_len as usize, paging::PTE_R) {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
 
     match opcode {
         AsiOp::CapRequest => dispatch_cap_request(args_ptr, args_len, out_value),
@@ -283,7 +345,10 @@ fn dispatch_net_get_info(args_ptr: *const u8, args_len: u64, _out_value: &mut u6
         _reserved2: 0,
     };
     if !args.out_info.is_null() {
-        // SAFETY: caller-owned output slot (written under SUM for U-mode).
+        if !user_out_ok(args.out_info) {
+            return net_error(NetError::InvalidLength);
+        }
+        // SAFETY: validated user-writable (PTE_U | PTE_W) output slot.
         unsafe { *args.out_info = info };
     }
     SYSCALL_OK
@@ -437,7 +502,10 @@ fn dispatch_storage_poll(args_ptr: *const u8, args_len: u64, out_value: &mut u64
                 Err(_) => return storage_error(StorageError::SubmitFailed),
             };
             if !args.out_completion.is_null() {
-                // SAFETY: caller-owned output slot (written under SUM).
+                if !user_out_ok(args.out_completion) {
+                    return storage_error(StorageError::InvalidCapability);
+                }
+                // SAFETY: validated user-writable output slot.
                 unsafe { *args.out_completion = completion };
             }
             *out_value = StoragePollResult::Ready as u64;
@@ -504,7 +572,9 @@ fn dispatch_irq_attach(args_ptr: *const u8, args_len: u64, _out_value: &mut u64)
     let Some((pa, flags)) = translated else {
         return mem_error(MemError::AddressNotMapped);
     };
-    if flags & paging::PTE_W == 0 {
+    // Require PTE_U + PTE_W: without the U check, an app could attach a
+    // *kernel* VA and have the interrupt path increment kernel memory.
+    if flags & (paging::PTE_U | paging::PTE_W) != (paging::PTE_U | paging::PTE_W) {
         return mem_error(MemError::AddressNotMapped);
     }
     NET_RX_SLOT.store(pa, Ordering::Release);
@@ -562,7 +632,9 @@ pub fn park_from_user(frame: &mut TrapFrame) {
         frame.regs[REG_A1] = 0;
         return;
     };
-    if flags & paging::PTE_R == 0 {
+    // Require PTE_U + PTE_R: without the U check, an app could park on a
+    // kernel VA and use kernel memory as its futex word.
+    if flags & (paging::PTE_U | paging::PTE_R) != (paging::PTE_U | paging::PTE_R) {
         frame.regs[REG_A0] = mem_error(MemError::AddressNotMapped) as usize;
         frame.regs[REG_A1] = 0;
         return;
@@ -603,6 +675,12 @@ fn dispatch_mem_map(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> 
         *(args_ptr.cast::<MemMapArgs>())
     };
 
+    // Validate the output slot before committing the mapping, so a bad
+    // out_region cannot both corrupt kernel state and leak a live mapping.
+    if !args.out_region.is_null() && !user_out_ok(args.out_region) {
+        return mem_error(MemError::InvalidFlags);
+    }
+
     if !args.flags.contains(MapFlags::READ)
         || args.flags.contains(MapFlags::EXEC)
         || args.flags.contains(MapFlags::UNCACHEABLE)
@@ -629,11 +707,16 @@ fn dispatch_mem_map(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> 
         return mem_error(MemError::OffsetOutOfRange);
     }
 
+    // Reserve the VA window only on success: a request that would overflow
+    // the window must not permanently consume (leak) the VA span. Single
+    // boot hart, interrupts masked during the trap, so the load/store pair
+    // is not a race.
     let length = args.length_bytes as usize;
-    let va = MMAP_NEXT.fetch_add(length, Ordering::Relaxed);
-    if va + length > MMAP_END {
+    let va = MMAP_NEXT.load(Ordering::Relaxed);
+    if va.saturating_add(length) > MMAP_END {
         return mem_error(MemError::OutOfVirtualSpace);
     }
+    MMAP_NEXT.store(va + length, Ordering::Relaxed);
 
     let mut flags = paging::PTE_U | paging::PTE_R;
     if writable {
@@ -651,7 +734,7 @@ fn dispatch_mem_map(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> 
         flags: args.flags,
     };
     if !args.out_region.is_null() {
-        // SAFETY: caller-owned output slot (written under SUM for U-mode).
+        // SAFETY: validated user-writable up front (out_region check above).
         unsafe { *args.out_region = region };
     }
     *out_value = va as u64;
@@ -704,7 +787,10 @@ fn dispatch_mem_vtop(args_ptr: *const u8, args_len: u64, out_value: &mut u64) ->
         return mem_error(MemError::AddressNotMapped);
     }
     if !args.out_physical_address.is_null() {
-        // SAFETY: caller-owned output slot (written under SUM for U-mode).
+        if !user_out_ok(args.out_physical_address) {
+            return mem_error(MemError::AddressNotMapped);
+        }
+        // SAFETY: validated user-writable (PTE_U | PTE_W) output slot.
         unsafe { *args.out_physical_address = PhysicalAddress(pa as u64) };
     }
     *out_value = pa as u64;
@@ -735,12 +821,16 @@ fn dispatch_cap_list(args_ptr: *mut u8, args_len: u64, out_value: &mut u64) -> u
         return SYSCALL_ERR_INVALID_ARGS;
     }
     let capacity = (args_len / size_of::<CapInfo>() as u64) as usize;
+    // CapList writes the CapInfo records into the args buffer itself, so it
+    // needs PTE_W (the central check only proved PTE_R).
+    if capacity != 0 && !args_ptr.is_null() && !user_range_ok(args_ptr as usize, args_len as usize, paging::PTE_W) {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
     let infos = if capacity == 0 || args_ptr.is_null() {
         &mut [][..]
     } else {
         unsafe {
-            // SAFETY: the caller supplies a writable buffer and length (SUM is
-            // set for U-mode callers, as above).
+            // SAFETY: validated user-writable (PTE_U | PTE_W) buffer above.
             &mut *slice_from_raw_parts_mut(args_ptr.cast::<CapInfo>(), capacity)
         }
     };
@@ -799,6 +889,7 @@ pub fn demo() {
         (&raw const request).cast(),
         size_of::<CapRequest>() as u64,
         &mut packed,
+        false, // kernel-side self-test: trusted pointers
     );
     let handle = CapHandle {
         id: packed as u32,
