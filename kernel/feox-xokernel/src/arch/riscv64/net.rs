@@ -49,6 +49,8 @@ const R_QUEUE_SEL: usize = 0x030;
 const R_QUEUE_NUM: usize = 0x038;
 const R_QUEUE_READY: usize = 0x044;
 const R_QUEUE_NOTIFY: usize = 0x050;
+const R_INTERRUPT_STATUS: usize = 0x060;
+const R_INTERRUPT_ACK: usize = 0x064;
 const R_STATUS: usize = 0x070;
 const R_QUEUE_DESC_LOW: usize = 0x080;
 const R_QUEUE_DESC_HIGH: usize = 0x084;
@@ -421,11 +423,8 @@ fn arp_resolve(dev: &mut VirtioNet, target_ip: [u8; 4]) -> Option<[u8; 6]> {
     Some(mac)
 }
 
-/// Sends an ICMP echo request to `dst_ip` (via `dst_mac`) and waits for the
-/// echo reply (8b).
-fn icmp_ping(dev: &mut VirtioNet, dst_mac: [u8; 6], dst_ip: [u8; 4]) -> bool {
-    let src_mac = dev.mac();
-    let mut pkt = [0u8; 42]; // eth(14) + ip(20) + icmp(8)
+/// Builds an ICMP echo request to `dst_ip` (via `dst_mac`) into `pkt`.
+fn build_icmp_echo(src_mac: [u8; 6], dst_mac: [u8; 6], dst_ip: [u8; 4], pkt: &mut [u8; 42]) {
     pkt[0..6].copy_from_slice(&dst_mac);
     pkt[6..12].copy_from_slice(&src_mac);
     pkt[12..14].copy_from_slice(&ETHERTYPE_IPV4.to_be_bytes());
@@ -445,6 +444,13 @@ fn icmp_ping(dev: &mut VirtioNet, dst_mac: [u8; 6], dst_ip: [u8; 4]) -> bool {
     pkt[40..42].copy_from_slice(&1u16.to_be_bytes()); // seq
     let icmp_csum = checksum16(&pkt[34..42]);
     pkt[36..38].copy_from_slice(&icmp_csum.to_be_bytes());
+}
+
+/// Sends an ICMP echo request to `dst_ip` (via `dst_mac`) and waits for the
+/// echo reply (8b).
+fn icmp_ping(dev: &mut VirtioNet, dst_mac: [u8; 6], dst_ip: [u8; 4]) -> bool {
+    let mut pkt = [0u8; 42]; // eth(14) + ip(20) + icmp(8)
+    build_icmp_echo(dev.mac(), dst_mac, dst_ip, &mut pkt);
     dev.send(&pkt);
 
     let mut buf = [0u8; RX_BUF_SIZE];
@@ -608,8 +614,70 @@ fn dhcp_lease(dev: &mut VirtioNet) -> Option<[u8; 4]> {
     Some(dhcp_yiaddr(&buf[..ack_len]))
 }
 
+/// The live device kept after `selftest` for the interrupt lane (M19): the
+/// transport, the resolved gateway MAC, and a shadow of the RX used index so
+/// the interrupt handler can distinguish RX progress from TX completions
+/// (virtio-mmio's ISR doesn't say which queue fired).
+struct ActiveNet {
+    dev: VirtioNet,
+    gw_mac: [u8; 6],
+    rx_seen: u16,
+}
+
+/// Boot-hart-only, same invariant as `frame.rs`.
+static mut ACTIVE: Option<ActiveNet> = None;
+
+/// Returns the live post-selftest device state, if any.
+#[allow(static_mut_refs)]
+fn active() -> Option<&'static mut ActiveNet> {
+    // SAFETY: only the boot hart touches the net device (probe, selftest,
+    // the trap path); no concurrent access exists.
+    unsafe { ACTIVE.as_mut() }
+}
+
+/// The PLIC IRQ number of the live virtio-net transport (QEMU virt fixed
+/// mapping: slot n of the virtio-mmio window is IRQ n + 1).
+#[must_use]
+pub fn irq_number() -> Option<u32> {
+    let active = active()?;
+    Some(((active.dev.base - VIRTIO_MMIO_BASE) / VIRTIO_MMIO_STRIDE) as u32 + 1)
+}
+
+/// Interrupt hook: acknowledges the device's ISR and reports whether the RX
+/// used ring progressed since the last call (i.e. a frame actually arrived —
+/// TX completions and config events return false).
+pub fn on_interrupt() -> bool {
+    let Some(active) = active() else {
+        return false;
+    };
+    let status = mmio_r(active.dev.base, R_INTERRUPT_STATUS);
+    if status != 0 {
+        mmio_w(active.dev.base, R_INTERRUPT_ACK, status);
+    }
+    let used = active.dev.rx.used_idx();
+    let progressed = used != active.rx_seen;
+    active.rx_seen = used;
+    progressed
+}
+
+/// Sends one ICMP echo request to the gateway WITHOUT polling for the reply
+/// — the reply arrives as an RX interrupt (the M19 demo's wake stimulus).
+pub fn send_test_ping() -> bool {
+    let Some(active) = active() else {
+        return false;
+    };
+    let mut pkt = [0u8; 42];
+    build_icmp_echo(active.dev.mac(), active.gw_mac, GATEWAY_IP, &mut pkt);
+    // send() reaps the TX completion synchronously; refresh the RX shadow
+    // afterwards so only the reply counts as RX progress.
+    let sent = active.dev.send(&pkt);
+    active.rx_seen = active.dev.rx.used_idx();
+    sent
+}
+
 /// Brings up virtio-net and exercises the stack: ARP (link, 8a), ICMP ping
 /// (IPv4, 8b), and a DHCP lease (UDP, 8c). Gated to QEMU by the caller.
+/// Keeps the device (and gateway MAC) live afterwards for the IRQ lane.
 pub fn selftest() {
     let Some(mut dev) = VirtioNet::probe() else {
         return;
@@ -642,5 +710,17 @@ pub fn selftest() {
         crate::kprintln!("[feox] milestone 8: networking complete.");
     } else {
         crate::kprintln!("[feox] net: DHCP failed");
+    }
+
+    // Keep the device live for the interrupt lane (M19). The RX shadow
+    // starts at the current used index so only future arrivals count.
+    let rx_seen = dev.rx.used_idx();
+    // SAFETY: boot-hart-only static (see `active`).
+    unsafe {
+        ACTIVE = Some(ActiveNet {
+            dev,
+            gw_mac,
+            rx_seen,
+        });
     }
 }

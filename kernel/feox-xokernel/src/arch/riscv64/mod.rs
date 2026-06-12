@@ -15,6 +15,7 @@ pub mod nvme;
 pub mod paging;
 pub mod panic;
 pub mod pci;
+pub mod plic;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod sched;
@@ -97,6 +98,14 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         // round-trip. On real hardware this is the JH7110 dwmac driver behind
         // the same NetDevice interface.
         net::selftest();
+        // Milestone 19: route the net device's interrupt to this hart's
+        // S-mode PLIC context (delivery happens in U-mode / scheduler idle;
+        // S-mode keeps sstatus.SIE clear outside those windows).
+        if let Some(irq) = net::irq_number() {
+            plic::init(hartid, irq);
+            plic::enable_external();
+            crate::kprintln!("[feox] plic: net irq {} routed to hart {} (S-mode)", irq, hartid);
+        }
     } else {
         crate::kprintln!("[feox] pcie/net: skipped (non-QEMU; DT-derived drivers TODO)");
     }
@@ -142,6 +151,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // Milestone 18: IPC events — producer/consumer ping-pong over a shared
     // page with ThreadPark/EventSlot block/wake cycles.
     elf::ipc_demo(timebase);
+
+    // Milestone 19: external interrupts — a parked app is woken by the net
+    // device's RX interrupt (PLIC -> EventSlot signal).
+    elf::irq_demo(timebase, on_qemu);
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

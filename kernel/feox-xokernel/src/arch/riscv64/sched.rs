@@ -356,6 +356,22 @@ pub fn block_current(frame: &mut TrapFrame, park_pa: usize, observed: u64, deadl
     resume_next_or_idle(s, frame, current);
 }
 
+/// Event hook (external interrupts): wake parked threads immediately, and if
+/// the hart was in the idle loop, switch straight to a woken thread instead
+/// of waiting for the next tick. The idle frame is simply discarded.
+pub fn on_event(frame: &mut TrapFrame) {
+    let s = sched();
+    if !s.active {
+        return;
+    }
+    wake_scan(s);
+    if s.current == IDLE {
+        if let Some(next) = next_ready(s, MAX_THREADS - 1) {
+            switch_to(s, frame, next, false);
+        }
+    }
+}
+
 /// Timer hook (called from the trap dispatcher after the tick is re-armed).
 /// Runs the wake scan, then rotates / leaves idle / enforces the budget.
 pub fn on_tick(frame: &mut TrapFrame) {

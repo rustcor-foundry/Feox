@@ -586,6 +586,35 @@ impl Default for EventSlot {
     }
 }
 
+/// Abstract IRQ source id for `IrqAttach`: the net device's RX events
+/// (used-ring progress on the receive queue).
+pub const IRQ_SOURCE_NET_RX: u32 = 1;
+
+/// Arguments for `IrqAttach` (0x0200): deliver `source`'s interrupts as
+/// signals on `slot` (a user VA the caller can see; the kernel increments the
+/// counter once per event). Attaching also flushes events that fired between
+/// source activation and the attach, so a wakeup cannot be lost to that race.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct IrqAttachArgs {
+    /// Abstract IRQ source (e.g. [`IRQ_SOURCE_NET_RX`]).
+    pub source: u32,
+    /// Reserved for future expansion while keeping a stable ABI footprint.
+    pub _reserved: u32,
+    /// User VA of the event slot to signal.
+    pub slot: *const EventSlot,
+}
+
+/// Arguments for `IrqDetach` (0x0201).
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct IrqDetachArgs {
+    /// Abstract IRQ source to detach.
+    pub source: u32,
+    /// Reserved for future expansion while keeping a stable ABI footprint.
+    pub _reserved: u32,
+}
+
 /// Arguments for `ThreadPark` (0x0312).
 ///
 /// Futex-shaped: the caller names an [`EventSlot`] it can see (a user VA in
@@ -766,6 +795,13 @@ mod tests {
     fn thread_park_args_keep_expected_size() {
         // slot ptr (8) + observed (8) + timeout (8)
         assert_eq!(size_of::<super::ThreadParkArgs>(), 24);
+    }
+
+    #[test]
+    fn irq_args_keep_expected_sizes() {
+        // source (4) + reserved (4) + slot ptr (8)
+        assert_eq!(size_of::<super::IrqAttachArgs>(), 16);
+        assert_eq!(size_of::<super::IrqDetachArgs>(), 8);
     }
 
     #[test]
