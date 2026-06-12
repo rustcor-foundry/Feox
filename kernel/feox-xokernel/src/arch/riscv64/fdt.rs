@@ -203,6 +203,195 @@ impl Fdt {
     }
 }
 
+/// A console UART discovered from the device tree.
+#[derive(Clone, Copy, Debug)]
+pub struct UartInfo {
+    /// MMIO base physical address.
+    pub base: u64,
+    /// Register index shift (`reg-shift`; registers at `base + (idx << shift)`).
+    pub reg_shift: u32,
+    /// Register access width in bytes (`reg-io-width`; 1 or 4).
+    pub reg_io_width: u32,
+}
+
+impl Fdt {
+    /// Finds the first 16550-compatible UART (`ns16550*` / `snps,dw-apb-uart`)
+    /// and returns its MMIO base + register layout. The `reg` property is
+    /// decoded with the *parent* node's `#address-cells`; `reg-shift` /
+    /// `reg-io-width` default to 0 / 1 when absent (QEMU virt). Covers QEMU,
+    /// the JH7110 (shift 2, width 4), and the Ky X1 (dw-apb, shift 2).
+    #[must_use]
+    pub fn uart(&self) -> Option<UartInfo> {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+
+        // Per-depth #address-cells, inherited by children (spec default 2).
+        let mut addr_cells = [2u32; 16];
+        let mut depth: usize = 0;
+
+        // Candidate node being evaluated (its depth; 0 = none). Children of a
+        // candidate are walked through without disturbing its state; the
+        // verdict lands at the candidate's own END_NODE.
+        let mut cand_depth: usize = 0;
+        let mut matched = false;
+        let mut base: Option<u64> = None;
+        let mut reg_shift = 0u32;
+        let mut reg_io_width = 1u32;
+
+        loop {
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    depth += 1;
+                    if depth < addr_cells.len() {
+                        addr_cells[depth] = addr_cells[depth - 1];
+                    }
+                    if cand_depth == 0 || depth <= cand_depth {
+                        cand_depth = depth;
+                        matched = false;
+                        base = None;
+                        reg_shift = 0;
+                        reg_io_width = 1;
+                    }
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    if cand_depth != 0 && depth == cand_depth {
+                        if matched {
+                            if let Some(base) = base {
+                                return Some(UartInfo {
+                                    base,
+                                    reg_shift,
+                                    reg_io_width,
+                                });
+                            }
+                        }
+                        cand_depth = 0;
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    let pname = offset(strings, nameoff);
+
+                    if bytes_eq(pname, b"#address-cells") && depth < addr_cells.len() {
+                        addr_cells[depth] = be_u32(value);
+                    }
+                    if depth == cand_depth {
+                        if bytes_eq(pname, b"compatible") {
+                            matched = bytes_contain(value, len, b"ns16550")
+                                || bytes_contain(value, len, b"snps,dw-apb-uart");
+                        } else if bytes_eq(pname, b"reg") && depth >= 1 {
+                            let (addr, _) = read_cells(value, addr_cells[depth - 1]);
+                            base = Some(addr);
+                        } else if bytes_eq(pname, b"reg-shift") && len >= 4 {
+                            reg_shift = be_u32(value);
+                        } else if bytes_eq(pname, b"reg-io-width") && len >= 4 {
+                            reg_io_width = be_u32(value);
+                        }
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        None
+    }
+
+    /// Collects the hart ids of MMU-capable, enabled CPUs (`/cpus/cpu@*`
+    /// nodes with an `mmu-type` property and no `status = "disabled"`) into
+    /// `out`, returning how many were written. This is what makes SMP
+    /// hardware-safe: the JH7110's S7 monitor hart carries no `mmu-type` and
+    /// is skipped.
+    #[must_use]
+    pub fn cpu_harts(&self, out: &mut [usize]) -> usize {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+
+        let mut depth: i32 = 0;
+        let mut in_cpus = false;
+        let mut cpus_addr_cells = 1u32; // /cpus traditionally uses 1
+        let mut in_cpu = false;
+
+        // Candidate state for the cpu node being scanned.
+        let mut hartid: Option<u64> = None;
+        let mut has_mmu = false;
+        let mut disabled = false;
+        let mut count = 0usize;
+
+        loop {
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    depth += 1;
+                    if depth == 2 {
+                        in_cpus = bytes_eq(p, b"cpus");
+                    } else if depth == 3 && in_cpus {
+                        in_cpu = bytes_start_with(p, b"cpu@");
+                        hartid = None;
+                        has_mmu = false;
+                        disabled = false;
+                    }
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    if depth == 3 && in_cpu {
+                        if let Some(id) = hartid {
+                            if has_mmu && !disabled && count < out.len() {
+                                out[count] = id as usize;
+                                count += 1;
+                            }
+                        }
+                        in_cpu = false;
+                    }
+                    if depth == 2 {
+                        in_cpus = false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    let pname = offset(strings, nameoff);
+
+                    if depth == 2 && in_cpus && bytes_eq(pname, b"#address-cells") {
+                        cpus_addr_cells = be_u32(value);
+                    } else if depth == 3 && in_cpu {
+                        if bytes_eq(pname, b"reg") {
+                            let (id, _) = read_cells(value, cpus_addr_cells);
+                            hartid = Some(id);
+                        } else if bytes_eq(pname, b"mmu-type") {
+                            has_mmu = true;
+                        } else if bytes_eq(pname, b"status") {
+                            disabled = bytes_contain(value, len, b"disabled");
+                        }
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        count
+    }
+}
+
 /// Reads `cells` big-endian u32s starting at `p`, combining them into a u64
 /// (most-significant cell first), and returns the value and the advanced
 /// pointer.

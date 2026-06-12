@@ -392,6 +392,22 @@ snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
     storage behind the existing capability lanes — at which point the full
     QEMU ladder (TCP, RFS) runs on silicon.
 
+25. **DT-driven console + SMP** ✅ — the two biggest first-boot risks
+    retired. `fdt.rs` grew a parent-cells-aware walker: `uart()` finds the
+    first `ns16550*`/`snps,dw-apb-uart` node (`reg` decoded with the parent's
+    `#address-cells`; `reg-shift`/`reg-io-width` defaulted for QEMU, set for
+    the JH7110/Ky X1) and `cpu_harts()` collects hart ids of cpu nodes that
+    carry `mmu-type` and are not disabled. `uart.rs`: a write-only 16550
+    driver that uses the UART exactly as U-Boot left it (poll LSR.THRE,
+    write THR; no clock/baud programming) with a bounded poll that falls
+    back to SBI if the UART is dead — so a wrong base can't hang the kernel.
+    The console upgrades from SBI to native after the DT parse (the board
+    UART page is mapped into the kernel space; QEMU's is already mapped),
+    making CI prove the native driver on every run. SMP is re-based onto
+    the DT hart list — QEMU and hardware now share one path, and the
+    JH7110's MMU-less S7 hart is structurally unstartable. CI asserts the
+    console marker; the SMP marker now passes via the DT path.
+
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.

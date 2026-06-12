@@ -26,6 +26,7 @@ pub mod smp;
 pub mod syscall;
 pub mod time;
 pub mod trap;
+pub mod uart;
 pub mod umode;
 
 use core::ptr::addr_of;
@@ -83,6 +84,34 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // on QEMU virt (whose fixed device/PCIe windows we may touch).
     let on_qemu = init_memory(dtb);
 
+    // Milestone 25: upgrade the console to the DT-discovered native UART
+    // (used exactly as U-Boot configured it: poll LSR, write THR). Until
+    // here every byte went through SBI; from here SBI is only the fallback —
+    // the insurance policy for vendor firmwares without the legacy console.
+    if let Some(uart_info) = fdt::parse(dtb).and_then(|tree| tree.uart()) {
+        let page = (uart_info.base as usize) & !(frame::FRAME_SIZE - 1);
+        if !on_qemu {
+            // QEMU's low-MMIO window is already mapped; board UARTs need
+            // their page added to the fine-grained kernel space.
+            let mut space = paging::AddressSpace::from_active();
+            space.map(page, page, frame::FRAME_SIZE, paging::PTE_R | paging::PTE_W);
+            paging::flush_tlb_all();
+        }
+        uart::init(
+            uart_info.base as usize,
+            uart_info.reg_shift,
+            uart_info.reg_io_width,
+        );
+        crate::kprintln!(
+            "[feox] console: native UART @ {:#x} (shift {}, width {}); SBI is now the fallback.",
+            uart_info.base,
+            uart_info.reg_shift,
+            uart_info.reg_io_width
+        );
+    } else {
+        crate::kprintln!("[feox] console: no DT UART found; staying on SBI.");
+    }
+
     // Milestone 5: drive the portable feox-async executor on riscv64.
     #[cfg(feature = "runtime")]
     {
@@ -114,15 +143,17 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         None
     };
 
-    // Milestone 7: bring up the secondary harts via the SBI HSM extension.
-    // QEMU-only for now: on the JH7110 (VisionFive 2) hart 0 is the MMU-less
-    // S7 monitor core — blindly HSM-starting every other hart into our
-    // paging-on secondary entry would be fatal. DT-driven hart selection
-    // (mmu-type per cpu node) is the hardware follow-up.
-    if on_qemu {
-        smp::bring_up_secondary_harts(hartid);
+    // Milestone 7 (re-based in M25): bring up the secondary harts via SBI
+    // HSM, selecting them from the device tree — only cpu nodes carrying an
+    // `mmu-type` (and not status=disabled) are started, so the JH7110's
+    // MMU-less S7 monitor hart is never touched. QEMU and hardware now share
+    // this path.
+    let mut harts = [0usize; 16];
+    let hart_count = fdt::parse(dtb).map_or(0, |tree| tree.cpu_harts(&mut harts));
+    if hart_count > 0 {
+        smp::bring_up_secondary_harts(hartid, &harts[..hart_count]);
     } else {
-        crate::kprintln!("[feox] smp: skipped (non-QEMU; DT-driven hart selection TODO)");
+        crate::kprintln!("[feox] smp: no MMU-capable cpu nodes found in the DT; staying single-hart");
     }
 
     // Milestone 9: enable supervisor timer interrupts and take a few ticks.
