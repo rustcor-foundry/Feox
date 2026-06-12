@@ -231,8 +231,16 @@ pub fn build_kernel_address_space(
     if map_devices {
         // QEMU virt fixed device windows: the low-MMIO block (UART at
         // 0x1000_0000 + the 8 virtio-mmio transports at 0x1000_1000..),
-        // PCIe ECAM config space, and the PCIe MMIO window for BAR assignment.
+        // the PLIC, PCIe ECAM config space, and the PCIe MMIO window for BAR
+        // assignment.
         map_region(root, UART0_BASE, UART0_BASE, LOW_MMIO_SIZE, PTE_R | PTE_W);
+        map_region(
+            root,
+            super::plic::PLIC_BASE,
+            super::plic::PLIC_BASE,
+            super::plic::PLIC_SIZE,
+            PTE_R | PTE_W,
+        );
         map_region(
             root,
             super::pci::ECAM_BASE,

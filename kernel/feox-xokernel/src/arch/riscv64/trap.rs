@@ -80,6 +80,8 @@ const SCAUSE_INTERRUPT: usize = 1 << 63;
 const EXC_BREAKPOINT: usize = 3;
 /// Interrupt cause code for the supervisor timer.
 const INT_SUPERVISOR_TIMER: usize = 5;
+/// Interrupt cause code for supervisor external interrupts (PLIC).
+const INT_SUPERVISOR_EXTERNAL: usize = 9;
 /// Synchronous-exception cause code for an environment call from U-mode.
 const EXC_ECALL_FROM_U: usize = 8;
 
@@ -262,6 +264,13 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
         // Preemption point: when the scheduler is active and the tick landed
         // in U-mode, this may swap the whole frame for another thread's.
         super::sched::on_tick(frame);
+        return;
+    }
+
+    if is_interrupt && code == INT_SUPERVISOR_EXTERNAL {
+        // PLIC claim/complete + device routing; may wake parked threads (and
+        // switch the frame out of the scheduler's idle loop).
+        super::plic::handle_external(frame);
         return;
     }
 

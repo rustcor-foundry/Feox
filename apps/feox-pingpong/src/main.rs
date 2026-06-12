@@ -40,8 +40,25 @@ extern "C" fn _start(role: usize) -> ! {
     match role {
         0 => producer(),
         1 => consumer(),
+        2 => irq_waiter(),
         _ => libos::exit(0xb10),
     }
+}
+
+/// Role 2 (M19): attach an EventSlot in our own bss to the net device's RX
+/// interrupt, then park until a packet arrives. The kernel sends an ICMP
+/// echo before scheduling us; its reply is the wake stimulus. Exits 0xACE on
+/// a genuine interrupt-driven wake.
+fn irq_waiter() -> ! {
+    static SLOT: EventSlot = EventSlot::new();
+    if !libos::irq_attach(feox_asi::IRQ_SOURCE_NET_RX, &SLOT) {
+        libos::exit(0xb20);
+    }
+    if !park_until(&SLOT, 1) {
+        libos::exit(0xb21);
+    }
+    libos::irq_detach(feox_asi::IRQ_SOURCE_NET_RX);
+    libos::exit(if SLOT.load() >= 1 { 0xACE } else { 0xb22 })
 }
 
 /// Parks (repeatedly, in case of spurious wakes) until `slot`'s counter

@@ -19,11 +19,14 @@ use core::mem::size_of;
 use core::ptr::slice_from_raw_parts_mut;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use core::sync::atomic::AtomicU64;
+
 use feox_asi::{
-    AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapPermissions, CapRequest, MapFlags,
-    MappedRegion, MemError, MemMapArgs, MemVtoPArgs, PhysicalAddress, SYSCALL_CAP_ERROR_BASE,
-    SYSCALL_ERR_INVALID_ARGS, SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY,
-    SYSCALL_ERR_UNSUPPORTED, SYSCALL_MEM_ERROR_BASE, SYSCALL_OK, ThreadParkArgs,
+    AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapPermissions, CapRequest, EventSlot,
+    IRQ_SOURCE_NET_RX, IrqAttachArgs, IrqDetachArgs, MapFlags, MappedRegion, MemError,
+    MemMapArgs, MemVtoPArgs, PhysicalAddress, SYSCALL_CAP_ERROR_BASE, SYSCALL_ERR_INVALID_ARGS,
+    SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY, SYSCALL_ERR_UNSUPPORTED,
+    SYSCALL_MEM_ERROR_BASE, SYSCALL_OK, ThreadParkArgs,
 };
 
 use super::trap::{REG_A0, REG_A1, TrapFrame};
@@ -111,6 +114,8 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
         AsiOp::MemMap => dispatch_mem_map(args_ptr, args_len, out_value),
         AsiOp::MemUnmap => dispatch_mem_unmap(args_ptr, args_len, out_value),
         AsiOp::MemVtoP => dispatch_mem_vtop(args_ptr, args_len, out_value),
+        AsiOp::IrqAttach => dispatch_irq_attach(args_ptr, args_len, out_value),
+        AsiOp::IrqDetach => dispatch_irq_detach(args_ptr, args_len, out_value),
         AsiOp::ProcYield => SYSCALL_OK,
         // ProcExit is consumed at the trap boundary; reaching here means a
         // kernel-side caller used it, which the transport does not support.
@@ -120,6 +125,90 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
 
 fn mem_error(error: MemError) -> u64 {
     SYSCALL_MEM_ERROR_BASE + error as u64
+}
+
+// ---- IRQ lane (milestone 19) ----------------------------------------------
+
+/// EventSlot PA attached to the net-RX source (0 = none). Translated at
+/// attach time, so the interrupt path signals it via the identity map
+/// regardless of which space is live.
+static NET_RX_SLOT: AtomicUsize = AtomicUsize::new(0);
+/// RX events seen since the last [`reset_net_rx`], attached or not — used to
+/// flush pre-attach events so a wakeup can't be lost to the attach race.
+static NET_RX_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// Interrupt-path hook (from `plic::handle_external`): count the RX event
+/// and signal the attached slot, if any.
+pub fn on_net_rx_event() {
+    NET_RX_EVENTS.fetch_add(1, Ordering::AcqRel);
+    signal_slot(NET_RX_SLOT.load(Ordering::Acquire));
+}
+
+fn signal_slot(pa: usize) {
+    if pa != 0 {
+        // SAFETY: pa was translated from a live R+W mapping at attach time
+        // and points at an EventSlot (one AtomicU64) in identity-mapped RAM.
+        unsafe { &*(pa as *const EventSlot) }.signal();
+    }
+}
+
+/// RX events since the last reset (demo bookkeeping).
+#[must_use]
+pub fn net_rx_events() -> u64 {
+    NET_RX_EVENTS.load(Ordering::Acquire)
+}
+
+/// Clears the IRQ lane's net-RX state (event count + attached slot).
+pub fn reset_net_rx() {
+    NET_RX_EVENTS.store(0, Ordering::Release);
+    NET_RX_SLOT.store(0, Ordering::Release);
+}
+
+/// Attaches an event slot to an IRQ source. Only `IRQ_SOURCE_NET_RX` exists
+/// so far. Events that fired before the attach are flushed as one signal.
+fn dispatch_irq_attach(args_ptr: *const u8, args_len: u64, _out_value: &mut u64) -> u64 {
+    if args_len != size_of::<IrqAttachArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<IrqAttachArgs>())
+    };
+    if args.source != IRQ_SOURCE_NET_RX {
+        return SYSCALL_ERR_UNSUPPORTED;
+    }
+    // The slot must be a mapped, writable, u64-aligned VA in the caller's
+    // space (the kernel increments it from the interrupt path).
+    let slot_va = args.slot as usize;
+    let space = paging::AddressSpace::from_active();
+    let translated = if slot_va % 8 == 0 { space.translate(slot_va) } else { None };
+    let Some((pa, flags)) = translated else {
+        return mem_error(MemError::AddressNotMapped);
+    };
+    if flags & paging::PTE_W == 0 {
+        return mem_error(MemError::AddressNotMapped);
+    }
+    NET_RX_SLOT.store(pa, Ordering::Release);
+    if NET_RX_EVENTS.load(Ordering::Acquire) > 0 {
+        signal_slot(pa);
+    }
+    SYSCALL_OK
+}
+
+/// Detaches the event slot from an IRQ source.
+fn dispatch_irq_detach(args_ptr: *const u8, args_len: u64, _out_value: &mut u64) -> u64 {
+    if args_len != size_of::<IrqDetachArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<IrqDetachArgs>())
+    };
+    if args.source != IRQ_SOURCE_NET_RX {
+        return SYSCALL_ERR_UNSUPPORTED;
+    }
+    NET_RX_SLOT.store(0, Ordering::Release);
+    SYSCALL_OK
 }
 
 /// `ThreadPark` from a running thread (called from the trap dispatcher with

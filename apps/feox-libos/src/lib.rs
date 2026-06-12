@@ -11,8 +11,9 @@
 use core::mem::size_of;
 
 use feox_asi::{
-    AsiOp, CapHandle, CapRequest, Duration, EventSlot, MapFlags, MappedRegion, MemMapArgs,
-    MemVtoPArgs, PageFlags, PhysicalAddress, SYSCALL_OK, ThreadParkArgs,
+    AsiOp, CapHandle, CapRequest, Duration, EventSlot, IrqAttachArgs, IrqDetachArgs, MapFlags,
+    MappedRegion, MemMapArgs, MemVtoPArgs, PageFlags, PhysicalAddress, SYSCALL_OK,
+    ThreadParkArgs,
 };
 
 /// Raw ASI syscall. Returns `(result code, value)`.
@@ -118,6 +119,37 @@ pub fn mem_vtop(handle: CapHandle, virtual_address: u64) -> Option<u64> {
     };
     let (code, value) = syscall(AsiOp::MemVtoP, (&raw const args).cast(), size_of::<MemVtoPArgs>());
     (code == SYSCALL_OK).then_some(value)
+}
+
+/// Attaches `slot` to an IRQ source (e.g. `feox_asi::IRQ_SOURCE_NET_RX`):
+/// the kernel signals the slot once per interrupt event. Events that fired
+/// before the attach are flushed as one signal.
+pub fn irq_attach(source: u32, slot: &EventSlot) -> bool {
+    let args = IrqAttachArgs {
+        source,
+        _reserved: 0,
+        slot,
+    };
+    let (code, _) = syscall(
+        AsiOp::IrqAttach,
+        (&raw const args).cast(),
+        size_of::<IrqAttachArgs>(),
+    );
+    code == SYSCALL_OK
+}
+
+/// Detaches the event slot from an IRQ source.
+pub fn irq_detach(source: u32) -> bool {
+    let args = IrqDetachArgs {
+        source,
+        _reserved: 0,
+    };
+    let (code, _) = syscall(
+        AsiOp::IrqDetach,
+        (&raw const args).cast(),
+        size_of::<IrqDetachArgs>(),
+    );
+    code == SYSCALL_OK
 }
 
 /// Parks this thread on `slot` until its counter differs from `observed` or

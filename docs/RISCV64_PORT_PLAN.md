@@ -274,6 +274,24 @@ Still required before it can boot on the RV:
     kernel predicts. `ThreadParkArgs` added to `feox-asi` (the x86_64 lane
     still reports ThreadPark unsupported).
 
+19. **External interrupts (PLIC) + the IRQ lane** ✅ — `plic.rs` routes
+    device interrupts to the boot hart's S-mode context (priority/enable/
+    threshold + claim/complete, `sie.SEIE`; stale pendings from the polled
+    bring-up are drained at init by claim -> device ack -> complete). The
+    virtio-net device stays live after the M8 selftest; its ISR is acked on
+    interrupt, with an RX used-index shadow distinguishing real RX progress
+    from TX completions (virtio-mmio's ISR doesn't say which queue fired).
+    `IrqAttach`/`IrqDetach` land in the ecall lane (`IrqAttachArgs` in
+    `feox-asi`, source `IRQ_SOURCE_NET_RX`): the kernel signals the attached
+    EventSlot (PA, translated at attach time) once per RX event, flushing
+    pre-attach events so the attach race cannot lose a wakeup. The scheduler
+    gains `on_event`: external interrupts wake parked threads immediately and
+    leave the idle loop without waiting for a tick. Proven by pingpong role 2:
+    attach a bss EventSlot to net RX, park; the kernel sends one ICMP echo
+    pre-run and the reply's interrupt wakes the app (exit 0xACE). QEMU-only
+    (fixed PLIC base + virtio irq mapping; DT-derived bases with the
+    hardware tail).
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
@@ -281,14 +299,17 @@ Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
 M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
 scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
 app delivery ✅ -> M17 first real U-mode app (mem lane over capabilities) ✅
--> M18 IPC events (EventSlot + ThreadPark) ✅; next: NIC-as-capability +
-hand-rolled TCP in the network-service app, then the RV2 hardware tail.
+-> M18 IPC events (EventSlot + ThreadPark) ✅ -> M19 external interrupts
+(PLIC + IrqAttach -> EventSlot) ✅; next: the network-service app — NIC
+RX/TX as ASI lanes over a net-device capability, hand-rolled TCP in user
+space — then the RV2 hardware tail.
 
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.
-- **PLIC** (external interrupts) — claim/complete, route a device IRQ
-  (virtio-net/UART) so RX/completions are interrupt-driven instead of polled.
+- PLIC landed in M19 (net RX routed to an EventSlot); the kernel's own M8
+  selftest exchanges still poll — move them (and NVMe completions) onto the
+  interrupt path.
 - Integrate `feox-nvme` (enable the `storage` feature) to replace the
   hand-rolled NVMe queue logic.
 - Un-gate the shared `memory` module for riscv64 (`capability` un-gated in M13).

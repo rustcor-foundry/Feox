@@ -516,3 +516,58 @@ pub fn ipc_demo(timebase_hz: u64) {
         ok
     );
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 19: external interrupts — net RX IRQ wakes a parked process.
+// ---------------------------------------------------------------------------
+
+/// Milestone 19 demo (QEMU only — needs the live virtio-net device): an app
+/// attaches an EventSlot in its own memory to the net device's RX interrupt
+/// and parks on it; the kernel sends one ICMP echo to the gateway before
+/// scheduling the app, and the reply's RX interrupt (PLIC -> claim -> device
+/// ack -> slot signal -> wake) is what brings the app back. The app exits
+/// 0xACE only on a genuine signaled wake.
+pub fn irq_demo(timebase_hz: u64, on_qemu: bool) {
+    if !on_qemu {
+        crate::kprintln!("[feox] irq: skipped (non-QEMU; DT-derived PLIC/net TODO)");
+        return;
+    }
+    if super::net::irq_number().is_none() {
+        crate::kprintln!("[feox] irq: no live net device; skipping");
+        return;
+    }
+    let process = match Process::launch(PINGPONG_ELF, 2) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] irq: waiter launch failed: {}", error);
+            return;
+        }
+    };
+
+    super::syscall::reset_net_rx();
+    if !super::net::send_test_ping() {
+        crate::kprintln!("[feox] irq: could not send the test ping");
+        teardown(alloc::vec![process]);
+        return;
+    }
+    crate::kprintln!(
+        "[feox] irq: ICMP echo sent; scheduling the waiter to park on net RX (irq {})...",
+        super::net::irq_number().unwrap_or(0)
+    );
+
+    sched::run_with_budget(timebase_hz, 64);
+
+    let (exited, value, _, _, parks) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
+    let events = super::syscall::net_rx_events();
+    super::syscall::reset_net_rx();
+    let ok = exited && value == 0xACE && events >= 1;
+    teardown(alloc::vec![process]);
+
+    crate::kprintln!(
+        "[feox] milestone 19: external interrupts (net RX irq -> EventSlot -> wake: app exit {:#x}, rx events={}, parks={}, ok={}).",
+        value,
+        events,
+        parks,
+        ok
+    );
+}
