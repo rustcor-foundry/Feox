@@ -269,15 +269,20 @@ extern "C" fn trap_dispatch(frame: *mut TrapFrame) {
         // ASI syscall: a7 = opcode, a0 = args pointer, a1 = args length.
         let opcode = frame.regs[REG_A7];
         if super::sched::active() {
-            // Under the scheduler, yield/exit are thread-lifecycle events
-            // (frame switches), not table dispatches. Everything else falls
-            // through to the normal ASI path and resumes the same thread.
+            // Under the scheduler, yield/exit/park are thread-lifecycle
+            // events (frame switches), not table dispatches. Everything else
+            // falls through to the normal ASI path and resumes the same
+            // thread.
             if opcode == feox_asi::AsiOp::ProcYield as usize {
                 super::sched::yield_current(frame);
                 return;
             }
             if opcode == feox_asi::AsiOp::ProcExit as usize {
                 super::sched::exit_current(frame, frame.regs[REG_A0]);
+                return;
+            }
+            if opcode == feox_asi::AsiOp::ThreadPark as usize {
+                super::syscall::park_from_user(frame);
                 return;
             }
         } else if opcode == feox_asi::AsiOp::ProcExit as usize {

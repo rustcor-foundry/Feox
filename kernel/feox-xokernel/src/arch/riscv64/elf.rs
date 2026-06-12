@@ -246,9 +246,10 @@ struct Process {
 
 impl Process {
     /// Loads `image` into a fresh per-process space, maps a stack page at
-    /// [`PROC_STACK_VA`], and parks it in a Ready thread slot. On error all
-    /// intermediate resources are released.
-    fn launch(image: &[u8]) -> Result<Self, &'static str> {
+    /// [`PROC_STACK_VA`], and parks it in a Ready thread slot with `arg0`
+    /// delivered in the process's `a0` at entry. On error all intermediate
+    /// resources are released.
+    fn launch(image: &[u8], arg0: usize) -> Result<Self, &'static str> {
         let mut space = AddressSpace::new_user().ok_or("out of frames for a space")?;
         let loaded = match load(&mut space, image) {
             Ok(loaded) => loaded,
@@ -272,6 +273,7 @@ impl Process {
             loaded.entry,
             PROC_STACK_VA + frame::FRAME_SIZE,
             space.satp() as usize,
+            arg0,
         ) else {
             frame::free(stack);
             free_frames(&loaded.frames);
@@ -311,7 +313,7 @@ pub fn demo(timebase_hz: u64) {
 
     let mut processes: Vec<Process> = Vec::new();
     for pid in 0..2usize {
-        let process = match Process::launch(&image) {
+        let process = match Process::launch(&image, 0) {
             Ok(process) => process,
             Err(error) => {
                 crate::kprintln!("[feox] elf: process {} launch failed: {}", pid, error);
@@ -345,7 +347,7 @@ pub fn demo(timebase_hz: u64) {
 
     let mut exits_ok = true;
     for (pid, process) in processes.iter().enumerate() {
-        let (exited, value, _, _) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0));
+        let (exited, value, _, _, _) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
         exits_ok &= exited && value == 200 + pid;
     }
     teardown(processes);
@@ -388,7 +390,7 @@ static HELLO_ELF: &[u8] = include_bytes!(env!("FEOX_HELLO_ELF"));
 /// after the run equals the count before it. Any failed step exits `0xbNN`
 /// (a step-naming code that cannot equal the checksum the kernel expects).
 pub fn app_demo(timebase_hz: u64) {
-    let process = match Process::launch(HELLO_ELF) {
+    let process = match Process::launch(HELLO_ELF, 0) {
         Ok(process) => process,
         Err(error) => {
             crate::kprintln!("[feox] libos: feox-hello launch failed: {}", error);
@@ -407,7 +409,7 @@ pub fn app_demo(timebase_hz: u64) {
 
     sched::run(timebase_hz);
 
-    let (exited, value, _, yields) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0));
+    let (exited, value, _, yields, _) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
     let balanced = crate::capability::active_count() == caps_before;
     let delivered = exited && value == expected && yields > 0;
     teardown(alloc::vec![process]);
@@ -423,5 +425,94 @@ pub fn app_demo(timebase_hz: u64) {
         "[feox] milestone 17: first real U-mode app (cap_request -> mem_map -> compute -> vtop -> unmap -> release; caps balanced={}, ok={}).",
         balanced,
         delivered && balanced
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 18: IPC events — ThreadPark/EventSlot ping-pong over shared memory.
+// ---------------------------------------------------------------------------
+
+/// `apps/feox-pingpong`: one image, two roles (producer/consumer selected by
+/// the `a0` argv0 the kernel passes at entry).
+static PINGPONG_ELF: &[u8] = include_bytes!(env!("FEOX_PINGPONG_ELF"));
+
+/// Shared page VA: mapped R+W into BOTH processes (same VA, same frame — the
+/// deliberate inverse of the M15 isolation proof). Holds two EventSlots and a
+/// mailbox word; layout is a compile-time convention with the app.
+const SHARED_VA: usize = 0x2_2000_0000;
+
+/// Milestone 18 demo: spawn producer and consumer from one image with a
+/// kernel-provided shared page, and let them ping-pong 4 payloads through
+/// real ThreadPark block/wake cycles (each side parks while the other works;
+/// with both parked the scheduler drops to its S-mode idle loop until a tick
+/// wakes someone). Exits are payload-sum-derived and predicted here.
+pub fn ipc_demo(timebase_hz: u64) {
+    let mut producer = match Process::launch(PINGPONG_ELF, 0) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] ipc: producer launch failed: {}", error);
+            return;
+        }
+    };
+    let mut consumer = match Process::launch(PINGPONG_ELF, 1) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] ipc: consumer launch failed: {}", error);
+            teardown(alloc::vec![producer]);
+            return;
+        }
+    };
+
+    let Some(shared) = frame::alloc() else {
+        crate::kprintln!("[feox] ipc: out of frames for the shared page");
+        teardown(alloc::vec![producer, consumer]);
+        return;
+    };
+    // SAFETY: fresh identity-mapped frame; both EventSlots and the mailbox
+    // must start at zero.
+    unsafe { core::ptr::write_bytes(shared as *mut u8, 0, frame::FRAME_SIZE) };
+    let flags = paging::PTE_U | paging::PTE_R | paging::PTE_W;
+    producer.space.map(SHARED_VA, shared, frame::FRAME_SIZE, flags);
+    consumer.space.map(SHARED_VA, shared, frame::FRAME_SIZE, flags);
+    paging::flush_tlb_all();
+
+    // Payloads are 1000 + i*i for i in 0..4; the producer exits with the sum
+    // (mod 65521) and the consumer with sum + rounds (mod 65521).
+    let rounds = 4u64;
+    let sum: u64 = (0..rounds).map(|i| 1000 + i * i).sum();
+    let expected_producer = (sum % 65521) as usize;
+    let expected_consumer = ((sum + rounds) % 65521) as usize;
+    crate::kprintln!(
+        "[feox] ipc: producer + consumer sharing a page at {:#x}; ping-ponging {} payloads...",
+        SHARED_VA,
+        rounds
+    );
+
+    // Park/wake cycles resolve at tick granularity (~2 ticks per round plus
+    // startup); give the run more headroom than the default budget.
+    sched::run_with_budget(timebase_hz, 64);
+
+    let (p_exited, p_value, _, _, p_parks) =
+        sched::stats(producer.slot).unwrap_or((false, 0, 0, 0, 0));
+    let (c_exited, c_value, _, _, c_parks) =
+        sched::stats(consumer.slot).unwrap_or((false, 0, 0, 0, 0));
+    let ok = p_exited
+        && c_exited
+        && p_value == expected_producer
+        && c_value == expected_consumer
+        && p_parks > 0
+        && c_parks > 0;
+    teardown(alloc::vec![producer, consumer]);
+    frame::free(shared);
+
+    crate::kprintln!(
+        "[feox] milestone 18: IPC events (ThreadPark/EventSlot ping-pong: producer exit {} expected {}, consumer exit {} expected {}, parks={}+{}, ok={}).",
+        p_value,
+        expected_producer,
+        c_value,
+        expected_consumer,
+        p_parks,
+        c_parks,
+        ok
     );
 }

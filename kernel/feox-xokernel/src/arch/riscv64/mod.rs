@@ -136,7 +136,12 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
     // Milestone 16: libOS + app delivery — run the toolchain-built
     // apps/feox-hello executable (embedded by build.rs) through the same path.
+    // Milestone 17 rides the same app: the mem lane over capabilities.
     elf::app_demo(timebase);
+
+    // Milestone 18: IPC events — producer/consumer ping-pong over a shared
+    // page with ThreadPark/EventSlot block/wake cycles.
+    elf::ipc_demo(timebase);
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

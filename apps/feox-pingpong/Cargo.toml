@@ -1,0 +1,20 @@
+[package]
+name = "feox-pingpong"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+feox-asi = { path = "../../crates/feox-asi" }
+feox-libos = { path = "../feox-libos" }
+
+# no_std binary: no unwinder, keep it small.
+[profile.release]
+panic = "abort"
+opt-level = "s"
+
+[profile.dev]
+panic = "abort"
+
+# Standalone: built by the kernel's build.rs, not the repo workspace.
+[workspace]

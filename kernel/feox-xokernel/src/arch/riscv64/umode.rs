@@ -28,7 +28,8 @@ static EXIT_VALUE: AtomicUsize = AtomicUsize::new(0);
 global_asm!(
     ".section .text,\"ax\"",
     ".global enter_user",
-    // a0 = user entry PC, a1 = user stack pointer.
+    // a0 = user entry PC, a1 = user stack pointer, a2 = arg0 (delivered in
+    // the user's a0 — an "argv0", e.g. a role selector).
     "enter_user:",
     "la t0, {ctx}",
     "sd ra, 0(t0)",
@@ -62,6 +63,7 @@ global_asm!(
     "csrw sscratch, t1",
     "csrw sepc, a0",
     "mv sp, a1",
+    "mv a0, a2",
     "sret",
     // resume_kernel(): clear SUM, zero sscratch (back in S-mode for good),
     // restore the saved kernel context, and return to enter_user's caller
@@ -92,9 +94,10 @@ global_asm!(
 );
 
 unsafe extern "C" {
-    /// Enters U-mode at `entry` with stack `user_sp`; returns (via the trap
-    /// dispatcher's `resume_kernel`) once the user exits.
-    pub(super) fn enter_user(entry: usize, user_sp: usize);
+    /// Enters U-mode at `entry` with stack `user_sp` and `arg0` in the user's
+    /// a0; returns (via the trap dispatcher's `resume_kernel`) once the user
+    /// exits.
+    pub(super) fn enter_user(entry: usize, user_sp: usize, arg0: usize);
     /// Longjmp back into the kernel at the point `enter_user` was called.
     fn resume_kernel() -> !;
 }
@@ -147,7 +150,7 @@ pub fn run_user_program(words: &[u32]) -> Option<usize> {
 
     // SAFETY: the user pages are mapped U-accessible; on the user's ProcExit
     // the trap dispatcher longjmps back here via exit_to_kernel.
-    unsafe { enter_user(USER_CODE_VA, USER_STACK_VA + 4096) };
+    unsafe { enter_user(USER_CODE_VA, USER_STACK_VA + 4096, 0) };
 
     space.unmap(USER_CODE_VA, 4096);
     space.unmap(USER_STACK_VA, 4096);
