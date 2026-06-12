@@ -118,6 +118,8 @@ jobs:
             || { echo "::error::Feox riscv64 libOS/app marker not found (or app exit check failed)"; exit 1; }
           grep -q 'first real U-mode app.*ok=true' "$log" \
             || { echo "::error::Feox riscv64 U-mode-app marker not found (or mem-lane/cap-balance check failed)"; exit 1; }
+          grep -q 'IPC events.*ok=true' "$log" \
+            || { echo "::error::Feox riscv64 IPC marker not found (or ping-pong/park check failed)"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
           echo "riscv64 smoke-boot markers observed (boot..smp + net + timer irq)."

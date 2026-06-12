@@ -15,7 +15,8 @@
 //! `frame.rs`.
 
 use super::trap::{REG_A0, REG_A1, REG_SP, SSTATUS_SPP, TrapFrame};
-use super::{frame, paging, time, umode};
+use super::{cpu, frame, paging, time, umode};
+use feox_asi::SYSCALL_OK;
 
 /// `sstatus.SIE` (bit 1): S-mode global interrupt enable.
 const SSTATUS_SIE: usize = 1 << 1;
@@ -25,12 +26,17 @@ const SSTATUS_SPIE: usize = 1 << 5;
 const SSTATUS_SUM: usize = 1 << 18;
 
 /// Scheduler tick rate while threads run (10 ms slices).
-const SCHED_TICK_HZ: u64 = 100;
-/// Ticks after which a run is force-stopped, bounding the demo's wall-clock
-/// time independently of host speed (~120 ms at 100 Hz).
+pub const SCHED_TICK_HZ: u64 = 100;
+/// Default ticks after which a run is force-stopped, bounding a demo's
+/// wall-clock time independently of host speed (~120 ms at 100 Hz).
 const TICK_BUDGET: u64 = 12;
 
 const MAX_THREADS: usize = 4;
+
+/// Sentinel for "no thread is current — the hart is in the S-mode idle loop"
+/// (all live threads Blocked). The idle loop just takes timer ticks; the wake
+/// scan switches a thread back in as soon as one becomes Ready.
+const IDLE: usize = usize::MAX;
 
 /// Each thread's user window: code page at the base, stack page at +0x4000
 /// (stack top +0x5000), spaced 0x10000 apart, above the single-excursion
@@ -43,6 +49,9 @@ const STACK_OFFSET: usize = 0x4000;
 enum State {
     Free,
     Ready,
+    /// Parked on an event slot (`ThreadPark`); woken by the tick-driven scan
+    /// when the slot's counter changes or the deadline passes.
+    Blocked,
     Exited,
 }
 
@@ -58,6 +67,14 @@ struct Thread {
     exit_value: usize,
     preemptions: u64,
     yields: u64,
+    parks: u64,
+    /// While Blocked: physical address of the event-slot counter (translated
+    /// at park time, so the scan can poll it regardless of the live satp).
+    park_pa: usize,
+    /// While Blocked: the counter value the thread observed before parking.
+    park_observed: u64,
+    /// While Blocked: absolute tick deadline (0 = no timeout).
+    park_deadline: u64,
 }
 
 const EMPTY_FRAME: TrapFrame = TrapFrame {
@@ -79,6 +96,10 @@ impl Thread {
             exit_value: 0,
             preemptions: 0,
             yields: 0,
+            parks: 0,
+            park_pa: 0,
+            park_observed: 0,
+            park_deadline: 0,
         }
     }
 }
@@ -88,6 +109,7 @@ struct Scheduler {
     current: usize,
     active: bool,
     ticks_used: u64,
+    budget: u64,
 }
 
 /// Global scheduler state.
@@ -99,7 +121,32 @@ static mut SCHEDULER: Scheduler = Scheduler {
     current: 0,
     active: false,
     ticks_used: 0,
+    budget: TICK_BUDGET,
 };
+
+#[repr(C, align(16))]
+struct IdleStack([u8; 4096]);
+
+/// Stack for the S-mode idle loop (entered when all live threads are
+/// Blocked). One page suffices: idle only takes timer traps.
+static mut IDLE_STACK: IdleStack = IdleStack([0; 4096]);
+
+/// S-mode idle: wait for ticks; the wake scan switches a thread back in.
+extern "C" fn idle_loop() -> ! {
+    loop {
+        cpu::halt();
+    }
+}
+
+/// Frame that "resumes" into the idle loop: sret stays in S-mode (SPP=1)
+/// with interrupts enabled there (SPIE -> SIE), so ticks keep arriving.
+fn idle_frame() -> TrapFrame {
+    let mut frame = EMPTY_FRAME;
+    frame.sepc = idle_loop as *const () as usize;
+    frame.regs[REG_SP] = core::ptr::addr_of!(IDLE_STACK) as usize + 4096;
+    frame.sstatus = (read_sstatus() & !SSTATUS_SIE) | SSTATUS_SPP | SSTATUS_SPIE;
+    frame
+}
 
 /// Returns an exclusive reference to the scheduler.
 #[allow(static_mut_refs)]
@@ -158,7 +205,7 @@ pub fn spawn(words: &[u32]) -> Option<usize> {
     );
     paging::flush_tlb_all();
 
-    init_slot(slot, base, base + STACK_OFFSET + frame::FRAME_SIZE, paging::read_satp());
+    init_slot(slot, base, base + STACK_OFFSET + frame::FRAME_SIZE, paging::read_satp(), 0);
     let thread = &mut sched().threads[slot];
     thread.code_frame = code;
     thread.stack_frame = stack;
@@ -166,23 +213,26 @@ pub fn spawn(words: &[u32]) -> Option<usize> {
 }
 
 /// Creates a thread whose code/stack the caller has already mapped (e.g. an
-/// ELF process loaded into its own address space). The caller owns the
-/// backing frames and the space; release the slot with [`clear_slot`] after
-/// the run. Returns the slot index, or `None` when the table is full.
-pub fn spawn_at(entry: usize, stack_top: usize, satp: usize) -> Option<usize> {
+/// ELF process loaded into its own address space). `arg0` is delivered in the
+/// thread's `a0` at entry (an "argv0" — e.g. a role selector). The caller
+/// owns the backing frames and the space; release the slot with
+/// [`clear_slot`] after the run. Returns the slot index, or `None` when the
+/// table is full.
+pub fn spawn_at(entry: usize, stack_top: usize, satp: usize, arg0: usize) -> Option<usize> {
     let slot = sched().threads.iter().position(|t| t.state == State::Free)?;
-    init_slot(slot, entry, stack_top, satp);
+    init_slot(slot, entry, stack_top, satp, arg0);
     Some(slot)
 }
 
 /// Initializes `slot` as Ready with a crafted U-mode entry frame.
-fn init_slot(slot: usize, entry: usize, stack_top: usize, satp: usize) {
+fn init_slot(slot: usize, entry: usize, stack_top: usize, satp: usize, arg0: usize) {
     let thread = &mut sched().threads[slot];
     *thread = Thread::free();
     thread.state = State::Ready;
     thread.satp = satp;
     thread.frame.sepc = entry;
     thread.frame.regs[REG_SP] = stack_top;
+    thread.frame.regs[REG_A0] = arg0;
     // sret target: U-mode (SPP=0), interrupts on once there (SPIE), and SUM
     // so syscall argument access keeps working. SIE must be 0, like every
     // hardware-saved frame, or the restore stub's `csrw sstatus` would
@@ -191,15 +241,21 @@ fn init_slot(slot: usize, entry: usize, stack_top: usize, satp: usize) {
         (read_sstatus() & !(SSTATUS_SPP | SSTATUS_SIE)) | SSTATUS_SPIE | SSTATUS_SUM;
 }
 
-/// Per-thread stats: `(exited, exit_value, preemptions, yields)`. `None` for
-/// a Free slot.
+/// Per-thread stats: `(exited, exit_value, preemptions, yields, parks)`.
+/// `None` for a Free slot.
 #[must_use]
-pub fn stats(slot: usize) -> Option<(bool, usize, u64, u64)> {
+pub fn stats(slot: usize) -> Option<(bool, usize, u64, u64, u64)> {
     let t = sched().threads.get(slot)?;
     if t.state == State::Free {
         return None;
     }
-    Some((t.state == State::Exited, t.exit_value, t.preemptions, t.yields))
+    Some((
+        t.state == State::Exited,
+        t.exit_value,
+        t.preemptions,
+        t.yields,
+        t.parks,
+    ))
 }
 
 /// Releases a slot whose backing resources the caller owns (`spawn_at`
@@ -222,7 +278,7 @@ fn next_ready(s: &Scheduler, from: usize) -> Option<usize> {
 /// root maps the kernel (raw threads use the kernel root; process roots clone
 /// its top-level entries).
 fn switch_to(s: &mut Scheduler, frame: &mut TrapFrame, slot: usize, save: bool) {
-    if save {
+    if save && s.current != IDLE {
         s.threads[s.current].frame = *frame;
     }
     s.current = slot;
@@ -235,10 +291,22 @@ fn switch_to(s: &mut Scheduler, frame: &mut TrapFrame, slot: usize, save: bool) 
     }
 }
 
+/// Picks the next runnable thread (after `from`) or drops to the S-mode idle
+/// loop. The current thread's frame must already be dealt with (saved,
+/// exited, or blocked).
+fn resume_next_or_idle(s: &mut Scheduler, frame: &mut TrapFrame, from: usize) {
+    if let Some(next) = next_ready(s, from) {
+        switch_to(s, frame, next, false);
+    } else {
+        *frame = idle_frame();
+        s.current = IDLE;
+    }
+}
+
 /// Ends the run from trap context: capture the interrupted thread's state,
 /// mask the timer, and longjmp back to [`run`]'s `enter_user` call.
 fn stop(s: &mut Scheduler, frame: &TrapFrame, save_current: bool) -> ! {
-    if save_current {
+    if save_current && s.current != IDLE {
         s.threads[s.current].frame = *frame;
     }
     s.active = false;
@@ -248,11 +316,64 @@ fn stop(s: &mut Scheduler, frame: &TrapFrame, save_current: bool) -> ! {
     unsafe { umode::exit_to_kernel(0) }
 }
 
+/// Wakes Blocked threads whose event-slot counter changed (value register 1)
+/// or whose deadline passed (value register 0). Polls through the slot's
+/// physical address, so it works regardless of which space is live.
+fn wake_scan(s: &mut Scheduler) {
+    let now = time::ticks();
+    for t in &mut s.threads {
+        if t.state != State::Blocked {
+            continue;
+        }
+        // SAFETY: park_pa was translated from the parker's live mapping at
+        // park time and points into identity-mapped RAM.
+        let count = unsafe { (t.park_pa as *const u64).read_volatile() };
+        if count != t.park_observed {
+            t.state = State::Ready;
+            t.frame.regs[REG_A0] = SYSCALL_OK as usize;
+            t.frame.regs[REG_A1] = 1;
+        } else if t.park_deadline != 0 && now >= t.park_deadline {
+            t.state = State::Ready;
+            t.frame.regs[REG_A0] = SYSCALL_OK as usize;
+            t.frame.regs[REG_A1] = 0;
+        }
+    }
+}
+
+/// Blocks the current thread on an event slot: counter at `park_pa` left at
+/// `observed`, optional absolute tick `deadline` (0 = none). The wake scan
+/// sets the thread's return registers when it fires. Called from the
+/// `ThreadPark` syscall path with the frame's `sepc` already advanced.
+pub fn block_current(frame: &mut TrapFrame, park_pa: usize, observed: u64, deadline: u64) {
+    let s = sched();
+    let current = s.current;
+    s.threads[current].frame = *frame;
+    s.threads[current].state = State::Blocked;
+    s.threads[current].parks += 1;
+    s.threads[current].park_pa = park_pa;
+    s.threads[current].park_observed = observed;
+    s.threads[current].park_deadline = deadline;
+    resume_next_or_idle(s, frame, current);
+}
+
 /// Timer hook (called from the trap dispatcher after the tick is re-armed).
-/// Rotates to the next ready thread when the tick preempted U-mode code.
+/// Runs the wake scan, then rotates / leaves idle / enforces the budget.
 pub fn on_tick(frame: &mut TrapFrame) {
     let s = sched();
     if !s.active {
+        return;
+    }
+    wake_scan(s);
+    if s.current == IDLE {
+        // Idling in S-mode because everyone was Blocked; if the scan woke
+        // someone, run them now (the idle frame is simply discarded).
+        if let Some(next) = next_ready(s, MAX_THREADS - 1) {
+            switch_to(s, frame, next, false);
+        }
+        s.ticks_used += 1;
+        if s.ticks_used >= s.budget {
+            stop(s, frame, false);
+        }
         return;
     }
     if frame.sstatus & SSTATUS_SPP != 0 {
@@ -261,7 +382,7 @@ pub fn on_tick(frame: &mut TrapFrame) {
         return;
     }
     s.ticks_used += 1;
-    if s.ticks_used >= TICK_BUDGET {
+    if s.ticks_used >= s.budget {
         stop(s, frame, true);
     }
     s.threads[s.current].preemptions += 1;
@@ -283,8 +404,9 @@ pub fn yield_current(frame: &mut TrapFrame) {
     }
 }
 
-/// `ProcExit` from a running thread: record the exit value and either resume
-/// the next ready thread or end the run.
+/// `ProcExit` from a running thread: record the exit value, then resume the
+/// next ready thread, idle if others are still parked, or end the run when
+/// nothing is left to wake.
 pub fn exit_current(frame: &mut TrapFrame, value: usize) {
     let s = sched();
     let current = s.current;
@@ -292,17 +414,23 @@ pub fn exit_current(frame: &mut TrapFrame, value: usize) {
     s.threads[current].exit_value = value;
     s.threads[current].frame = *frame;
     crate::kprintln!("[feox] sched: thread {} exit({})", current, value);
-    match next_ready(s, current) {
-        Some(next) => switch_to(s, frame, next, false),
-        None => stop(s, frame, false),
+    let any_blocked = s.threads.iter().any(|t| t.state == State::Blocked);
+    if next_ready(s, current).is_none() && !any_blocked {
+        stop(s, frame, false);
     }
+    resume_next_or_idle(s, frame, current);
 }
 
-/// Runs all Ready threads until they exit or the tick budget lapses. Entered
+/// Runs all Ready threads until they exit or the default tick budget lapses.
+pub fn run(timebase_hz: u64) {
+    run_with_budget(timebase_hz, TICK_BUDGET);
+}
+
+/// Runs all Ready threads until they exit or `budget` ticks lapse. Entered
 /// via `enter_user` into the first ready thread; ends when stop() longjmps
 /// back here. The caller's address space is restored before returning, so
 /// teardown (e.g. `destroy_user`) always compares against the kernel root.
-pub fn run(timebase_hz: u64) {
+pub fn run_with_budget(timebase_hz: u64, budget: u64) {
     let s = sched();
     let Some(first) = next_ready(s, MAX_THREADS - 1) else {
         crate::kprintln!("[feox] sched: no ready threads");
@@ -310,10 +438,12 @@ pub fn run(timebase_hz: u64) {
     };
     s.current = first;
     s.ticks_used = 0;
+    s.budget = budget;
     s.active = true;
 
     let entry = s.threads[first].frame.sepc;
     let stack_top = s.threads[first].frame.regs[REG_SP];
+    let arg0 = s.threads[first].frame.regs[REG_A0];
     let home_satp = paging::read_satp();
     if s.threads[first].satp != home_satp {
         // SAFETY: process roots clone the kernel top-level entries, so the
@@ -323,7 +453,7 @@ pub fn run(timebase_hz: u64) {
     time::enable(timebase_hz, SCHED_TICK_HZ);
     // SAFETY: thread `first`'s code/stack windows are mapped U-accessible in
     // its space; the run ends with a longjmp back here from stop().
-    unsafe { umode::enter_user(entry, stack_top) };
+    unsafe { umode::enter_user(entry, stack_top, arg0) };
     // (time::disable() already ran in stop(); s.active is false again.)
     if paging::read_satp() != home_satp {
         // SAFETY: returning to the space that was live when run() was called.

@@ -586,6 +586,25 @@ impl Default for EventSlot {
     }
 }
 
+/// Arguments for `ThreadPark` (0x0312).
+///
+/// Futex-shaped: the caller names an [`EventSlot`] it can see (a user VA in
+/// its own address space) and the counter value it last observed. The kernel
+/// returns immediately if the counter already differs; otherwise the thread
+/// blocks until the counter changes or the timeout lapses. The syscall value
+/// register reports 1 = woken (counter changed) or 0 = timed out.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct ThreadParkArgs {
+    /// User VA of the event slot to park on.
+    pub slot: *const EventSlot,
+    /// Counter value the caller last observed.
+    pub observed: u64,
+    /// Maximum time to stay parked; `Duration::from_nanos(0)` parks with no
+    /// timeout.
+    pub timeout: Duration,
+}
+
 /// Result of parking a thread on one or more event slots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -741,6 +760,12 @@ mod tests {
         assert_eq!(size_of::<StoragePollArgs>(), 16);
         assert_eq!(size_of::<StorageCompletion>(), 4);
         assert_eq!(size_of::<StoragePollResult>(), 8);
+    }
+
+    #[test]
+    fn thread_park_args_keep_expected_size() {
+        // slot ptr (8) + observed (8) + timeout (8)
+        assert_eq!(size_of::<super::ThreadParkArgs>(), 24);
     }
 
     #[test]

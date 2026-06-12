@@ -257,15 +257,32 @@ Still required before it can boot on the RV:
     distinct 0xbNN codes). The app's ELF now carries all three segment
     classes (R+X text, R rodata, R+W bss).
 
+18. **IPC events** ✅ — futex-shaped `ThreadPark` over `feox-asi`'s
+    `EventSlot`s in shared memory: the caller names a slot VA + the counter
+    value it observed; the kernel returns immediately if the counter already
+    moved (no lost wakeups), else blocks the thread, polling the slot's
+    *physical* address (translated at park time) from the tick-driven wake
+    scan, with optional timeout. The scheduler gains a Blocked state and an
+    S-mode idle loop (entered when all live threads are parked; sret with
+    SPP=1/SPIE=1 keeps ticks flowing, and the wake scan switches a thread
+    back in — the idle frame is simply discarded). `spawn_at`/`enter_user`
+    now deliver an `a0` argv0. Proven by `apps/feox-pingpong`: one image, two
+    processes (roles via argv0), a kernel-provided shared R+W page at the
+    same VA in both (the inverse of the M15 isolation proof) holding two
+    EventSlots + a mailbox; producer and consumer ping-pong 4 payloads
+    through real block/wake cycles and exit with sum-derived values the
+    kernel predicts. `ThreadParkArgs` added to `feox-asi` (the x86_64 lane
+    still reports ThreadPark unsupported).
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
 Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
 M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
 scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
-app delivery ✅ -> M17 first real U-mode app (mem lane over capabilities) ✅;
-next: IPC/events (EventSlot + ThreadPark) and NIC-as-capability + hand-rolled
-TCP in the network-service app, then the RV2 hardware tail.
+app delivery ✅ -> M17 first real U-mode app (mem lane over capabilities) ✅
+-> M18 IPC events (EventSlot + ThreadPark) ✅; next: NIC-as-capability +
+hand-rolled TCP in the network-service app, then the RV2 hardware tail.
 
 ## Other follow-ups
 

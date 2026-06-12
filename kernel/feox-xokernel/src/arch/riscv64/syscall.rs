@@ -23,10 +23,11 @@ use feox_asi::{
     AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapPermissions, CapRequest, MapFlags,
     MappedRegion, MemError, MemMapArgs, MemVtoPArgs, PhysicalAddress, SYSCALL_CAP_ERROR_BASE,
     SYSCALL_ERR_INVALID_ARGS, SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY,
-    SYSCALL_ERR_UNSUPPORTED, SYSCALL_MEM_ERROR_BASE, SYSCALL_OK,
+    SYSCALL_ERR_UNSUPPORTED, SYSCALL_MEM_ERROR_BASE, SYSCALL_OK, ThreadParkArgs,
 };
 
-use super::{frame, paging, umode};
+use super::trap::{REG_A0, REG_A1, TrapFrame};
+use super::{frame, paging, sched, umode};
 use crate::capability;
 
 /// User mmap window: kernel-chosen VAs for `MemMap`, inside sv39 root slot 8
@@ -119,6 +120,65 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
 
 fn mem_error(error: MemError) -> u64 {
     SYSCALL_MEM_ERROR_BASE + error as u64
+}
+
+/// `ThreadPark` from a running thread (called from the trap dispatcher with
+/// the live frame, since parking switches it). Futex-shaped: returns
+/// immediately (value 1) if the slot's counter already differs from
+/// `observed`; otherwise blocks the thread until the tick-driven wake scan
+/// sees the counter change (value 1) or the timeout lapse (value 0).
+pub fn park_from_user(frame: &mut TrapFrame) {
+    // Resume past the ecall whenever this thread next runs.
+    frame.sepc += 4;
+
+    let args_ptr = frame.regs[REG_A0] as *const u8;
+    let args_len = frame.regs[REG_A1] as u64;
+    if args_len != size_of::<ThreadParkArgs>() as u64 || args_ptr.is_null() {
+        frame.regs[REG_A0] = SYSCALL_ERR_INVALID_ARGS as usize;
+        frame.regs[REG_A1] = 0;
+        return;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<ThreadParkArgs>())
+    };
+
+    // The slot must be a mapped, readable, u64-aligned VA in the caller's
+    // space. Translate it now so the wake scan can poll the counter through
+    // the identity map regardless of which space is live later.
+    let slot_va = args.slot as usize;
+    let space = paging::AddressSpace::from_active();
+    let translated = if slot_va % 8 == 0 { space.translate(slot_va) } else { None };
+    let Some((slot_pa, flags)) = translated else {
+        frame.regs[REG_A0] = mem_error(MemError::AddressNotMapped) as usize;
+        frame.regs[REG_A1] = 0;
+        return;
+    };
+    if flags & paging::PTE_R == 0 {
+        frame.regs[REG_A0] = mem_error(MemError::AddressNotMapped) as usize;
+        frame.regs[REG_A1] = 0;
+        return;
+    }
+
+    // SAFETY: slot_pa is a readable mapped page, identity-visible to S-mode.
+    let count = unsafe { (slot_pa as *const u64).read_volatile() };
+    if count != args.observed {
+        frame.regs[REG_A0] = SYSCALL_OK as usize;
+        frame.regs[REG_A1] = 1;
+        return;
+    }
+
+    let nanos = args.timeout.as_nanos();
+    let deadline = if nanos == 0 {
+        0
+    } else {
+        let ticks = nanos
+            .saturating_mul(sched::SCHED_TICK_HZ)
+            .div_ceil(1_000_000_000)
+            .max(1);
+        super::time::ticks().saturating_add(ticks)
+    };
+    sched::block_current(frame, slot_pa, args.observed, deadline);
 }
 
 /// Maps a capability-backed physical range into the calling process's address

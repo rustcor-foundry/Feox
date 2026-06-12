@@ -18,36 +18,38 @@ fn main() {
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let apps = manifest.join("..").join("..").join("apps");
-    let app_dir = apps.join("feox-hello");
     let target_dir = PathBuf::from(env::var("OUT_DIR").unwrap()).join("feox-apps");
     println!("cargo:rerun-if-changed={}", apps.display());
 
-    // The app's rustflags are set via env because env REPLACES config-level
+    // The apps' rustflags are set via env because env REPLACES config-level
     // rustflags, whereas config files MERGE: the repo-level
     // [target.riscv64gc-unknown-none-elf] rustflags (the KERNEL linker
-    // script) would otherwise be joined with the app's own flags.
-    // -Tlink.ld resolves relative to the linker cwd, the app dir.
+    // script) would otherwise be joined with the apps' own flags.
+    // -Tlink.ld resolves relative to the linker cwd, each app dir.
     let app_rustflags = "-Clink-arg=-Tlink.ld -Clink-arg=-zmax-page-size=4096 \
                          -Crelocation-model=static -Ccode-model=medium";
-    let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .current_dir(&app_dir)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env("RUSTFLAGS", app_rustflags)
-        .args([
-            "build",
-            "--release",
-            "--target",
-            "riscv64gc-unknown-none-elf",
-            "--target-dir",
-        ])
-        .arg(&target_dir)
-        .status()
-        .expect("failed to spawn cargo for apps/feox-hello");
-    assert!(status.success(), "apps/feox-hello build failed");
+    for app in ["feox-hello", "feox-pingpong"] {
+        let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .current_dir(apps.join(app))
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env("RUSTFLAGS", app_rustflags)
+            .args([
+                "build",
+                "--release",
+                "--target",
+                "riscv64gc-unknown-none-elf",
+                "--target-dir",
+            ])
+            .arg(&target_dir)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to spawn cargo for apps/{app}: {error}"));
+        assert!(status.success(), "apps/{app} build failed");
 
-    let elf = target_dir
-        .join("riscv64gc-unknown-none-elf")
-        .join("release")
-        .join("feox-hello");
-    println!("cargo:rustc-env=FEOX_HELLO_ELF={}", elf.display());
+        let elf = target_dir
+            .join("riscv64gc-unknown-none-elf")
+            .join("release")
+            .join(app);
+        let var = format!("{}_ELF", app.to_uppercase().replace('-', "_"));
+        println!("cargo:rustc-env={}={}", var, elf.display());
+    }
 }

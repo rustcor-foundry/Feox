@@ -11,8 +11,8 @@
 use core::mem::size_of;
 
 use feox_asi::{
-    AsiOp, CapHandle, CapRequest, MapFlags, MappedRegion, MemMapArgs, MemVtoPArgs, PageFlags,
-    PhysicalAddress, SYSCALL_OK,
+    AsiOp, CapHandle, CapRequest, Duration, EventSlot, MapFlags, MappedRegion, MemMapArgs,
+    MemVtoPArgs, PageFlags, PhysicalAddress, SYSCALL_OK, ThreadParkArgs,
 };
 
 /// Raw ASI syscall. Returns `(result code, value)`.
@@ -118,6 +118,25 @@ pub fn mem_vtop(handle: CapHandle, virtual_address: u64) -> Option<u64> {
     };
     let (code, value) = syscall(AsiOp::MemVtoP, (&raw const args).cast(), size_of::<MemVtoPArgs>());
     (code == SYSCALL_OK).then_some(value)
+}
+
+/// Parks this thread on `slot` until its counter differs from `observed` or
+/// the timeout lapses (`Duration::from_nanos(0)` = no timeout). Returns
+/// `Some(true)` when woken by a counter change, `Some(false)` on timeout,
+/// `None` on error. Futex-shaped: returns immediately if the counter already
+/// moved, so wakeups cannot be lost between the load and the park.
+pub fn park(slot: &EventSlot, observed: u64, timeout: Duration) -> Option<bool> {
+    let args = ThreadParkArgs {
+        slot,
+        observed,
+        timeout,
+    };
+    let (code, value) = syscall(
+        AsiOp::ThreadPark,
+        (&raw const args).cast(),
+        size_of::<ThreadParkArgs>(),
+    );
+    (code == SYSCALL_OK).then_some(value == 1)
 }
 
 /// Exits the current process with `value`. Never returns.
