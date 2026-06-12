@@ -8,23 +8,36 @@
 //! the U-mode excursion via `umode::exit_to_kernel`) and never reaches
 //! [`dispatch`].
 //!
-//! This first riscv64 lane serves the capability table (`CapRequest`,
-//! `CapRelease`, `CapDelegate`, `CapList`) plus `ProcYield`; the mem/storage
-//! lanes stay x86_64-only until their riscv64 backends land. Unifying both
-//! dispatchers over a portable core is a noted follow-up.
+//! This riscv64 lane serves the capability table (`CapRequest`, `CapRelease`,
+//! `CapDelegate`, `CapList`), the memory lane (`MemMap`/`MemUnmap`/`MemVtoP`,
+//! operating on the *calling process's* address space — the trap does not
+//! switch `satp`, so `AddressSpace::from_active()` is the caller's space), and
+//! `ProcYield`. The storage lane stays x86_64-only until its riscv64 backend
+//! lands. Unifying both dispatchers over a portable core is a noted follow-up.
 
 use core::mem::size_of;
 use core::ptr::slice_from_raw_parts_mut;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use feox_asi::{
-    AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapRequest, SYSCALL_CAP_ERROR_BASE,
+    AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapPermissions, CapRequest, MapFlags,
+    MappedRegion, MemError, MemMapArgs, MemVtoPArgs, PhysicalAddress, SYSCALL_CAP_ERROR_BASE,
     SYSCALL_ERR_INVALID_ARGS, SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY,
-    SYSCALL_ERR_UNSUPPORTED, SYSCALL_OK,
+    SYSCALL_ERR_UNSUPPORTED, SYSCALL_MEM_ERROR_BASE, SYSCALL_OK,
 };
 
-use super::{frame, umode};
+use super::{frame, paging, umode};
 use crate::capability;
+
+/// User mmap window: kernel-chosen VAs for `MemMap`, inside sv39 root slot 8
+/// (the process VA window, private per process space) and above any app
+/// image/stack. A monotonic global bump — VAs are never reused, which keeps
+/// distinct mappings (even across processes) at distinct addresses; each VA
+/// only ever becomes live in the address space of the process that mapped it.
+const MMAP_BASE: usize = 0x2_1000_0000;
+/// One past the end of sv39 root slot 8.
+const MMAP_END: usize = 0x2_4000_0000;
+static MMAP_NEXT: AtomicUsize = AtomicUsize::new(MMAP_BASE);
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -94,11 +107,140 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
         AsiOp::CapList => dispatch_cap_list(args_ptr.cast_mut(), args_len, out_value),
         AsiOp::CapRelease => dispatch_cap_release(args_ptr, args_len, out_value),
         AsiOp::CapDelegate => dispatch_cap_delegate(args_ptr, args_len, out_value),
+        AsiOp::MemMap => dispatch_mem_map(args_ptr, args_len, out_value),
+        AsiOp::MemUnmap => dispatch_mem_unmap(args_ptr, args_len, out_value),
+        AsiOp::MemVtoP => dispatch_mem_vtop(args_ptr, args_len, out_value),
         AsiOp::ProcYield => SYSCALL_OK,
         // ProcExit is consumed at the trap boundary; reaching here means a
         // kernel-side caller used it, which the transport does not support.
         _ => SYSCALL_ERR_UNSUPPORTED,
     }
+}
+
+fn mem_error(error: MemError) -> u64 {
+    SYSCALL_MEM_ERROR_BASE + error as u64
+}
+
+/// Maps a capability-backed physical range into the calling process's address
+/// space at a kernel-chosen VA from the mmap window. The capability must
+/// grant READ (and WRITE when requested); offset/length must be page-aligned
+/// and inside the capability's resource.
+fn dispatch_mem_map(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {
+    if args_len != size_of::<MemMapArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length is checked against `MemMapArgs` and the pointer is
+        // non-null (U-mode callers are read under sstatus.SUM).
+        *(args_ptr.cast::<MemMapArgs>())
+    };
+
+    if !args.flags.contains(MapFlags::READ)
+        || args.flags.contains(MapFlags::EXEC)
+        || args.flags.contains(MapFlags::UNCACHEABLE)
+        || args.flags.contains(MapFlags::WRITE_COMBINE)
+    {
+        return mem_error(MemError::InvalidFlags);
+    }
+    if args.length_bytes == 0
+        || args.length_bytes % frame::FRAME_SIZE as u64 != 0
+        || args.offset_bytes % frame::FRAME_SIZE as u64 != 0
+    {
+        return mem_error(MemError::AlignmentViolation);
+    }
+
+    let writable = args.flags.contains(MapFlags::WRITE);
+    let mut required = CapPermissions::READ;
+    if writable {
+        required |= CapPermissions::WRITE;
+    }
+    let Ok((base, size)) = capability::cap_to_phys_base(args.handle, required) else {
+        return mem_error(MemError::InvalidCapability);
+    };
+    if args.offset_bytes.saturating_add(args.length_bytes) > size {
+        return mem_error(MemError::OffsetOutOfRange);
+    }
+
+    let length = args.length_bytes as usize;
+    let va = MMAP_NEXT.fetch_add(length, Ordering::Relaxed);
+    if va + length > MMAP_END {
+        return mem_error(MemError::OutOfVirtualSpace);
+    }
+
+    let mut flags = paging::PTE_U | paging::PTE_R;
+    if writable {
+        flags |= paging::PTE_W;
+    }
+    // The trap left satp untouched, so the active space IS the caller's; for
+    // a process this extends its private slot-8 subtree.
+    let mut space = paging::AddressSpace::from_active();
+    space.map(va, base.0 as usize + args.offset_bytes as usize, length, flags);
+    paging::flush_tlb_all();
+
+    let region = MappedRegion {
+        base: va as u64,
+        length_bytes: args.length_bytes,
+        flags: args.flags,
+    };
+    if !args.out_region.is_null() {
+        // SAFETY: caller-owned output slot (written under SUM for U-mode).
+        unsafe { *args.out_region = region };
+    }
+    *out_value = va as u64;
+    SYSCALL_OK
+}
+
+/// Unmaps a region previously returned by `MemMap` from the calling process's
+/// address space. The backing frames stay owned by the capability.
+fn dispatch_mem_unmap(args_ptr: *const u8, args_len: u64, _out_value: &mut u64) -> u64 {
+    if args_len != size_of::<MappedRegion>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let region = unsafe {
+        // SAFETY: length is checked against `MappedRegion`, pointer non-null.
+        *(args_ptr.cast::<MappedRegion>())
+    };
+    let base = region.base as usize;
+    let length = region.length_bytes as usize;
+    if base < MMAP_BASE
+        || base % frame::FRAME_SIZE != 0
+        || length == 0
+        || length % frame::FRAME_SIZE != 0
+        || base.saturating_add(length) > MMAP_END
+    {
+        return mem_error(MemError::AddressNotMapped);
+    }
+    let mut space = paging::AddressSpace::from_active();
+    space.unmap(base, length);
+    SYSCALL_OK
+}
+
+/// Translates a VA in the calling process's space; the result must fall
+/// inside the supplied capability's physical resource.
+fn dispatch_mem_vtop(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {
+    if args_len != size_of::<MemVtoPArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length is checked against `MemVtoPArgs`, pointer non-null.
+        *(args_ptr.cast::<MemVtoPArgs>())
+    };
+    let Ok((base, size)) = capability::cap_to_phys_base(args.handle, CapPermissions::READ) else {
+        return mem_error(MemError::InvalidCapability);
+    };
+    let space = paging::AddressSpace::from_active();
+    let Some((pa, _)) = space.translate(args.virtual_address as usize) else {
+        return mem_error(MemError::AddressNotMapped);
+    };
+    if (pa as u64) < base.0 || (pa as u64) >= base.0 + size {
+        return mem_error(MemError::AddressNotMapped);
+    }
+    if !args.out_physical_address.is_null() {
+        // SAFETY: caller-owned output slot (written under SUM for U-mode).
+        unsafe { *args.out_physical_address = PhysicalAddress(pa as u64) };
+    }
+    *out_value = pa as u64;
+    SYSCALL_OK
 }
 
 fn dispatch_cap_request(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {

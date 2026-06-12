@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+feox-asi = { path = "../../crates/feox-asi" }
 feox-libos = { path = "../feox-libos" }
 
 # no_std binary: no unwinder, keep it small.
