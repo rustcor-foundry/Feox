@@ -24,8 +24,6 @@ const SBI_FN_HART_START: usize = 0;
 /// SBI success return code.
 const SBI_SUCCESS: isize = 0;
 
-/// Highest hart id we probe for (QEMU virt tops out well under this).
-const MAX_HARTS: usize = 8;
 /// Per-hart S-mode stack size in frames (16 KiB) — ample for the AP path.
 const AP_STACK_FRAMES: usize = 4;
 /// Spin bound while waiting for a hart to report online.
@@ -90,13 +88,15 @@ fn sbi_hart_start(hartid: usize, start_addr: usize, opaque: usize) -> isize {
 }
 
 /// Starts the secondary harts, one at a time, and waits for each to come
-/// online. `boot_hartid` is the hart already running this code.
-pub fn bring_up_secondary_harts(boot_hartid: usize) {
+/// online. `boot_hartid` is the hart already running this code; `harts` is
+/// the device-tree-derived list of MMU-capable, enabled hart ids (so e.g.
+/// the JH7110's S7 monitor hart is never started).
+pub fn bring_up_secondary_harts(boot_hartid: usize, harts: &[usize]) {
     let satp = paging::read_satp();
     let start_addr = _ap_start as *const () as usize;
     let mut started = 0usize;
 
-    for hartid in 0..MAX_HARTS {
+    for &hartid in harts {
         if hartid == boot_hartid {
             continue;
         }
@@ -120,8 +120,10 @@ pub fn bring_up_secondary_harts(boot_hartid: usize) {
 
         let expected = started + 1;
         if sbi_hart_start(hartid, start_addr, boot_block) != SBI_SUCCESS {
-            // No such hart (or it can't start) — assume hart ids are contiguous.
-            break;
+            // This hart can't start; the DT list may be optimistic — keep
+            // trying the rest.
+            crate::kprintln!("[feox] smp: hart {} refused to start", hartid);
+            continue;
         }
         started = expected;
 

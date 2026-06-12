@@ -1,10 +1,10 @@
-//! Early serial console via the SBI legacy `console_putchar` call.
+//! Serial console: SBI `console_putchar` early, native UART once discovered.
 //!
-//! In S-mode the kernel has no direct UART ownership during early bring-up, so
-//! the firmware (OpenSBI) provides the console through an `ecall`. The legacy
-//! `console_putchar` extension (EID `0x01`) is universally available on the
-//! SBI implementations Feox targets (QEMU `virt` / U-Boot OpenSBI). A native
-//! 16550 driver replaces this once MMIO + the device tree are wired up.
+//! In S-mode the kernel has no direct UART ownership during early bring-up,
+//! so the firmware (OpenSBI) provides the console through an `ecall`. After
+//! the device tree is parsed, `riscv_main` upgrades to the native 16550
+//! driver (`uart.rs`) — every byte then goes straight to the hardware, with
+//! SBI as the automatic fallback if the UART is absent or unresponsive.
 
 use core::fmt::{self, Write};
 
@@ -45,13 +45,20 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SerialWriter;
 
+/// Emits one byte: native UART when active, SBI otherwise.
+fn putchar(byte: u8) {
+    if !super::uart::putb(byte) {
+        sbi_putchar(byte);
+    }
+}
+
 impl Write for SerialWriter {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for byte in s.bytes() {
             if byte == b'\n' {
-                sbi_putchar(b'\r');
+                putchar(b'\r');
             }
-            sbi_putchar(byte);
+            putchar(byte);
         }
         Ok(())
     }

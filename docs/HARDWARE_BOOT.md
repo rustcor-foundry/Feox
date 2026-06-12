@@ -69,13 +69,18 @@ llvm-objcopy -O binary \
 The hardware path runs every milestone that does not depend on QEMU's fixed
 device windows:
 
-- banner, `arch: riscv64 (S-mode)`, boot hart + DTB address
+- banner, `arch: riscv64 (S-mode)`, boot hart + DTB address (via SBI console)
 - trap vector + `breakpoint trap handled` (M2)
 - `sv39 paging enabled` (M3), DTB/RAM discovery, `frame allocator online` (M4)
+- `console: native UART @ ...` — from this line on, output goes straight to
+  the hardware UART (as U-Boot configured it); SBI is only the fallback. If
+  the *early* lines are missing but output starts here, the vendor OpenSBI
+  lacks the legacy console — harmless.
 - feox-async executor (M5), `kernel heap online` (M10), VM self-test (M11)
-- `smp: skipped (non-QEMU; DT-driven hart selection TODO)` — deliberate: on
-  the JH7110, hart 0 is the MMU-less S7 monitor core
 - `pcie/net: skipped (non-QEMU; DT-derived drivers TODO)` — deliberate
+- SMP: secondary harts come up DT-driven — only cpu nodes with an
+  `mmu-type` are started (the JH7110's S7 monitor hart is skipped by
+  design). Expect `hart N alive` per application core.
 - timer interrupts at the DT timebase (M9)
 - U-mode execution (M12), ASI syscalls + capability table (M13), preemptive
   scheduler (M14), ELF processes (M15), the embedded apps: feox-hello
@@ -99,8 +104,7 @@ device windows:
 
 ## Known gaps on hardware (the next arc)
 
-- SMP bring-up (DT-driven hart selection honoring `mmu-type`)
-- DT-derived PLIC routing + native UART console
+- DT-derived PLIC routing (interrupt-driven I/O on the boards)
 - JH7110 dwmac / Ky X1 ethernet behind the existing `NetDevice` capability
   lane, NVMe/SD storage behind the storage lane — then the full QEMU
   milestone ladder (TCP, RFS) runs on silicon unchanged.
