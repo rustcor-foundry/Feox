@@ -252,6 +252,18 @@ impl Controller {
             crate::kprintln!("[feox] nvme: no I/O queue for block test");
             return false;
         };
+        // The DMA buffers are one 4 KiB frame each with PRP2 = 0, so a single
+        // command can move at most one page. A namespace formatted with an
+        // LBA larger than 4 KiB (parse_identify_namespace accepts up to 64
+        // KiB) would have the controller DMA past the frame — skip the test
+        // rather than corrupt memory. (QEMU's default 512 never trips this.)
+        if self.geometry.block_size > 4096 {
+            crate::kprintln!(
+                "[feox] nvme: block test skipped ({}-byte LBA exceeds one DMA page)",
+                self.geometry.block_size
+            );
+            return true;
+        }
         let (Some(write_buf), Some(read_buf)) =
             (dma_frame("write buffer"), dma_frame("read buffer"))
         else {

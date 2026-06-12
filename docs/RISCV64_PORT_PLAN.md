@@ -432,6 +432,19 @@ still works. Also fixed in passing: the mem_map VA bump leaked the window on
 the overflow path (now reserve-on-success). Remaining review findings (NVMe
 SQ N-1, doorbell/virtio fences, ELF bounds) are the next hardening PR.
 
+QA hardening (M30): the NVMe correctness cluster. `feox-nvme`'s `QueueRing`
+now caps outstanding commands at N-1 (a size-N NVMe SQ holds at most N-1
+entries — tail==head is *empty*; the exported API would have corrupted the
+ring at depth N, latent only because callers are strictly sequential),
+bounds-checks the CQE command id before indexing the inflight map (a torn or
+buggy completion would otherwise panic the kernel), and uses a real
+write-before-MMIO barrier (`fence ow,ow` on riscv) when ringing the tail
+doorbell instead of a memory-only atomic fence (a reordering invisible on
+QEMU, real on hardware). The kernel's NVMe self-test skips a `>4 KiB` LBA
+format rather than DMA past its one-page buffer. Host-tested (the N-1 cap has
+a regression test). The remaining ELF-loader bounds + the park-timeout flake
+are the last hardening item.
+
 26. **DT-derived PLIC + interrupt numbers** ✅ — the last hardcoded QEMU
     interrupt assumption removed. `fdt.rs` gains `plic()` (compatible
     containing "plic": sifive,plic-1.0.0 / riscv,plic0; reg decoded with the
