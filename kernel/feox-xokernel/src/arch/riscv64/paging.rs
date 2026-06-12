@@ -328,6 +328,52 @@ impl AddressSpace {
         }
     }
 
+    /// Creates a user address space whose root copies the active (kernel)
+    /// root's top-level entries, so kernel text/data, the trap vector and
+    /// stack, and the frame pool stay mapped under this space's `satp`.
+    /// Mappings made afterwards in root slots that were *empty* at clone time
+    /// allocate private table trees — that is what gives per-process isolation
+    /// (use VA windows the kernel never touches). Must be torn down with
+    /// [`Self::destroy_user`], not `destroy` (the shared subtrees belong to
+    /// the kernel). Top-level entries the kernel adds later are not seen by
+    /// already-cloned spaces.
+    #[must_use]
+    pub fn new_user() -> Option<Self> {
+        let kernel_root = (read_satp() & ((1 << 44) - 1)) << 12;
+        let root = frame::alloc()?;
+        for i in 0..ENTRIES {
+            // SAFETY: both roots are live, identity-mapped table frames; the
+            // fresh root is exclusively ours.
+            unsafe {
+                *((root + i * 8) as *mut u64) = *((kernel_root + i * 8) as *const u64);
+            }
+        }
+        Some(Self { root })
+    }
+
+    /// Tears down a space created by [`Self::new_user`]: frees only the table
+    /// trees hanging off root slots that differ from the live kernel root
+    /// (the space's private mappings), then the root itself. Backing leaf
+    /// pages are NOT freed — the mapper owns them. Must be called while the
+    /// kernel address space is active (so the comparison baseline is the same
+    /// root that was cloned). Returns the number of table frames freed.
+    pub fn destroy_user(self) -> usize {
+        let kernel_root = (read_satp() & ((1 << 44) - 1)) << 12;
+        debug_assert_ne!(kernel_root, self.root, "cannot destroy the active space");
+        let mut freed = 0usize;
+        for i in 0..ENTRIES {
+            // SAFETY: reading PTE slots in live, identity-mapped table frames.
+            let mine = unsafe { *((self.root + i * 8) as *const u64) };
+            let shared = unsafe { *((kernel_root + i * 8) as *const u64) };
+            if mine != shared && mine & PTE_V != 0 && mine & (PTE_R | PTE_W | PTE_X) == 0 {
+                let child = (((mine >> 10) & ((1 << 44) - 1)) << 12) as usize;
+                freed += free_table_tree(child, 1);
+            }
+        }
+        frame::free(self.root);
+        freed + 1
+    }
+
     /// Physical address of the root page table.
     #[must_use]
     pub fn root(&self) -> usize {
@@ -442,6 +488,18 @@ const fn align_up(x: usize, align: usize) -> usize {
 /// Rounds `x` down to a multiple of `align` (a power of two).
 const fn align_down(x: usize, align: usize) -> usize {
     x & !(align - 1)
+}
+
+/// Switches `satp` to `value` and flushes the TLB.
+///
+/// # Safety
+/// The new root must map everything the current execution path needs (PC,
+/// stack, the trap vector, and any data touched before the next switch).
+pub unsafe fn write_satp(value: usize) {
+    // SAFETY: upheld by the caller.
+    unsafe {
+        asm!("csrw satp, {0}", "sfence.vma", in(reg) value, options(nostack));
+    }
 }
 
 /// Flushes the entire local TLB.

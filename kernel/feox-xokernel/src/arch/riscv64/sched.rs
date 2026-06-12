@@ -50,6 +50,9 @@ struct Thread {
     state: State,
     /// Complete saved register state; what the trap stub resumes.
     frame: TrapFrame,
+    /// `satp` this thread runs under (the kernel root for raw threads, a
+    /// per-process root for ELF processes). Written on switch when it differs.
+    satp: usize,
     code_frame: usize,
     stack_frame: usize,
     exit_value: usize,
@@ -70,6 +73,7 @@ impl Thread {
         Self {
             state: State::Free,
             frame: EMPTY_FRAME,
+            satp: 0,
             code_frame: 0,
             stack_frame: 0,
             exit_value: 0,
@@ -154,20 +158,55 @@ pub fn spawn(words: &[u32]) -> Option<usize> {
     );
     paging::flush_tlb_all();
 
+    init_slot(slot, base, base + STACK_OFFSET + frame::FRAME_SIZE, paging::read_satp());
+    let thread = &mut sched().threads[slot];
+    thread.code_frame = code;
+    thread.stack_frame = stack;
+    Some(slot)
+}
+
+/// Creates a thread whose code/stack the caller has already mapped (e.g. an
+/// ELF process loaded into its own address space). The caller owns the
+/// backing frames and the space; release the slot with [`clear_slot`] after
+/// the run. Returns the slot index, or `None` when the table is full.
+pub fn spawn_at(entry: usize, stack_top: usize, satp: usize) -> Option<usize> {
+    let slot = sched().threads.iter().position(|t| t.state == State::Free)?;
+    init_slot(slot, entry, stack_top, satp);
+    Some(slot)
+}
+
+/// Initializes `slot` as Ready with a crafted U-mode entry frame.
+fn init_slot(slot: usize, entry: usize, stack_top: usize, satp: usize) {
     let thread = &mut sched().threads[slot];
     *thread = Thread::free();
     thread.state = State::Ready;
-    thread.code_frame = code;
-    thread.stack_frame = stack;
-    thread.frame.sepc = base;
-    thread.frame.regs[REG_SP] = base + STACK_OFFSET + frame::FRAME_SIZE;
+    thread.satp = satp;
+    thread.frame.sepc = entry;
+    thread.frame.regs[REG_SP] = stack_top;
     // sret target: U-mode (SPP=0), interrupts on once there (SPIE), and SUM
     // so syscall argument access keeps working. SIE must be 0, like every
     // hardware-saved frame, or the restore stub's `csrw sstatus` would
     // re-enable interrupts before its sret.
     thread.frame.sstatus =
         (read_sstatus() & !(SSTATUS_SPP | SSTATUS_SIE)) | SSTATUS_SPIE | SSTATUS_SUM;
-    Some(slot)
+}
+
+/// Per-thread stats: `(exited, exit_value, preemptions, yields)`. `None` for
+/// a Free slot.
+#[must_use]
+pub fn stats(slot: usize) -> Option<(bool, usize, u64, u64)> {
+    let t = sched().threads.get(slot)?;
+    if t.state == State::Free {
+        return None;
+    }
+    Some((t.state == State::Exited, t.exit_value, t.preemptions, t.yields))
+}
+
+/// Releases a slot whose backing resources the caller owns (`spawn_at`
+/// threads). Must not be called during a run.
+pub fn clear_slot(slot: usize) {
+    debug_assert!(!sched().active);
+    sched().threads[slot] = Thread::free();
 }
 
 /// Next Ready slot after (and wrapping past) `from`, including `from` itself.
@@ -178,13 +217,22 @@ fn next_ready(s: &Scheduler, from: usize) -> Option<usize> {
 }
 
 /// Switches the live trap frame to `slot` (saving it to the current thread
-/// first when `save` is set).
+/// first when `save` is set), and the address space when it differs. The
+/// trap handler keeps working across the satp write because every thread's
+/// root maps the kernel (raw threads use the kernel root; process roots clone
+/// its top-level entries).
 fn switch_to(s: &mut Scheduler, frame: &mut TrapFrame, slot: usize, save: bool) {
     if save {
         s.threads[s.current].frame = *frame;
     }
     s.current = slot;
     *frame = s.threads[slot].frame;
+    let target = s.threads[slot].satp;
+    if paging::read_satp() != target {
+        // SAFETY: see above — kernel mappings are present in every thread's
+        // root, and the user frame about to be resumed belongs to `target`.
+        unsafe { paging::write_satp(target) };
+    }
 }
 
 /// Ends the run from trap context: capture the interrupted thread's state,
@@ -252,8 +300,9 @@ pub fn exit_current(frame: &mut TrapFrame, value: usize) {
 
 /// Runs all Ready threads until they exit or the tick budget lapses. Entered
 /// via `enter_user` into the first ready thread; ends when stop() longjmps
-/// back here.
-fn run(timebase_hz: u64) {
+/// back here. The caller's address space is restored before returning, so
+/// teardown (e.g. `destroy_user`) always compares against the kernel root.
+pub fn run(timebase_hz: u64) {
     let s = sched();
     let Some(first) = next_ready(s, MAX_THREADS - 1) else {
         crate::kprintln!("[feox] sched: no ready threads");
@@ -265,11 +314,21 @@ fn run(timebase_hz: u64) {
 
     let entry = s.threads[first].frame.sepc;
     let stack_top = s.threads[first].frame.regs[REG_SP];
+    let home_satp = paging::read_satp();
+    if s.threads[first].satp != home_satp {
+        // SAFETY: process roots clone the kernel top-level entries, so the
+        // code here (and the trap path) stays mapped across the switch.
+        unsafe { paging::write_satp(s.threads[first].satp) };
+    }
     time::enable(timebase_hz, SCHED_TICK_HZ);
-    // SAFETY: thread `first`'s code/stack windows are mapped U-accessible;
-    // the run ends with a longjmp back here from stop().
+    // SAFETY: thread `first`'s code/stack windows are mapped U-accessible in
+    // its space; the run ends with a longjmp back here from stop().
     unsafe { umode::enter_user(entry, stack_top) };
     // (time::disable() already ran in stop(); s.active is false again.)
+    if paging::read_satp() != home_satp {
+        // SAFETY: returning to the space that was live when run() was called.
+        unsafe { paging::write_satp(home_satp) };
+    }
 }
 
 /// Milestone 14 demo: two yielding threads that exit with distinct values and
@@ -331,7 +390,9 @@ pub fn demo(timebase_hz: u64) {
     let mut space = paging::AddressSpace::from_active();
     for slot in 0..MAX_THREADS {
         let t = &mut s.threads[slot];
-        if t.state == State::Free {
+        // Only reap raw-spawned threads (they own kernel-space windows and
+        // frames); spawn_at slots belong to their caller.
+        if t.state == State::Free || t.code_frame == 0 {
             continue;
         }
         let base = USER_WINDOW_BASE + slot * USER_WINDOW_STRIDE;

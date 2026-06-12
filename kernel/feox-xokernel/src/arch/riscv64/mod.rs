@@ -6,6 +6,7 @@
 //! path that bypasses the x86-shaped `boot::bootstrap` flow.
 
 pub mod cpu;
+pub mod elf;
 pub mod fdt;
 pub mod frame;
 pub mod heap;
@@ -128,6 +129,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // Milestone 14: threads + preemptive round-robin scheduler (timer-driven
     // trap-level context switching over the M12 longjmp primitive).
     sched::demo(timebase);
+
+    // Milestone 15: ELF loader + per-process address spaces — one image, two
+    // isolated processes at identical VAs, scheduled to exit.
+    elf::demo(timebase);
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 

@@ -210,14 +210,30 @@ Still required before it can boot on the RV:
     the kernel address space — per-process isolated spaces arrive with the ELF
     loader.
 
+15. **ELF loader + per-process address spaces** ✅ — `elf.rs`: a hand-rolled
+    static ELF64 loader (validate header, copy `PT_LOAD` segments into fresh
+    frames with per-segment U+R/W/X permissions, zero-filled `memsz > filesz`
+    tails). Process spaces come from `AddressSpace::new_user()` — a root that
+    clones the kernel's top-level entries (so the trap path works under any
+    process satp) — with process VAs in a top-level slot the kernel never
+    touches (0x2_0000_0000, slot 8), so each space grows a private table tree;
+    `destroy_user()` frees exactly that. The scheduler is satp-aware: each
+    thread carries its satp, switches write it when it changes, and `run()`
+    restores the caller's space. Proven by loading ONE synthesized image into
+    TWO processes, poking a different `.data` value into each (same VA,
+    different frame), and scheduling both: distinct exit values (200/201) +
+    a pre-run translate() comparison prove isolation. ET_EXEC only; M16 feeds
+    toolchain-built executables through this same path.
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
 Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
 M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
-scheduler ✅ -> M15 ELF loader (+ per-process address spaces) -> M16 libOS +
-app delivery -> M17 first U-mode app; then NIC-as-capability + hand-rolled TCP
-in the network-service app, then the RV2 hardware tail.
+scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
+app delivery (toolchain-built user crates through the M15 loader) -> M17 first
+U-mode app; then NIC-as-capability + hand-rolled TCP in the network-service
+app, then the RV2 hardware tail.
 
 ## Other follow-ups
 
