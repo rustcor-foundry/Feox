@@ -316,6 +316,162 @@ impl Fdt {
         None
     }
 
+    /// Finds the PLIC (`compatible` containing `"plic"`, e.g.
+    /// `sifive,plic-1.0.0` / `riscv,plic0`) and returns its `(base, size)`,
+    /// decoded with the parent's `#address-cells` / `#size-cells`.
+    #[must_use]
+    pub fn plic(&self) -> Option<(u64, u64)> {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+
+        let mut addr_cells = [2u32; 16];
+        let mut size_cells = [1u32; 16];
+        let mut depth: usize = 0;
+
+        let mut cand_depth: usize = 0;
+        let mut matched = false;
+        let mut reg: Option<(u64, u64)> = None;
+
+        loop {
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    // Properties precede subnodes: evaluate the previous node.
+                    if cand_depth != 0 && matched {
+                        if let Some(found) = reg {
+                            return Some(found);
+                        }
+                    }
+                    depth += 1;
+                    if depth < addr_cells.len() {
+                        addr_cells[depth] = addr_cells[depth - 1];
+                        size_cells[depth] = size_cells[depth - 1];
+                    }
+                    cand_depth = depth;
+                    matched = false;
+                    reg = None;
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    if cand_depth == depth && matched {
+                        if let Some(found) = reg {
+                            return Some(found);
+                        }
+                    }
+                    cand_depth = 0;
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    let pname = offset(strings, nameoff);
+
+                    if depth < addr_cells.len() {
+                        if bytes_eq(pname, b"#address-cells") {
+                            addr_cells[depth] = be_u32(value);
+                        } else if bytes_eq(pname, b"#size-cells") {
+                            size_cells[depth] = be_u32(value);
+                        }
+                    }
+                    if depth == cand_depth {
+                        if bytes_eq(pname, b"compatible") {
+                            matched = bytes_contain(value, len, b"plic");
+                        } else if bytes_eq(pname, b"reg") && depth >= 1 {
+                            let (addr, rest) = read_cells(value, addr_cells[depth - 1]);
+                            let (size, _) = read_cells(rest, size_cells[depth - 1]);
+                            reg = Some((addr, size));
+                        }
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        None
+    }
+
+    /// Returns the first `interrupts` cell of the node whose `reg` base is
+    /// `unit_base` — the PLIC source number of a device discovered by direct
+    /// probing (e.g. the virtio-mmio net transport).
+    #[must_use]
+    pub fn interrupt_at(&self, unit_base: u64) -> Option<u32> {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+
+        let mut addr_cells = [2u32; 16];
+        let mut depth: usize = 0;
+
+        let mut cand_depth: usize = 0;
+        let mut matched = false;
+        let mut interrupt: Option<u32> = None;
+
+        loop {
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    if cand_depth != 0 && matched {
+                        if let Some(found) = interrupt {
+                            return Some(found);
+                        }
+                    }
+                    depth += 1;
+                    if depth < addr_cells.len() {
+                        addr_cells[depth] = addr_cells[depth - 1];
+                    }
+                    cand_depth = depth;
+                    matched = false;
+                    interrupt = None;
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    if cand_depth == depth && matched {
+                        if let Some(found) = interrupt {
+                            return Some(found);
+                        }
+                    }
+                    cand_depth = 0;
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    let pname = offset(strings, nameoff);
+
+                    if bytes_eq(pname, b"#address-cells") && depth < addr_cells.len() {
+                        addr_cells[depth] = be_u32(value);
+                    }
+                    if depth == cand_depth {
+                        if bytes_eq(pname, b"reg") && depth >= 1 {
+                            let (addr, _) = read_cells(value, addr_cells[depth - 1]);
+                            matched = addr == unit_base;
+                        } else if bytes_eq(pname, b"interrupts") && len >= 4 {
+                            interrupt = Some(be_u32(value));
+                        }
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        None
+    }
+
     /// Collects the hart ids of MMU-capable, enabled CPUs (`/cpus/cpu@*`
     /// nodes with an `mmu-type` property and no `status = "disabled"`) into
     /// `out`, returning how many were written. This is what makes SMP

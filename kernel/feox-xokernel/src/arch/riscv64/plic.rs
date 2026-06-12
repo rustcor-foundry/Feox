@@ -15,13 +15,13 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::trap::TrapFrame;
 
-/// QEMU virt PLIC window (mapped by `build_kernel_address_space`).
-pub const PLIC_BASE: usize = 0x0c00_0000;
-/// PLIC window size.
-pub const PLIC_SIZE: usize = 0x60_0000;
-
 /// `sie.SEIE` — supervisor external interrupt enable (bit 9).
 const SIE_SEIE: u64 = 1 << 9;
+
+/// PLIC MMIO base, discovered from the device tree and set by [`init`]
+/// (0 = no PLIC). QEMU virt and the JH7110 put it at 0x0c00_0000; the Ky X1
+/// elsewhere — which is exactly why it is no longer a constant.
+static PLIC_BASE: AtomicUsize = AtomicUsize::new(0);
 
 const PRIORITY_BASE: usize = 0x0;
 const ENABLE_BASE: usize = 0x2000;
@@ -33,19 +33,23 @@ const CONTEXT_STRIDE: usize = 0x1000;
 static S_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 
 fn reg_w(offset: usize, value: u32) {
-    // SAFETY: offset is within the mapped PLIC window.
-    unsafe { core::ptr::write_volatile((PLIC_BASE + offset) as *mut u32, value) };
+    let base = PLIC_BASE.load(Ordering::Acquire);
+    // SAFETY: offset is within the mapped PLIC window set by init().
+    unsafe { core::ptr::write_volatile((base + offset) as *mut u32, value) };
 }
 
 fn reg_r(offset: usize) -> u32 {
-    // SAFETY: offset is within the mapped PLIC window.
-    unsafe { core::ptr::read_volatile((PLIC_BASE + offset) as *const u32) }
+    let base = PLIC_BASE.load(Ordering::Acquire);
+    // SAFETY: offset is within the mapped PLIC window set by init().
+    unsafe { core::ptr::read_volatile((base + offset) as *const u32) }
 }
 
-/// Enables `irq` for the boot hart's S-mode context and drains anything
+/// Binds the driver to the (DT-discovered, already mapped) PLIC at `base`,
+/// enables `irq` for the boot hart's S-mode context, and drains anything
 /// already pending (stale device state from the polled bring-up would
 /// otherwise fire the moment `sie.SEIE` is set).
-pub fn init(boot_hart: usize, irq: u32) {
+pub fn init(base: usize, boot_hart: usize, irq: u32) {
+    PLIC_BASE.store(base, Ordering::Release);
     let context = 2 * boot_hart + 1;
     S_CONTEXT.store(context, Ordering::Release);
 

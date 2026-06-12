@@ -408,6 +408,19 @@ snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
     JH7110's MMU-less S7 hart is structurally unstartable. CI asserts the
     console marker; the SMP marker now passes via the DT path.
 
+26. **DT-derived PLIC + interrupt numbers** ✅ — the last hardcoded QEMU
+    interrupt assumption removed. `fdt.rs` gains `plic()` (compatible
+    containing "plic": sifive,plic-1.0.0 / riscv,plic0; reg decoded with the
+    parent's address AND size cells) and `interrupt_at(unit_base)` (the
+    `interrupts` cell of the node whose reg base matches a directly-probed
+    device — how the virtio-net transport's PLIC source is found without
+    slot math). The PLIC driver binds to a runtime base; its window is
+    mapped at discovery time instead of in the static QEMU device map. The
+    net IRQ is DT-first with the slot computation as fallback. QEMU and the
+    boards (JH7110: PLIC @ 0xc000000; Ky X1: elsewhere — the reason this
+    can't be a constant) now share one interrupt bring-up path, proven by
+    the existing M19 interrupt-wake demo + a new DT-PLIC CI marker.
+
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.

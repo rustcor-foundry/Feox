@@ -129,13 +129,35 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
         // round-trip. On real hardware this is the JH7110 dwmac driver behind
         // the same NetDevice interface.
         net::selftest();
-        // Milestone 19: route the net device's interrupt to this hart's
-        // S-mode PLIC context (delivery happens in U-mode / scheduler idle;
-        // S-mode keeps sstatus.SIE clear outside those windows).
-        if let Some(irq) = net::irq_number() {
-            plic::init(hartid, irq);
+        // Milestone 19 (DT-derived in M26): discover the PLIC from the
+        // device tree, map its window, and route the net device's interrupt
+        // (also DT-derived, with the QEMU slot math as fallback) to this
+        // hart's S-mode context. Delivery happens in U-mode / scheduler
+        // idle; S-mode keeps sstatus.SIE clear outside those windows.
+        let plic_window = fdt::parse(dtb).and_then(|tree| tree.plic());
+        let net_irq = net::mmio_base()
+            .and_then(|base| fdt::parse(dtb).and_then(|tree| tree.interrupt_at(base as u64)))
+            .or_else(net::irq_number);
+        if let (Some((plic_base, plic_size)), Some(irq)) = (plic_window, net_irq) {
+            let mut space = paging::AddressSpace::from_active();
+            space.map(
+                plic_base as usize,
+                plic_base as usize,
+                plic_size as usize,
+                paging::PTE_R | paging::PTE_W,
+            );
+            paging::flush_tlb_all();
+            plic::init(plic_base as usize, hartid, irq);
             plic::enable_external();
-            crate::kprintln!("[feox] plic: net irq {} routed to hart {} (S-mode)", irq, hartid);
+            crate::kprintln!(
+                "[feox] plic @ {:#x} (DT, {} KiB): net irq {} routed to hart {} (S-mode)",
+                plic_base,
+                plic_size >> 10,
+                irq,
+                hartid
+            );
+        } else {
+            crate::kprintln!("[feox] plic: no DT PLIC or no net irq; external interrupts off");
         }
         controller
     } else {
