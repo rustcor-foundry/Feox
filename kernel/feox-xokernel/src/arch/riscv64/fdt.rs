@@ -243,32 +243,41 @@ impl Fdt {
             p = offset(p, 4);
             match token {
                 FDT_BEGIN_NODE => {
+                    // Properties precede subnodes (DTB spec), so whatever
+                    // node the previous BEGIN opened is fully described the
+                    // moment another node begins — evaluate it now.
+                    if cand_depth != 0 && matched {
+                        if let Some(base) = base {
+                            return Some(UartInfo {
+                                base,
+                                reg_shift,
+                                reg_io_width,
+                            });
+                        }
+                    }
                     depth += 1;
                     if depth < addr_cells.len() {
                         addr_cells[depth] = addr_cells[depth - 1];
                     }
-                    if cand_depth == 0 || depth <= cand_depth {
-                        cand_depth = depth;
-                        matched = false;
-                        base = None;
-                        reg_shift = 0;
-                        reg_io_width = 1;
-                    }
+                    cand_depth = depth;
+                    matched = false;
+                    base = None;
+                    reg_shift = 0;
+                    reg_io_width = 1;
                     p = advance_past_cstr(p);
                 }
                 FDT_END_NODE => {
-                    if cand_depth != 0 && depth == cand_depth {
-                        if matched {
-                            if let Some(base) = base {
-                                return Some(UartInfo {
-                                    base,
-                                    reg_shift,
-                                    reg_io_width,
-                                });
-                            }
+                    // Leaf nodes end straight after their properties.
+                    if cand_depth == depth && matched {
+                        if let Some(base) = base {
+                            return Some(UartInfo {
+                                base,
+                                reg_shift,
+                                reg_io_width,
+                            });
                         }
-                        cand_depth = 0;
                     }
+                    cand_depth = 0;
                     if depth == 0 {
                         break;
                     }
