@@ -537,6 +537,51 @@ impl SubmissionQueueEntry {
         entry.cdw12 = u32::from(nlb_zero_based);
         entry
     }
+
+    /// Builds an `NVM Write` I/O command (opcode 0x01). Field encoding
+    /// matches [`Self::nvm_read`].
+    #[must_use]
+    pub fn nvm_write(nsid: u32, slba: u64, nlb_zero_based: u16, prp1: u64, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x01 | (u32::from(cid) << 16);
+        entry.nsid = nsid;
+        entry.prp1 = prp1;
+        entry.cdw10 = slba as u32;
+        entry.cdw11 = (slba >> 32) as u32;
+        entry.cdw12 = u32::from(nlb_zero_based);
+        entry
+    }
+
+    /// Builds an `NVM Flush` I/O command (opcode 0x00): a durability
+    /// barrier for all previously completed writes on the namespace.
+    #[must_use]
+    pub fn nvm_flush(nsid: u32, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x00 | (u32::from(cid) << 16);
+        entry.nsid = nsid;
+        entry
+    }
+
+    /// Builds an `Identify Namespace` admin command (opcode 0x06,
+    /// CNS = 0x00) for `nsid`, DMA'd into the PRP1 buffer.
+    #[must_use]
+    pub fn identify_namespace(nsid: u32, prp1: u64, cid: u16) -> Self {
+        let mut entry = Self::default();
+        entry.cdw0 = 0x06 | (u32::from(cid) << 16);
+        entry.nsid = nsid;
+        entry.prp1 = prp1;
+        entry.cdw10 = 0x0000_0000; // CNS = 0x00: Identify Namespace
+        entry
+    }
+
+    /// Returns this entry with the command identifier replaced (CDW0
+    /// bits 31..16). Queue rings use this to assign ring-owned CIDs at
+    /// submit time, so builders may pass a placeholder.
+    #[must_use]
+    pub const fn with_cid(mut self, cid: u16) -> Self {
+        self.cdw0 = (self.cdw0 & 0xFFFF) | ((cid as u32) << 16);
+        self
+    }
 }
 
 /// NVMe admin / I/O completion queue entry (16 bytes).
@@ -577,6 +622,50 @@ impl CompletionQueueEntry {
     pub const fn sq_head(self) -> u16 {
         (self.dw2 & 0xFFFF) as u16
     }
+
+    /// Decodes the status field into an [`NvmeStatus`] (SC in bits 7..0,
+    /// SCT in bits 10..8, DNR in bit 14 of the 15-bit field).
+    #[must_use]
+    pub const fn status(self) -> NvmeStatus {
+        let field = self.status_field();
+        NvmeStatus {
+            sct: ((field >> 8) & 0x7) as u8,
+            sc: (field & 0xFF) as u8,
+            dnr: (field >> 14) & 1 != 0,
+        }
+    }
+}
+
+/// Namespace geometry decoded from the `Identify Namespace` data structure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceGeometry {
+    /// Namespace size in logical blocks (NSZE).
+    pub block_count: u64,
+    /// Bytes per logical block, from the formatted LBA format's LBADS.
+    pub block_size: usize,
+}
+
+/// Parses the fields the block layer needs out of an `Identify Namespace`
+/// (CNS 0x00) data buffer. `data` must hold at least the first 192 bytes
+/// (NSZE through the 16-entry LBA format table). Returns `None` when the
+/// buffer is too short or the formatted LBA size is implausible.
+#[must_use]
+pub fn parse_identify_namespace(data: &[u8]) -> Option<NamespaceGeometry> {
+    if data.len() < 192 {
+        return None;
+    }
+    let block_count = u64::from_le_bytes(data[0..8].try_into().ok()?);
+    let flbas_index = (data[26] & 0x0F) as usize;
+    let lbaf_offset = 128 + flbas_index * 4;
+    let lbaf = u32::from_le_bytes(data[lbaf_offset..lbaf_offset + 4].try_into().ok()?);
+    let lbads = (lbaf >> 16) & 0xFF;
+    if !(9..=16).contains(&lbads) {
+        return None;
+    }
+    Some(NamespaceGeometry {
+        block_count,
+        block_size: 1usize << lbads,
+    })
 }
 
 /// Thin reader over an NVMe controller's MMIO register bank.
@@ -684,16 +773,165 @@ impl ControllerRegisters {
     ///
     /// Assumes the controller advertises `CAP.DSTRD = 0` (4-byte stride).
     /// Callers using a controller with a wider stride must compute the
-    /// doorbell offset themselves.
+    /// doorbell offset themselves (or use the `_strided` variants).
     pub fn ring_sq_tail_doorbell(self, qid: u16, tail: u16) {
-        let offset = 0x1000 + (usize::from(qid) * 8);
-        self.write_u32(offset, u32::from(tail));
+        self.ring_sq_tail_doorbell_strided(qid, tail, 0);
     }
 
     /// Rings the completion queue head doorbell for `qid` (admin = 0).
     pub fn ring_cq_head_doorbell(self, qid: u16, head: u16) {
-        let offset = 0x1000 + (usize::from(qid) * 8) + 4;
+        self.ring_cq_head_doorbell_strided(qid, head, 0);
+    }
+
+    /// Rings the SQ tail doorbell with an explicit `CAP.DSTRD` value
+    /// (doorbell stride = `4 << dstrd` bytes).
+    pub fn ring_sq_tail_doorbell_strided(self, qid: u16, tail: u16, dstrd: u8) {
+        let stride = 4usize << dstrd;
+        let offset = 0x1000 + (2 * usize::from(qid)) * stride;
+        self.write_u32(offset, u32::from(tail));
+    }
+
+    /// Rings the CQ head doorbell with an explicit `CAP.DSTRD` value.
+    pub fn ring_cq_head_doorbell_strided(self, qid: u16, head: u16, dstrd: u8) {
+        let stride = 4usize << dstrd;
+        let offset = 0x1000 + (2 * usize::from(qid) + 1) * stride;
         self.write_u32(offset, u32::from(head));
+    }
+}
+
+/// A live submission/completion ring pair: the NVMe data path.
+///
+/// This is the piece the inflight model alone could not provide: `submit`
+/// takes a real command descriptor, assigns it a ring-owned CID, writes the
+/// SQE into the submission ring, and rings the tail doorbell;
+/// `process_completions` consumes phase-valid CQEs and resolves the matching
+/// [`NvmeIoFuture`]s. `N` is both the ring depth and the inflight capacity,
+/// so a free CID always implies a free ring slot (the controller cannot have
+/// more than `N - 1` commands outstanding because `submit` refuses when no
+/// CID is free).
+///
+/// The ring memory is caller-owned: two zeroed, physically contiguous,
+/// device-visible buffers (one page suffices for `N <= 64` SQEs / `N <= 256`
+/// CQEs). Like [`NvmeIoFuture`], a ring is core-local (`!Send`).
+pub struct QueueRing<const N: usize> {
+    regs: ControllerRegisters,
+    qid: u16,
+    dstrd: u8,
+    sq: NonNull<SubmissionQueueEntry>,
+    cq: NonNull<CompletionQueueEntry>,
+    sq_tail: u16,
+    cq_head: u16,
+    cq_phase: u8,
+    inflight: InflightMap<N>,
+    failed: Option<NvmeError>,
+}
+
+impl<const N: usize> QueueRing<N> {
+    /// Binds a ring pair to its queue id and doorbells.
+    ///
+    /// # Safety
+    ///
+    /// `sq` and `cq` must point at zeroed, device-visible buffers holding at
+    /// least `N` submission / completion entries respectively, registered
+    /// with the controller for `qid` (via AQA/ASQ/ACQ for the admin queue or
+    /// Create I/O Queue commands otherwise), and must outlive the ring.
+    #[must_use]
+    pub unsafe fn new(
+        regs: ControllerRegisters,
+        qid: u16,
+        dstrd: u8,
+        sq: NonNull<SubmissionQueueEntry>,
+        cq: NonNull<CompletionQueueEntry>,
+    ) -> Self {
+        Self {
+            regs,
+            qid,
+            dstrd,
+            sq,
+            cq,
+            sq_tail: 0,
+            cq_head: 0,
+            // Zeroed CQ memory means the first valid completion carries
+            // phase 1.
+            cq_phase: 1,
+            inflight: InflightMap::new(),
+            failed: None,
+        }
+    }
+
+    /// Number of free command slots.
+    #[must_use]
+    pub fn available(&self) -> usize {
+        self.inflight.available()
+    }
+
+    /// Submits `command` to the ring: assigns a CID (overriding CDW0 bits
+    /// 31..16), writes the SQE, and rings the tail doorbell. The returned
+    /// future resolves when [`Self::process_completions`] sees the CQE.
+    pub fn submit(
+        &mut self,
+        command: SubmissionQueueEntry,
+    ) -> Result<(u16, NvmeIoFuture<N>), NvmeError> {
+        if let Some(error) = self.failed {
+            return Err(error);
+        }
+        let (cid, future) = self.inflight.register()?;
+        let sqe = command.with_cid(cid);
+        // SAFETY: `new` guarantees `sq` holds N entries; sq_tail < N.
+        unsafe {
+            self.sq
+                .as_ptr()
+                .add(usize::from(self.sq_tail))
+                .write_volatile(sqe);
+        }
+        // Publish the SQE before the doorbell makes it visible.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        self.sq_tail = (self.sq_tail + 1) % (N as u16);
+        self.regs
+            .ring_sq_tail_doorbell_strided(self.qid, self.sq_tail, self.dstrd);
+        Ok((cid, future))
+    }
+
+    /// Drains every phase-valid completion from the CQ, resolving the
+    /// matching futures, and rings the CQ head doorbell once. Returns the
+    /// number of completions processed.
+    pub fn process_completions(&mut self) -> usize {
+        let mut processed = 0usize;
+        loop {
+            // SAFETY: `new` guarantees `cq` holds N entries; cq_head < N.
+            let cqe = unsafe {
+                self.cq
+                    .as_ptr()
+                    .add(usize::from(self.cq_head))
+                    .read_volatile()
+            };
+            if cqe.phase() != self.cq_phase {
+                break;
+            }
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            self.inflight.complete(NvmeCompletion {
+                cid: cqe.command_id(),
+                status: cqe.status(),
+            });
+            self.cq_head += 1;
+            if usize::from(self.cq_head) == N {
+                self.cq_head = 0;
+                self.cq_phase ^= 1;
+            }
+            processed += 1;
+        }
+        if processed > 0 {
+            self.regs
+                .ring_cq_head_doorbell_strided(self.qid, self.cq_head, self.dstrd);
+        }
+        processed
+    }
+
+    /// Fails the ring and every pending command (device removed, capability
+    /// revoked, ...).
+    pub fn fail(&mut self, error: NvmeError) {
+        self.failed = Some(error);
+        self.inflight.fail_all(error);
     }
 }
 
@@ -795,6 +1033,93 @@ mod tests {
         // DSTRD nibble at bits 35..32: 0x3 → byte 4 high nibble.
         let cap = Cap(0x0003_0003_0000_03FF);
         assert_eq!(cap.dstrd(), 3);
+    }
+
+    #[test]
+    fn queue_ring_moves_a_command_end_to_end() {
+        use super::{
+            CompletionQueueEntry, ControllerRegisters, QueueRing, SubmissionQueueEntry,
+        };
+        use core::ptr::NonNull;
+
+        // Fake register bank standing in for BAR0 (doorbell writes land in
+        // plain memory) + ring memory.
+        let mut bar = std::vec![0u8; 0x1100];
+        let mut sq = [SubmissionQueueEntry::default(); 4];
+        let mut cq = [CompletionQueueEntry::default(); 4];
+        // SAFETY (test): bar covers the register bank; rings hold 4 entries.
+        let regs = unsafe { ControllerRegisters::new(bar.as_mut_ptr()) };
+        let mut ring: QueueRing<4> = unsafe {
+            QueueRing::new(
+                regs,
+                1,
+                0,
+                NonNull::new(sq.as_mut_ptr()).unwrap(),
+                NonNull::new(cq.as_mut_ptr()).unwrap(),
+            )
+        };
+
+        // Submit: SQE written with the ring-assigned CID, doorbell rung.
+        let cmd = SubmissionQueueEntry::nvm_read(1, 7, 0, 0xD000, 0xFFFF);
+        let (cid, mut future) = ring.submit(cmd).expect("ring has room");
+        assert_eq!((sq[0].cdw0 >> 16) as u16, cid);
+        assert_eq!(sq[0].cdw0 & 0xFF, 0x02); // opcode survives the CID patch
+        assert_eq!(sq[0].cdw10, 7); // SLBA low
+        let sq_doorbell = u32::from_le_bytes(bar[0x1008..0x100C].try_into().unwrap());
+        assert_eq!(sq_doorbell, 1); // qid 1 SQ tail doorbell
+
+        // No completion yet.
+        assert_eq!(ring.process_completions(), 0);
+
+        // Hand-craft the controller's CQE: phase 1, success, our CID.
+        cq[0].dw3 = u32::from(cid) | (1 << 16);
+        assert_eq!(ring.process_completions(), 1);
+        let cq_doorbell = u32::from_le_bytes(bar[0x100C..0x1010].try_into().unwrap());
+        assert_eq!(cq_doorbell, 1); // qid 1 CQ head doorbell
+
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match Future::poll(pin!(&mut future).as_mut(), &mut cx) {
+            Poll::Ready(Ok(completion)) => assert!(completion.succeeded()),
+            other => panic!("expected success, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identify_namespace_parses_geometry() {
+        let mut data = std::vec![0u8; 4096];
+        data[0..8].copy_from_slice(&32768u64.to_le_bytes()); // NSZE
+        data[26] = 0x01; // FLBAS: format index 1
+        // LBA format table entry 1: LBADS = 12 (4096-byte blocks).
+        data[132..136].copy_from_slice(&(12u32 << 16).to_le_bytes());
+        let geometry = super::parse_identify_namespace(&data).expect("parses");
+        assert_eq!(geometry.block_count, 32768);
+        assert_eq!(geometry.block_size, 4096);
+
+        // Implausible LBADS is rejected.
+        data[132..136].copy_from_slice(&(3u32 << 16).to_le_bytes());
+        assert!(super::parse_identify_namespace(&data).is_none());
+        // Truncated buffers are rejected.
+        assert!(super::parse_identify_namespace(&data[..100]).is_none());
+    }
+
+    #[test]
+    fn cqe_status_decodes_fields() {
+        use super::CompletionQueueEntry;
+        // Status field: DNR=1, SCT=2, SC=0x81 -> bits (14,9..8,7..0) of the
+        // 15-bit field at dw3[31:17]; phase 1 at bit 16.
+        let field: u32 = (1 << 14) | (2 << 8) | 0x81;
+        let cqe = CompletionQueueEntry {
+            dw0: 0,
+            dw1: 0,
+            dw2: 0,
+            dw3: (field << 17) | (1 << 16) | 0x002A,
+        };
+        let status = cqe.status();
+        assert_eq!(status.sct, 2);
+        assert_eq!(status.sc, 0x81);
+        assert!(status.dnr);
+        assert_eq!(cqe.command_id(), 0x2A);
     }
 
     #[test]

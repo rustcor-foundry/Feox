@@ -3,11 +3,11 @@ kernel = "build -p feox-xokernel --bin feox-xokernel --target x86_64-unknown-non
 loader = "build -p feox-loader-uefi --bin feox-loader-uefi --target x86_64-unknown-uefi"
 kernel-arm = "build -p feox-xokernel --bin feox-xokernel --target aarch64-unknown-none-softfloat"
 loader-arm = "build -p feox-loader-uefi --bin feox-loader-uefi --target aarch64-unknown-uefi"
-# riscv64 kernel: no UEFI loader (OpenSBI -> S-mode direct entry). Default
-# features are off (the still-x86-shaped `storage`/NVMe path is not ported yet),
-# but `runtime` is on — feox-async is arch-agnostic and drives the executor on
-# riscv64 (milestone 5).
-kernel-riscv = "build -p feox-xokernel --bin feox-xokernel --target riscv64gc-unknown-none-elf --no-default-features --features runtime"
+# riscv64 kernel: no UEFI loader (OpenSBI -> S-mode direct entry). The
+# `runtime` (feox-async executor) and `storage` (feox-nvme: the riscv64 NVMe
+# driver is built on the crate's QueueRing data path since M22) features are
+# on; the remaining default-feature surface stays x86-shaped.
+kernel-riscv = "build -p feox-xokernel --bin feox-xokernel --target riscv64gc-unknown-none-elf --no-default-features --features runtime,storage"
 
 [target.x86_64-unknown-none]
 rustflags = [

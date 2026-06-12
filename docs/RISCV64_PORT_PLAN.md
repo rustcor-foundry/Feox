@@ -333,14 +333,32 @@ user space ✅. The Route-B ladder is complete on QEMU; next: grow the
 network-service app (retransmission, multiple connections, a real service)
 and the RV2 hardware tail (DT-derived PLIC/net, JH7110 dwmac).
 
+## The RFS arc (filesystem)
+
+[RFS](https://github.com/rustcor-foundry/RFS) — the CoW filesystem (txg/ZIL/
+snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
+(see RFS `docs/FEOX-INTEGRATION.md`).
+
+22. **feox-nvme data path** ✅ — the crate gains `QueueRing<N>`: submit takes
+    a real `SubmissionQueueEntry`, assigns a ring-owned CID, writes the SQE,
+    rings the (dstrd-aware) tail doorbell; `process_completions` drains
+    phase-valid CQEs into the inflight map, resolving `NvmeIoFuture`s. Plus
+    `nvm_write`/`nvm_flush`/`identify_namespace` builders, CQE status decode
+    (SCT/SC/DNR), and `parse_identify_namespace` geometry. Host-tested end to
+    end against a fake register bank (SQE/CID/doorbell asserted; hand-crafted
+    CQE resolves the future). The riscv64 NVMe driver is re-based onto the
+    crate (the `storage` feature is now on for riscv64), so the existing
+    M6b-6d CI markers validate the crate's ring path against real QEMU NVMe —
+    now including an NVM Flush barrier in the self-test. This closes RFS's
+    gap list items (1)-(3) + (5); next: the `rfs-feox` adapter in the RFS
+    repo, then mount an RFS volume on the CI NVMe disk.
+
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.
 - PLIC landed in M19 (net RX routed to an EventSlot); the kernel's own M8
   selftest exchanges still poll — move them (and NVMe completions) onto the
   interrupt path.
-- Integrate `feox-nvme` (enable the `storage` feature) to replace the
-  hand-rolled NVMe queue logic.
 - Un-gate the shared `memory` module for riscv64 (`capability` un-gated in M13).
 - Unify the x86_64 SYSCALL and riscv64 ecall dispatchers over one portable core
   (today the riscv64 lane mirrors the cap-op subset; mem/storage are x86-only).

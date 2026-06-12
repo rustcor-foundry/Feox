@@ -1,81 +1,48 @@
-//! NVMe bring-up, admin commands, and block I/O on riscv64 (milestones 6b-6d).
+//! NVMe bring-up, admin commands, and block I/O on riscv64, driven by the
+//! shared `feox-nvme` crate (milestones 6b-6d; re-based in M22).
 //!
 //! - 6b: assign the BAR from the PCIe MMIO window, enable decoding/bus-master,
 //!   and run the reset/enable handshake to `CSTS.RDY=1`.
 //! - 6c: Identify Controller over the admin queue (full doorbell -> DMA ->
 //!   completion-phase poll cycle).
 //! - 6d: Identify Namespace, create an I/O queue pair, and write a known
-//!   pattern to LBA 0 then read it back and verify — proving real block I/O.
+//!   pattern to LBA 0 (with an NVM Flush barrier) then read it back and
+//!   verify — proving real block I/O.
 //!
-//! A [`Queue`] abstracts a submission/completion pair so admin and I/O commands
-//! share one submit-and-poll path. Still hand-rolled MMIO/DMA (no `feox-nvme`
-//! yet); commands have at most one outstanding entry, so a fixed CID of 0 is
-//! fine and completions are polled synchronously.
+//! The data path is `feox_nvme::QueueRing`: command descriptors in, SQE write
+//! + tail doorbell, phase-bit CQE processing resolving `NvmeIoFuture`s — the
+//! same seam `rfs-feox` builds its `BlockDevice` on. This boot self-test is
+//! the crate's hardware validation: every command here goes through ring
+//! submit + future poll, not bespoke queue logic. Boot-time commands have one
+//! outstanding entry, so completions are spun for synchronously; the async
+//! shape is what RFS consumes.
 
-use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{Ordering, fence};
+use core::future::Future;
+use core::pin::Pin;
+use core::ptr::{NonNull, read_volatile, write_volatile};
+use core::task::{Context, Poll, Waker};
+
+use feox_nvme::{
+    ControllerRegisters, NvmeError, QueueRing, SubmissionQueueEntry, parse_identify_namespace,
+};
 
 use super::{frame, pci};
 
-// Controller registers within BAR0.
-const REG_CAP: usize = 0x00;
-const REG_VS: usize = 0x08;
-const REG_CC: usize = 0x14;
-const REG_CSTS: usize = 0x1C;
-const REG_AQA: usize = 0x24;
-const REG_ASQ: usize = 0x28;
-const REG_ACQ: usize = 0x30;
-const REG_DOORBELL_BASE: usize = 0x1000;
-
 const CC_ENABLE: u32 = 1 << 0;
-const CSTS_READY: u32 = 1 << 0;
 const CC_IOSQES_SHIFT: u32 = 16;
 const CC_IOCQES_SHIFT: u32 = 20;
 const NVME_SQE_LOG2: u32 = 6;
 const NVME_CQE_LOG2: u32 = 4;
-const SQE_BYTES: usize = 1 << NVME_SQE_LOG2;
-const CQE_BYTES: usize = 1 << NVME_CQE_LOG2;
 
-const ADMIN_QUEUE_DEPTH: u16 = 64;
-const IO_QUEUE_DEPTH: u16 = 8;
+const ADMIN_QUEUE_DEPTH: usize = 64;
+const IO_QUEUE_DEPTH: usize = 8;
 const IO_QUEUE_ID: u16 = 1;
 const NSID: u32 = 1;
-
-// Opcodes.
-const ADMIN_OP_CREATE_IO_SQ: u32 = 0x01;
-const ADMIN_OP_CREATE_IO_CQ: u32 = 0x05;
-const ADMIN_OP_IDENTIFY: u32 = 0x06;
-const IO_OP_WRITE: u32 = 0x01;
-const IO_OP_READ: u32 = 0x02;
-
-const CNS_IDENTIFY_NAMESPACE: u32 = 0x00;
-const CNS_IDENTIFY_CONTROLLER: u32 = 0x01;
 
 const SPIN_LIMIT: u32 = 5_000_000;
 
 /// Default LBA size assumed until Identify Namespace reports otherwise.
 const DEFAULT_LBA_SIZE: usize = 512;
-
-fn read32(addr: usize) -> u32 {
-    // SAFETY: mapped device-MMIO or identity-mapped frame address.
-    unsafe { read_volatile(addr as *const u32) }
-}
-fn write32(addr: usize, value: u32) {
-    // SAFETY: as above.
-    unsafe { write_volatile(addr as *mut u32, value) }
-}
-fn read64(addr: usize) -> u64 {
-    // SAFETY: as above.
-    unsafe { read_volatile(addr as *const u64) }
-}
-fn write64(addr: usize, value: u64) {
-    // SAFETY: as above.
-    unsafe { write_volatile(addr as *mut u64, value) }
-}
-fn read_u8(addr: usize) -> u8 {
-    // SAFETY: as above.
-    unsafe { read_volatile(addr as *const u8) }
-}
 
 fn zero_frame(frame: usize) {
     for i in 0..512 {
@@ -84,103 +51,81 @@ fn zero_frame(frame: usize) {
     }
 }
 
-/// A submission/completion queue pair with its doorbells and phase state.
-struct Queue {
-    sq: usize,
-    cq: usize,
-    depth: u16,
-    sq_tail: u16,
-    cq_head: u16,
-    cq_phase: u32,
-    sq_doorbell: usize,
-    cq_doorbell: usize,
+/// Allocates and zeroes one frame for ring/DMA use.
+fn dma_frame(what: &str) -> Option<usize> {
+    let Some(addr) = frame::alloc() else {
+        crate::kprintln!("[feox] nvme: out of frames for {}", what);
+        return None;
+    };
+    zero_frame(addr);
+    Some(addr)
 }
 
-impl Queue {
-    fn new(base: usize, qid: u16, dstrd: u32, sq: usize, cq: usize, depth: u16) -> Self {
-        let stride = 4usize << dstrd;
-        let qid = usize::from(qid);
-        Self {
-            sq,
-            cq,
-            depth,
-            sq_tail: 0,
-            cq_head: 0,
-            cq_phase: 1, // zeroed CQ memory -> first completion carries phase 1
-            sq_doorbell: base + REG_DOORBELL_BASE + (2 * qid) * stride,
-            cq_doorbell: base + REG_DOORBELL_BASE + (2 * qid + 1) * stride,
+/// Submits `command` on `ring` and spins (process completions + poll the
+/// future) until it resolves, logging failures/timeouts.
+fn execute<const N: usize>(
+    ring: &mut QueueRing<N>,
+    command: SubmissionQueueEntry,
+    what: &str,
+) -> bool {
+    let (_cid, mut future) = match ring.submit(command) {
+        Ok(pair) => pair,
+        Err(error) => {
+            crate::kprintln!("[feox] nvme: {} submit failed ({:?})", what, error);
+            return false;
         }
-    }
-
-    /// Submits a 16-dword command, rings the doorbell, polls for its completion,
-    /// and returns the NVMe status code (0 = success), or `None` on timeout.
-    fn submit(&mut self, cmd: &[u32; 16]) -> Option<u16> {
-        let slot = self.sq + usize::from(self.sq_tail) * SQE_BYTES;
-        for (i, &word) in cmd.iter().enumerate() {
-            write32(slot + i * 4, word);
-        }
-        // Publish the SQ entry before ringing the doorbell.
-        fence(Ordering::SeqCst);
-        self.sq_tail = (self.sq_tail + 1) % self.depth;
-        write32(self.sq_doorbell, u32::from(self.sq_tail));
-
-        let cqe = self.cq + usize::from(self.cq_head) * CQE_BYTES;
-        let mut spins = 0u32;
-        loop {
-            let status_dword = read32(cqe + 12);
-            if (status_dword >> 16) & 1 == self.cq_phase {
-                fence(Ordering::Acquire);
-                let status = ((status_dword >> 17) & 0x7FFF) as u16;
-                self.cq_head += 1;
-                if self.cq_head == self.depth {
-                    self.cq_head = 0;
-                    self.cq_phase ^= 1;
-                }
-                write32(self.cq_doorbell, u32::from(self.cq_head));
-                return Some(status);
+    };
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut spins = 0u32;
+    loop {
+        ring.process_completions();
+        match Future::poll(Pin::new(&mut future), &mut cx) {
+            Poll::Ready(Ok(_)) => return true,
+            Poll::Ready(Err(NvmeError::CommandFailed(status))) => {
+                crate::kprintln!(
+                    "[feox] nvme: {} failed (sct={:#x} sc={:#x} dnr={})",
+                    what,
+                    status.sct,
+                    status.sc,
+                    status.dnr
+                );
+                return false;
             }
-            spins += 1;
-            if spins >= SPIN_LIMIT {
-                return None;
+            Poll::Ready(Err(error)) => {
+                crate::kprintln!("[feox] nvme: {} failed ({:?})", what, error);
+                return false;
             }
-            core::hint::spin_loop();
+            Poll::Pending => {}
         }
+        spins += 1;
+        if spins >= SPIN_LIMIT {
+            crate::kprintln!("[feox] nvme: {} timed out", what);
+            return false;
+        }
+        core::hint::spin_loop();
     }
 }
 
-/// A brought-up NVMe controller with its admin queue (and, after setup, an I/O
-/// queue pair).
+/// A brought-up NVMe controller with its admin ring (and, after setup, an
+/// I/O ring pair), all `feox-nvme` machinery.
 pub struct Controller {
-    base: usize,
-    dstrd: u32,
-    admin: Queue,
-    io: Option<Queue>,
+    regs: ControllerRegisters,
+    dstrd: u8,
+    admin: QueueRing<ADMIN_QUEUE_DEPTH>,
+    io: Option<QueueRing<IO_QUEUE_DEPTH>>,
     lba_size: usize,
-}
-
-/// Builds a zeroed command and applies `setup` to fill the fields it needs.
-fn command(setup: impl FnOnce(&mut [u32; 16])) -> [u32; 16] {
-    let mut cmd = [0u32; 16];
-    setup(&mut cmd);
-    cmd
 }
 
 impl Controller {
     /// Identify Controller (6c): prints the model/serial DMA'd back.
     #[must_use]
     pub fn identify_controller(&mut self) -> bool {
-        let Some(buffer) = frame::alloc() else {
-            crate::kprintln!("[feox] nvme: out of frames for identify buffer");
+        let Some(buffer) = dma_frame("identify buffer") else {
             return false;
         };
-        zero_frame(buffer);
-        let cmd = command(|c| {
-            c[0] = ADMIN_OP_IDENTIFY;
-            c[6] = buffer as u32;
-            c[7] = (buffer as u64 >> 32) as u32;
-            c[10] = CNS_IDENTIFY_CONTROLLER;
-        });
-        if !self.run(QueueKind::Admin, &cmd, "identify-controller") {
+        let command = SubmissionQueueEntry::identify_controller(buffer as u64, 0);
+        if !execute(&mut self.admin, command, "identify-controller") {
             return false;
         }
         let serial = ascii_field(buffer + 4, 20);
@@ -190,34 +135,30 @@ impl Controller {
         true
     }
 
-    /// Identify Namespace (6d): reads the namespace size and LBA data size.
+    /// Identify Namespace (6d): reads the namespace size and LBA data size,
+    /// decoded by the crate's geometry parser.
     #[must_use]
     pub fn identify_namespace(&mut self) -> bool {
-        let Some(buffer) = frame::alloc() else {
-            crate::kprintln!("[feox] nvme: out of frames for namespace identify");
+        let Some(buffer) = dma_frame("namespace identify") else {
             return false;
         };
-        zero_frame(buffer);
-        let cmd = command(|c| {
-            c[0] = ADMIN_OP_IDENTIFY;
-            c[1] = NSID;
-            c[6] = buffer as u32;
-            c[7] = (buffer as u64 >> 32) as u32;
-            c[10] = CNS_IDENTIFY_NAMESPACE;
-        });
-        if !self.run(QueueKind::Admin, &cmd, "identify-namespace") {
+        let command = SubmissionQueueEntry::identify_namespace(NSID, buffer as u64, 0);
+        if !execute(&mut self.admin, command, "identify-namespace") {
             return false;
         }
-        let nsze = read64(buffer); // namespace size in LBAs
-        let flbas = (read_u8(buffer + 26) & 0x0F) as usize;
-        let lbaf = read32(buffer + 128 + flbas * 4);
-        let lbads = (lbaf >> 16) & 0xFF;
-        self.lba_size = 1usize << lbads;
+        // SAFETY: `buffer` is the identity-mapped 4 KiB frame the controller
+        // just DMA'd the Identify Namespace structure into.
+        let data = unsafe { core::slice::from_raw_parts(buffer as *const u8, 4096) };
+        let Some(geometry) = parse_identify_namespace(data) else {
+            crate::kprintln!("[feox] nvme: implausible Identify Namespace data");
+            return false;
+        };
+        self.lba_size = geometry.block_size;
         crate::kprintln!(
             "[feox] nvme: namespace {} — {} blocks, {}-byte LBA",
             NSID,
-            nsze,
-            self.lba_size
+            geometry.block_count,
+            geometry.block_size
         );
         true
     }
@@ -225,40 +166,43 @@ impl Controller {
     /// Creates the I/O completion + submission queue pair (queue id 1).
     #[must_use]
     pub fn create_io_queues(&mut self) -> bool {
-        let (Some(cq), Some(sq)) = (frame::alloc(), frame::alloc()) else {
-            crate::kprintln!("[feox] nvme: out of frames for I/O queues");
+        let (Some(cq), Some(sq)) = (dma_frame("I/O CQ"), dma_frame("I/O SQ")) else {
             return false;
         };
-        zero_frame(cq);
-        zero_frame(sq);
-        let qid = u32::from(IO_QUEUE_ID);
-        let size_field = u32::from(IO_QUEUE_DEPTH - 1) << 16;
 
-        // Create I/O CQ: PC=1, interrupts disabled (we poll).
-        let cq_cmd = command(|c| {
-            c[0] = ADMIN_OP_CREATE_IO_CQ;
-            c[6] = cq as u32;
-            c[7] = (cq as u64 >> 32) as u32;
-            c[10] = size_field | qid;
-            c[11] = 0x1; // PC
-        });
-        if !self.run(QueueKind::Admin, &cq_cmd, "create-io-cq") {
+        let cq_cmd = SubmissionQueueEntry::create_io_completion_queue(
+            IO_QUEUE_ID,
+            IO_QUEUE_DEPTH as u16,
+            cq as u64,
+            0,
+        );
+        if !execute(&mut self.admin, cq_cmd, "create-io-cq") {
+            return false;
+        }
+        let sq_cmd = SubmissionQueueEntry::create_io_submission_queue(
+            IO_QUEUE_ID,
+            IO_QUEUE_DEPTH as u16,
+            IO_QUEUE_ID,
+            sq as u64,
+            0,
+        );
+        if !execute(&mut self.admin, sq_cmd, "create-io-sq") {
             return false;
         }
 
-        // Create I/O SQ: PC=1, associated with CQ id 1.
-        let sq_cmd = command(|c| {
-            c[0] = ADMIN_OP_CREATE_IO_SQ;
-            c[6] = sq as u32;
-            c[7] = (sq as u64 >> 32) as u32;
-            c[10] = size_field | qid;
-            c[11] = (qid << 16) | 0x1; // CQID | PC
-        });
-        if !self.run(QueueKind::Admin, &sq_cmd, "create-io-sq") {
-            return false;
-        }
-
-        self.io = Some(Queue::new(self.base, IO_QUEUE_ID, self.dstrd, sq, cq, IO_QUEUE_DEPTH));
+        // SAFETY: both rings are zeroed, device-registered (the two admin
+        // commands above), identity-mapped frames that live for the kernel's
+        // lifetime.
+        let ring = unsafe {
+            QueueRing::new(
+                self.regs,
+                IO_QUEUE_ID,
+                self.dstrd,
+                NonNull::new_unchecked(sq as *mut SubmissionQueueEntry),
+                NonNull::new_unchecked(cq as *mut feox_nvme::CompletionQueueEntry),
+            )
+        };
+        self.io = Some(ring);
         crate::kprintln!(
             "[feox] nvme: I/O queue {} ready (SQ={:#x} CQ={:#x}, depth {})",
             IO_QUEUE_ID,
@@ -269,33 +213,41 @@ impl Controller {
         true
     }
 
-    /// Writes a known pattern to LBA 0 then reads it back into a separate buffer
-    /// and verifies they match — proof of real block I/O.
+    /// Writes a known pattern to LBA 0, issues an NVM Flush barrier, then
+    /// reads it back into a separate buffer and verifies they match — proof
+    /// of real block I/O through the crate's ring path.
     #[must_use]
     pub fn block_io_selftest(&mut self) -> bool {
-        if self.io.is_none() {
+        let Some(io) = self.io.as_mut() else {
             crate::kprintln!("[feox] nvme: no I/O queue for block test");
             return false;
-        }
-        let (Some(write_buf), Some(read_buf)) = (frame::alloc(), frame::alloc()) else {
-            crate::kprintln!("[feox] nvme: out of frames for block test");
+        };
+        let (Some(write_buf), Some(read_buf)) =
+            (dma_frame("write buffer"), dma_frame("read buffer"))
+        else {
             return false;
         };
         let len = self.lba_size.min(4096);
         fill_pattern(write_buf, len);
-        zero_frame(read_buf);
 
-        if !self.io_rw(IO_OP_WRITE, 0, write_buf, "write") {
+        let write = SubmissionQueueEntry::nvm_write(NSID, 0, 0, write_buf as u64, 0);
+        if !execute(io, write, "write") {
             return false;
         }
-        if !self.io_rw(IO_OP_READ, 0, read_buf, "read") {
+        let flush = SubmissionQueueEntry::nvm_flush(NSID, 0);
+        if !execute(io, flush, "flush") {
+            return false;
+        }
+        let read = SubmissionQueueEntry::nvm_read(NSID, 0, 0, read_buf as u64, 0);
+        if !execute(io, read, "read") {
             return false;
         }
 
         let matched = buffers_equal(write_buf, read_buf, len);
-        let head = read32(read_buf); // first 4 bytes read back, for the log
+        // SAFETY: identity-mapped read buffer.
+        let head = unsafe { read_volatile(read_buf as *const u32) };
         crate::kprintln!(
-            "[feox] nvme: block 0 write+read back {} bytes, first4={:#010x}, match={}",
+            "[feox] nvme: block 0 write+flush+read back {} bytes, first4={:#010x}, match={}",
             len,
             head,
             matched
@@ -307,49 +259,10 @@ impl Controller {
         }
         matched
     }
-
-    /// Issues a single-block I/O read/write of `buf` at `lba` on the I/O queue.
-    fn io_rw(&mut self, opcode: u32, lba: u64, buf: usize, what: &str) -> bool {
-        let cmd = command(|c| {
-            c[0] = opcode;
-            c[1] = NSID;
-            c[6] = buf as u32;
-            c[7] = (buf as u64 >> 32) as u32;
-            c[10] = lba as u32;
-            c[11] = (lba >> 32) as u32;
-            c[12] = 0; // NLB is 0-based: 0 => one block
-        });
-        self.run(QueueKind::Io, &cmd, what)
-    }
-
-    /// Submits `cmd` on the chosen queue, logging timeouts/error status.
-    fn run(&mut self, kind: QueueKind, cmd: &[u32; 16], what: &str) -> bool {
-        let queue = match kind {
-            QueueKind::Admin => &mut self.admin,
-            QueueKind::Io => self.io.as_mut().expect("I/O queue not created"),
-        };
-        match queue.submit(cmd) {
-            Some(0) => true,
-            Some(status) => {
-                crate::kprintln!("[feox] nvme: {} failed (status={:#x})", what, status);
-                false
-            }
-            None => {
-                crate::kprintln!("[feox] nvme: {} timed out", what);
-                false
-            }
-        }
-    }
-}
-
-/// Selects which queue a command runs on.
-enum QueueKind {
-    Admin,
-    Io,
 }
 
 /// Brings the controller to ready (6b) and returns a handle with its admin
-/// queue. Logs and returns `None` on fault.
+/// ring. Logs and returns `None` on fault.
 #[must_use]
 pub fn init(device: &pci::PciDevice) -> Option<Controller> {
     let size = pci::size_bar64(device, 0);
@@ -357,42 +270,42 @@ pub fn init(device: &pci::PciDevice) -> Option<Controller> {
     pci::set_bar64(device, 0, base as u64);
     pci::enable_memory_and_bus_master(device);
 
-    let cap = read64(base + REG_CAP);
-    let vs = read32(base + REG_VS);
-    let dstrd = ((cap >> 32) & 0xF) as u32;
+    // SAFETY: BAR0 was just assigned to the mapped QEMU PCIe MMIO window;
+    // the mapping covers registers + doorbells and lives forever.
+    let regs = unsafe { ControllerRegisters::new(base as *mut u8) };
+    let cap = regs.cap();
+    let vs = regs.vs();
+    let dstrd = cap.dstrd();
     crate::kprintln!(
         "[feox] nvme: BAR0={:#x} (size={:#x}) CAP={:#018x} version={}.{}.{} dstrd={}",
         base,
         size,
-        cap,
-        vs >> 16,
-        (vs >> 8) & 0xFF,
-        vs & 0xFF,
+        cap.0,
+        vs.major(),
+        vs.minor(),
+        vs.tertiary(),
         dstrd
     );
 
-    write32(base + REG_CC, read32(base + REG_CC) & !CC_ENABLE);
-    if !spin_until(base, |csts| csts & CSTS_READY == 0) {
+    regs.set_cc(regs.cc() & !CC_ENABLE);
+    if !spin_until(regs, |csts| !csts.ready()) {
         crate::kprintln!("[feox] nvme: timeout waiting for reset (CSTS.RDY=0)");
         return None;
     }
 
-    let admin_sq = frame::alloc()?;
-    let admin_cq = frame::alloc()?;
-    zero_frame(admin_sq);
-    zero_frame(admin_cq);
-    let aqa = (u32::from(ADMIN_QUEUE_DEPTH - 1) << 16) | u32::from(ADMIN_QUEUE_DEPTH - 1);
-    write32(base + REG_AQA, aqa);
-    write64(base + REG_ASQ, admin_sq as u64);
-    write64(base + REG_ACQ, admin_cq as u64);
+    let admin_sq = dma_frame("admin SQ")?;
+    let admin_cq = dma_frame("admin CQ")?;
+    regs.set_aqa(ADMIN_QUEUE_DEPTH as u16, ADMIN_QUEUE_DEPTH as u16);
+    regs.set_asq(admin_sq as u64);
+    regs.set_acq(admin_cq as u64);
 
     let cc_value =
         (NVME_SQE_LOG2 << CC_IOSQES_SHIFT) | (NVME_CQE_LOG2 << CC_IOCQES_SHIFT) | CC_ENABLE;
-    write32(base + REG_CC, cc_value);
-    if !spin_until(base, |csts| csts & CSTS_READY != 0) {
+    regs.set_cc(cc_value);
+    if !spin_until(regs, feox_nvme::Csts::ready) {
         crate::kprintln!(
             "[feox] nvme: timeout waiting for enable (CSTS={:#x})",
-            read32(base + REG_CSTS)
+            regs.csts().0
         );
         return None;
     }
@@ -405,9 +318,19 @@ pub fn init(device: &pci::PciDevice) -> Option<Controller> {
     );
     crate::kprintln!("[feox] milestone 6b: NVMe controller enabled.");
 
-    let admin = Queue::new(base, 0, dstrd, admin_sq, admin_cq, ADMIN_QUEUE_DEPTH);
+    // SAFETY: zeroed, identity-mapped admin rings registered via AQA/ASQ/ACQ
+    // above; they live for the kernel's lifetime.
+    let admin = unsafe {
+        QueueRing::new(
+            regs,
+            0,
+            dstrd,
+            NonNull::new_unchecked(admin_sq as *mut SubmissionQueueEntry),
+            NonNull::new_unchecked(admin_cq as *mut feox_nvme::CompletionQueueEntry),
+        )
+    };
     Some(Controller {
-        base,
+        regs,
         dstrd,
         admin,
         io: None,
@@ -415,9 +338,9 @@ pub fn init(device: &pci::PciDevice) -> Option<Controller> {
     })
 }
 
-fn spin_until(base: usize, cond: impl Fn(u32) -> bool) -> bool {
+fn spin_until(regs: ControllerRegisters, cond: impl Fn(feox_nvme::Csts) -> bool) -> bool {
     let mut spins = 0u32;
-    while !cond(read32(base + REG_CSTS)) {
+    while !cond(regs.csts()) {
         spins += 1;
         if spins >= SPIN_LIMIT {
             return false;
