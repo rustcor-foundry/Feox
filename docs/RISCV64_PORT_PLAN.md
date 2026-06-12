@@ -408,6 +408,18 @@ snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
     JH7110's MMU-less S7 hart is structurally unstartable. CI asserts the
     console marker; the SMP marker now passes via the DT path.
 
+QA hardening (M28): a four-agent review pass before hardware boot found
+several board-day hazards in the DT/boot path, all fixed here — FDT header
+validation + per-walk bounds clamping (`token_oob`/`clamp_len`, cell-count
+cap) so a truncated/corrupt DTB can't run the parser off into memory; the
+bootstrap identity map raised to 16 GiB so a high control DTB on an 8 GB
+board is readable; UART `status="disabled"` filtering (a clock-gated UART
+MMIO read stalls the bus past any poll bound); and frame-pool capping below
+firmware-reserved ranges (memreserve block + `/reserved-memory` nodes — a
+store fault on the Ky X1, invisible on QEMU). The same review's correctness
+findings (PTE_U on copy-out, NVMe SQ N-1, doorbell/virtio fences, ELF
+bounds) are tracked for the follow-on hardening PRs.
+
 26. **DT-derived PLIC + interrupt numbers** ✅ — the last hardcoded QEMU
     interrupt assumption removed. `fdt.rs` gains `plic()` (compatible
     containing "plic": sifive,plic-1.0.0 / riscv,plic0; reg decoded with the

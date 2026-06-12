@@ -50,6 +50,12 @@ fn reg_r(offset: usize) -> u32 {
 /// otherwise fire the moment `sie.SEIE` is set).
 pub fn init(base: usize, boot_hart: usize, irq: u32) {
     PLIC_BASE.store(base, Ordering::Release);
+    // S-mode context = 2 * hart + 1 holds for QEMU virt and any SoC whose
+    // every hart has both M- and S-mode contexts. The JH7110's S7 monitor
+    // hart (hart 0) is M-only, which shifts the S-context indices — so when
+    // the board-NIC arc enables the PLIC on hardware, derive the context
+    // from the PLIC node's `interrupts-extended` phandle list instead of
+    // this formula. (Unreached on hardware today: init is QEMU-gated.)
     let context = 2 * boot_hart + 1;
     S_CONTEXT.store(context, Ordering::Release);
 

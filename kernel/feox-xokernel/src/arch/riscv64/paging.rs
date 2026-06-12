@@ -49,10 +49,14 @@ const SATP_MODE_SV39: u64 = 8 << 60;
 const ENTRIES: usize = 512;
 /// Bytes mapped by one root-level (gigapage) entry: 1 GiB.
 const GIGAPAGE: u64 = 1 << 30;
-/// How many low gigapages to identity-map for the bootstrap map (0..4 GiB
-/// covers the device space and the low RAM where the kernel loads on both QEMU
-/// virt (RAM @ 2 GiB) and the JH7110 (RAM @ 1 GiB)).
-const MAPPED_GIGAPAGES: usize = 4;
+/// How many low gigapages to identity-map for the bootstrap map. 16 GiB
+/// covers the device space plus all RAM on the boards Feox targets — the
+/// Orange Pi RV/RV2 carry up to 8 GB, so a DTB (and U-Boot's relocated
+/// control DTB) can sit well above 4 GiB; the kernel reads it through this
+/// map before the fine-grained kernel space exists. Mapping gigapages over
+/// absent physical addresses is free (they only fault if actually accessed,
+/// and the frame pool is clamped to real RAM).
+pub const MAPPED_GIGAPAGES: usize = 16;
 
 /// QEMU virt NS16550 UART base (mapped for the future native console).
 const UART0_BASE: usize = 0x1000_0000;

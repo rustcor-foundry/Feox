@@ -23,23 +23,58 @@ pub struct Fdt {
     total_size: u32,
     struct_off: u32,
     strings_off: u32,
+    /// One past the last byte of the structure block — every token walk is
+    /// clamped below this so a corrupt `len`/`nameoff` can't run `p` off into
+    /// arbitrary memory (the DTB comes from trusted firmware, but it can be
+    /// truncated, or clobbered if it overlaps the frame pool).
+    struct_end: u32,
+    /// Offset of the memory reservation block (firmware-reserved ranges).
+    mem_rsvmap_off: u32,
 }
 
 /// Validates the DTB header at `dtb` and returns a handle, or `None` if the
-/// pointer is null or the magic does not match.
+/// pointer is null, the magic does not match, or the header's offsets/sizes
+/// place the structure or strings blocks outside the blob.
 pub fn parse(dtb: usize) -> Option<Fdt> {
-    if dtb == 0 {
+    if dtb == 0 || dtb & 0x3 != 0 {
         return None;
     }
     let base = dtb as *const u8;
     if be_u32(base) != FDT_MAGIC {
         return None;
     }
+    // Header fields (devicetree spec §5.2). totalsize bounds everything; a
+    // DTB never approaches 16 MiB, so a wild value means a corrupt header.
+    let total_size = be_u32(offset(base, 4));
+    if !(40..=0x0100_0000).contains(&total_size) {
+        return None;
+    }
+    let struct_off = be_u32(offset(base, 8));
+    let strings_off = be_u32(offset(base, 12));
+    let mem_rsvmap_off = be_u32(offset(base, 16));
+    let size_struct = be_u32(offset(base, 36));
+    let size_strings = be_u32(offset(base, 32));
+    if mem_rsvmap_off >= total_size {
+        return None;
+    }
+    // Both blocks must lie wholly within [0, totalsize), with the struct
+    // block 4-byte aligned (it is a stream of u32 tokens).
+    let struct_end = struct_off.checked_add(size_struct)?;
+    let strings_end = strings_off.checked_add(size_strings)?;
+    if struct_off < 40
+        || struct_off & 0x3 != 0
+        || struct_end > total_size
+        || strings_end > total_size
+    {
+        return None;
+    }
     Some(Fdt {
         base,
-        total_size: be_u32(offset(base, 4)),
-        struct_off: be_u32(offset(base, 8)),
-        strings_off: be_u32(offset(base, 12)),
+        total_size,
+        struct_off,
+        strings_off,
+        struct_end,
+        mem_rsvmap_off,
     })
 }
 
@@ -48,6 +83,24 @@ impl Fdt {
     #[must_use]
     pub fn total_size(&self) -> u32 {
         self.total_size
+    }
+
+    /// One past the last byte of the structure block, as a raw pointer.
+    fn struct_end_ptr(&self) -> usize {
+        self.base as usize + self.struct_end as usize
+    }
+
+    /// True if a 4-byte token cannot be read at `p` without leaving the
+    /// structure block — the walk loops break on this.
+    fn token_oob(&self, p: *const u8) -> bool {
+        (p as usize).saturating_add(4) > self.struct_end_ptr()
+    }
+
+    /// Clamps a property length so the value bytes (and the post-value pointer
+    /// advance) stay inside the structure block, neutralizing a corrupt
+    /// `len`. `value` is the start of the property value.
+    fn clamp_len(&self, value: *const u8, len: usize) -> usize {
+        len.min(self.struct_end_ptr().saturating_sub(value as usize))
     }
 
     /// Returns true if the root node's `prop` property value contains `needle`.
@@ -59,6 +112,9 @@ impl Fdt {
         let strings = offset(self.base, self.strings_off as usize);
         let mut depth: i32 = 0;
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -77,6 +133,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     if depth == 1 && bytes_eq(offset(strings, nameoff), prop) {
                         return bytes_contain(value, len, needle);
                     }
@@ -107,6 +164,9 @@ impl Fdt {
         let mut depth: i32 = 0;
         let mut in_node = false;
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -124,6 +184,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     if in_node && len >= 4 && bytes_eq(offset(strings, nameoff), prop) {
                         return Some(be_u32(value));
                     }
@@ -143,6 +204,97 @@ impl Fdt {
         self.node_u32(b"cpus", b"timebase-frequency")
     }
 
+    /// Returns the lowest reserved-RAM start address falling within `[lo, hi)`,
+    /// or `hi` if none. Combines the memory-reservation block (firmware
+    /// regions: OpenSBI, TF-A) and `/reserved-memory` child `reg` ranges. The
+    /// frame pool is capped below this so the allocator never hands out a
+    /// firmware-protected (e.g. PMP-guarded) frame — the failure mode is a
+    /// store access fault on the boards (notably the Ky X1), not on QEMU.
+    #[must_use]
+    pub fn reserved_min_in(&self, lo: u64, hi: u64) -> u64 {
+        let mut min = hi;
+
+        // Memory reservation block: { u64 addr, u64 size } big-endian pairs,
+        // terminated by an all-zero entry.
+        let blob_end = self.base as usize + self.total_size as usize;
+        let mut p = offset(self.base, self.mem_rsvmap_off as usize);
+        while (p as usize).saturating_add(16) <= blob_end {
+            let addr = be_u64(p);
+            let size = be_u64(offset(p, 8));
+            if addr == 0 && size == 0 {
+                break;
+            }
+            if addr >= lo && addr < min {
+                min = addr;
+            }
+            p = offset(p, 16);
+        }
+
+        self.reserved_memory_nodes_min(lo, min)
+    }
+
+    /// Walks `/reserved-memory` child nodes, folding their `reg` start
+    /// addresses into the running `min` (within `[lo, min)`).
+    fn reserved_memory_nodes_min(&self, lo: u64, mut min: u64) -> u64 {
+        let mut p = offset(self.base, self.struct_off as usize);
+        let strings = offset(self.base, self.strings_off as usize);
+        let mut depth: i32 = 0;
+        let mut in_rsvmem = false;
+        let mut in_child = false;
+        let mut addr_cells = 2u32; // reserved-memory mirrors the root cells
+
+        loop {
+            if self.token_oob(p) {
+                break;
+            }
+            let token = be_u32(p);
+            p = offset(p, 4);
+            match token {
+                FDT_BEGIN_NODE => {
+                    depth += 1;
+                    if depth == 2 {
+                        in_rsvmem = bytes_eq(p, b"reserved-memory");
+                    } else if depth == 3 && in_rsvmem {
+                        in_child = true;
+                    }
+                    p = advance_past_cstr(p);
+                }
+                FDT_END_NODE => {
+                    if depth == 3 {
+                        in_child = false;
+                    } else if depth == 2 {
+                        in_rsvmem = false;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                FDT_PROP => {
+                    let len = be_u32(p) as usize;
+                    let nameoff = be_u32(offset(p, 4)) as usize;
+                    p = offset(p, 8);
+                    let value = p;
+                    let len = self.clamp_len(value, len);
+                    let pname = offset(strings, nameoff);
+                    if depth == 2 && in_rsvmem && bytes_eq(pname, b"#address-cells") {
+                        addr_cells = be_u32(value);
+                    } else if depth == 3 && in_child && bytes_eq(pname, b"reg") {
+                        let (addr, _) = read_cells(value, addr_cells);
+                        if addr >= lo && addr < min {
+                            min = addr;
+                        }
+                    }
+                    p = offset(p, align4(len));
+                }
+                FDT_NOP => {}
+                FDT_END => break,
+                _ => break,
+            }
+        }
+        min
+    }
+
     /// Returns the first `/memory` region as `(base, size)` in bytes, decoding
     /// `reg` with the root node's `#address-cells` / `#size-cells`.
     #[must_use]
@@ -157,6 +309,9 @@ impl Fdt {
         let mut in_memory = false;
 
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -175,6 +330,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     let pname = offset(strings, nameoff);
 
                     // Root-level address/size cell counts govern /memory reg.
@@ -234,11 +390,15 @@ impl Fdt {
         // verdict lands at the candidate's own END_NODE.
         let mut cand_depth: usize = 0;
         let mut matched = false;
+        let mut disabled = false;
         let mut base: Option<u64> = None;
         let mut reg_shift = 0u32;
         let mut reg_io_width = 1u32;
 
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -246,7 +406,7 @@ impl Fdt {
                     // Properties precede subnodes (DTB spec), so whatever
                     // node the previous BEGIN opened is fully described the
                     // moment another node begins — evaluate it now.
-                    if cand_depth != 0 && matched {
+                    if cand_depth != 0 && matched && !disabled {
                         if let Some(base) = base {
                             return Some(UartInfo {
                                 base,
@@ -261,6 +421,7 @@ impl Fdt {
                     }
                     cand_depth = depth;
                     matched = false;
+                    disabled = false;
                     base = None;
                     reg_shift = 0;
                     reg_io_width = 1;
@@ -268,7 +429,7 @@ impl Fdt {
                 }
                 FDT_END_NODE => {
                     // Leaf nodes end straight after their properties.
-                    if cand_depth == depth && matched {
+                    if cand_depth == depth && matched && !disabled {
                         if let Some(base) = base {
                             return Some(UartInfo {
                                 base,
@@ -288,6 +449,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     let pname = offset(strings, nameoff);
 
                     if bytes_eq(pname, b"#address-cells") && depth < addr_cells.len() {
@@ -298,12 +460,17 @@ impl Fdt {
                             matched = bytes_contain(value, len, b"ns16550")
                                 || bytes_contain(value, len, b"snps,dw-apb-uart");
                         } else if bytes_eq(pname, b"reg") && depth >= 1 {
-                            let (addr, _) = read_cells(value, addr_cells[depth - 1]);
+                            let (addr, _) = read_cells(value, addr_cells[(depth - 1).min(15)]);
                             base = Some(addr);
                         } else if bytes_eq(pname, b"reg-shift") && len >= 4 {
                             reg_shift = be_u32(value);
                         } else if bytes_eq(pname, b"reg-io-width") && len >= 4 {
                             reg_io_width = be_u32(value);
+                        } else if bytes_eq(pname, b"status") {
+                            // A disabled UART is clock-gated; an MMIO read can
+                            // stall the bus, which the poll bound cannot
+                            // escape — never select one.
+                            disabled = bytes_contain(value, len, b"disabled");
                         }
                     }
                     p = offset(p, align4(len));
@@ -333,6 +500,9 @@ impl Fdt {
         let mut reg: Option<(u64, u64)> = None;
 
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -370,6 +540,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     let pname = offset(strings, nameoff);
 
                     if depth < addr_cells.len() {
@@ -383,8 +554,8 @@ impl Fdt {
                         if bytes_eq(pname, b"compatible") {
                             matched = bytes_contain(value, len, b"plic");
                         } else if bytes_eq(pname, b"reg") && depth >= 1 {
-                            let (addr, rest) = read_cells(value, addr_cells[depth - 1]);
-                            let (size, _) = read_cells(rest, size_cells[depth - 1]);
+                            let (addr, rest) = read_cells(value, addr_cells[(depth - 1).min(15)]);
+                            let (size, _) = read_cells(rest, size_cells[(depth - 1).min(15)]);
                             reg = Some((addr, size));
                         }
                     }
@@ -414,6 +585,9 @@ impl Fdt {
         let mut interrupt: Option<u32> = None;
 
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -449,6 +623,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     let pname = offset(strings, nameoff);
 
                     if bytes_eq(pname, b"#address-cells") && depth < addr_cells.len() {
@@ -456,7 +631,7 @@ impl Fdt {
                     }
                     if depth == cand_depth {
                         if bytes_eq(pname, b"reg") && depth >= 1 {
-                            let (addr, _) = read_cells(value, addr_cells[depth - 1]);
+                            let (addr, _) = read_cells(value, addr_cells[(depth - 1).min(15)]);
                             matched = addr == unit_base;
                         } else if bytes_eq(pname, b"interrupts") && len >= 4 {
                             interrupt = Some(be_u32(value));
@@ -494,6 +669,9 @@ impl Fdt {
         let mut count = 0usize;
 
         loop {
+            if self.token_oob(p) {
+                break;
+            }
             let token = be_u32(p);
             p = offset(p, 4);
             match token {
@@ -532,6 +710,7 @@ impl Fdt {
                     let nameoff = be_u32(offset(p, 4)) as usize;
                     p = offset(p, 8);
                     let value = p;
+                    let len = self.clamp_len(value, len);
                     let pname = offset(strings, nameoff);
 
                     if depth == 2 && in_cpus && bytes_eq(pname, b"#address-cells") {
@@ -563,7 +742,10 @@ impl Fdt {
 fn read_cells(p: *const u8, cells: u32) -> (u64, *const u8) {
     let mut value: u64 = 0;
     let mut cursor = p;
-    for _ in 0..cells {
+    // Device-tree addresses are at most 4 cells (and 2 in practice); cap the
+    // count so a corrupt `#address-cells`/`#size-cells` can't walk `cursor`
+    // off into arbitrary memory.
+    for _ in 0..cells.min(4) {
         value = (value << 32) | u64::from(be_u32(cursor));
         cursor = offset(cursor, 4);
     }
@@ -577,6 +759,13 @@ fn be_u32(p: *const u8) -> u32 {
     // SAFETY: callers only pass pointers within the validated DTB bounds.
     let raw = unsafe { core::ptr::read_unaligned(p.cast::<u32>()) };
     u32::from_be(raw)
+}
+
+/// Reads a big-endian u64 at `p` (the memory-reservation block's fields).
+fn be_u64(p: *const u8) -> u64 {
+    // SAFETY: callers keep `p` within the validated DTB bounds.
+    let raw = unsafe { core::ptr::read_unaligned(p.cast::<u64>()) };
+    u64::from_be(raw)
 }
 
 /// Pointer offset by `bytes`.

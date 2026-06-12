@@ -64,6 +64,13 @@ llvm-objcopy -O binary \
    `${fdtcontroladdr}` is U-Boot's own control DTB for the board — exactly
    what the kernel's FDT parser wants. (Use the RV2 image name on the RV2.)
 
+   The kernel identity-maps the low 16 GiB at boot, so a control DTB
+   relocated high in an 8 GB board's RAM is still readable; the FDT parser
+   validates the header and bounds every walk, and the frame allocator
+   skips firmware-reserved (`/reserved-memory` + memreserve) ranges and
+   disabled-UART nodes. If you nonetheless want the DTB low, set
+   `fdt_addr_r=0x46000000` before `booti`.
+
 ## What to expect on first boot
 
 The hardware path runs every milestone that does not depend on QEMU's fixed
