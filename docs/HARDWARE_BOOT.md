@@ -104,7 +104,8 @@ device windows:
 
 ## Known gaps on hardware (the next arc)
 
-- DT-derived PLIC routing (interrupt-driven I/O on the boards)
 - JH7110 dwmac / Ky X1 ethernet behind the existing `NetDevice` capability
   lane, NVMe/SD storage behind the storage lane — then the full QEMU
-  milestone ladder (TCP, RFS) runs on silicon unchanged.
+  milestone ladder (TCP, RFS) runs on silicon unchanged. (The PLIC and
+  interrupt numbers are already DT-derived; a board NIC driver plugs into
+  the existing claim/complete + EventSlot path.)
