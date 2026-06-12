@@ -225,15 +225,31 @@ Still required before it can boot on the RV:
     a pre-run translate() comparison prove isolation. ET_EXEC only; M16 feeds
     toolchain-built executables through this same path.
 
+16. **libOS + app delivery** ✅ — `apps/feox-libos` (the ASI ecall ABI as Rust
+    functions over the shared `feox-asi` opcodes: `syscall`/`yield_now`/
+    `cap_count`/`exit`, plus the panic handler) and `apps/feox-hello`, a real
+    `no_std` Rust binary linked with its own user-space linker script (image at
+    0x2_0000_0000, `code-model=medium`, 4 KiB-aligned segments). Delivery: the
+    kernel's build.rs cross-builds the app (nested cargo into OUT_DIR; rustflags
+    passed by env because env *replaces* config rustflags while config files
+    *merge* — the kernel linker script must not leak into app links) and the
+    kernel embeds it via `include_bytes!(env!(...))`. The app yields, queries
+    the capability table, exercises rodata + bss, and exits with
+    `fib(10) + 1 + cap_count` — predicted independently by the kernel, so a
+    correct exit proves build, delivery, load, per-segment permissions,
+    syscalls, and exit end to end. Apps stay outside the workspace (own
+    `[workspace]` tables); build.rs only fires for riscv64 kernel builds.
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
 Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
 M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
 scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
-app delivery (toolchain-built user crates through the M15 loader) -> M17 first
-U-mode app; then NIC-as-capability + hand-rolled TCP in the network-service
-app, then the RV2 hardware tail.
+app delivery ✅ -> M17 first real U-mode app (grow feox-libos: mem_map,
+IPC/events; an app that does useful work over capabilities); then
+NIC-as-capability + hand-rolled TCP in the network-service app, then the RV2
+hardware tail.
 
 ## Other follow-ups
 

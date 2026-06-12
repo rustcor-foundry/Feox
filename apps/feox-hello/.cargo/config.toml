@@ -1,0 +1,16 @@
+# NOTE: the canonical app rustflags live in the kernel's build.rs, passed via
+# the RUSTFLAGS env var — env REPLACES config-level rustflags, while config
+# files MERGE, and the repo-level [target.riscv64gc-unknown-none-elf]
+# rustflags (the KERNEL linker script) must not leak into app links.
+#
+# This file exists for documentation and is overridden whenever the app is
+# built through the kernel. For a manual standalone build from this directory,
+# the repo config still merges in — pass RUSTFLAGS explicitly instead:
+#   RUSTFLAGS="-Clink-arg=-Tlink.ld -Clink-arg=-zmax-page-size=4096 \
+#              -Crelocation-model=static -Ccode-model=medium" \
+#   cargo build --release --target riscv64gc-unknown-none-elf
+#
+# code-model=medium (medany): the image lives at 0x2_0000_0000, far outside
+# medlow's ±2 GiB-around-zero addressing.
+# -z max-page-size=4096: keeps PT_LOAD segments 4 KiB-aligned and disjoint for
+# the kernel's page-granular loader.

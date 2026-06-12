@@ -1,0 +1,12 @@
+[package]
+name = "feox-libos"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+feox-asi = { path = "../../crates/feox-asi" }
+
+# Standalone: apps build outside the kernel workspace (the kernel's build.rs
+# drives them with the riscv64 user-space target and linker script).
+[workspace]

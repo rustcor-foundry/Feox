@@ -134,6 +134,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // isolated processes at identical VAs, scheduled to exit.
     elf::demo(timebase);
 
+    // Milestone 16: libOS + app delivery — run the toolchain-built
+    // apps/feox-hello executable (embedded by build.rs) through the same path.
+    elf::app_demo(timebase);
+
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
     cpu::hlt_loop()

@@ -177,7 +177,9 @@ const fn align_up(x: usize) -> usize {
 /// there and identical VAs in different processes back onto different frames.
 const PROC_CODE_VA: usize = 0x2_0000_0000;
 const PROC_DATA_VA: usize = 0x2_0000_2000;
-const PROC_STACK_VA: usize = 0x2_0000_6000;
+/// Stack page VA, 1 MiB above the image base so toolchain-built apps have
+/// headroom for their segments.
+const PROC_STACK_VA: usize = 0x2_0010_0000;
 
 /// Builds a minimal static ELF64 in memory: one R+X code segment (the raw
 /// instruction words) at [`PROC_CODE_VA`] and one R+W data segment (a single
@@ -239,6 +241,51 @@ struct Process {
     frames: Vec<usize>,
     stack_frame: usize,
     slot: usize,
+    entry: usize,
+}
+
+impl Process {
+    /// Loads `image` into a fresh per-process space, maps a stack page at
+    /// [`PROC_STACK_VA`], and parks it in a Ready thread slot. On error all
+    /// intermediate resources are released.
+    fn launch(image: &[u8]) -> Result<Self, &'static str> {
+        let mut space = AddressSpace::new_user().ok_or("out of frames for a space")?;
+        let loaded = match load(&mut space, image) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                space.destroy_user();
+                return Err(error);
+            }
+        };
+        let Some(stack) = frame::alloc() else {
+            free_frames(&loaded.frames);
+            space.destroy_user();
+            return Err("out of frames for a stack");
+        };
+        space.map(
+            PROC_STACK_VA,
+            stack,
+            frame::FRAME_SIZE,
+            paging::PTE_U | paging::PTE_R | paging::PTE_W,
+        );
+        let Some(slot) = sched::spawn_at(
+            loaded.entry,
+            PROC_STACK_VA + frame::FRAME_SIZE,
+            space.satp() as usize,
+        ) else {
+            frame::free(stack);
+            free_frames(&loaded.frames);
+            space.destroy_user();
+            return Err("no free thread slot");
+        };
+        Ok(Self {
+            space,
+            frames: loaded.frames,
+            stack_frame: stack,
+            slot,
+            entry: loaded.entry,
+        })
+    }
 }
 
 /// Milestone 15 demo: synthesize ONE static ELF, load it twice into two
@@ -264,58 +311,24 @@ pub fn demo(timebase_hz: u64) {
 
     let mut processes: Vec<Process> = Vec::new();
     for pid in 0..2usize {
-        let Some(mut space) = AddressSpace::new_user() else {
-            crate::kprintln!("[feox] elf: out of frames for a process space");
-            teardown(processes);
-            return;
-        };
-        let loaded = match load(&mut space, &image) {
-            Ok(loaded) => loaded,
+        let process = match Process::launch(&image) {
+            Ok(process) => process,
             Err(error) => {
-                crate::kprintln!("[feox] elf: load failed: {}", error);
-                space.destroy_user();
+                crate::kprintln!("[feox] elf: process {} launch failed: {}", pid, error);
                 teardown(processes);
                 return;
             }
         };
-        let (Some(stack), Some((data_pa, _))) =
-            (frame::alloc(), space.translate(PROC_DATA_VA))
-        else {
-            crate::kprintln!("[feox] elf: out of frames for a process stack");
-            free_frames(&loaded.frames);
-            space.destroy_user();
-            teardown(processes);
-            return;
-        };
-        space.map(
-            PROC_STACK_VA,
-            stack,
-            frame::FRAME_SIZE,
-            paging::PTE_U | paging::PTE_R | paging::PTE_W,
-        );
         // Identical images — differentiate via the data word, through the
         // frame's identity mapping (proving translate() against the space).
-        // SAFETY: data_pa is the fresh segment frame this process owns.
-        unsafe { ((data_pa) as *mut u32).write_volatile(200 + pid as u32) };
-
-        let Some(slot) = sched::spawn_at(
-            loaded.entry,
-            PROC_STACK_VA + frame::FRAME_SIZE,
-            space.satp() as usize,
-        ) else {
-            crate::kprintln!("[feox] elf: no thread slot for process {}", pid);
-            frame::free(stack);
-            free_frames(&loaded.frames);
-            space.destroy_user();
+        let Some((data_pa, _)) = process.space.translate(PROC_DATA_VA) else {
+            crate::kprintln!("[feox] elf: process {} has no data segment", pid);
             teardown(processes);
             return;
         };
-        processes.push(Process {
-            space,
-            frames: loaded.frames,
-            stack_frame: stack,
-            slot,
-        });
+        // SAFETY: data_pa is the fresh segment frame this process owns.
+        unsafe { (data_pa as *mut u32).write_volatile(200 + pid as u32) };
+        processes.push(process);
     }
 
     // Isolation check before running: the same code VA must translate to
@@ -355,4 +368,48 @@ fn teardown(processes: Vec<Process>) {
         free_frames(&process.frames);
         process.space.destroy_user();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 16: libOS + app delivery — a toolchain-built user executable.
+// ---------------------------------------------------------------------------
+
+/// `apps/feox-hello`, a real no_std Rust binary linked against `feox-libos`,
+/// cross-built by this crate's build.rs and embedded here. It runs through
+/// exactly the same loader path as the synthesized M15 image.
+static HELLO_ELF: &[u8] = include_bytes!(env!("FEOX_HELLO_ELF"));
+
+/// Milestone 16 demo: load and run `feox-hello`. The app yields, queries the
+/// capability table through the libOS, exercises its rodata and bss segments,
+/// and exits with `fib(10) + 1 + cap_count` — a value the kernel predicts
+/// independently, so a correct exit proves the whole chain: toolchain build,
+/// delivery, ELF load, per-segment permissions, syscalls, and exit.
+pub fn app_demo(timebase_hz: u64) {
+    let process = match Process::launch(HELLO_ELF) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] libos: feox-hello launch failed: {}", error);
+            return;
+        }
+    };
+    let expected = 55 + 1 + crate::capability::active_count();
+    crate::kprintln!(
+        "[feox] libos: feox-hello ({} bytes) loaded, entry {:#x}; running...",
+        HELLO_ELF.len(),
+        process.entry
+    );
+
+    sched::run(timebase_hz);
+
+    let (exited, value, _, yields) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0));
+    let ok = exited && value == expected && yields > 0;
+    teardown(alloc::vec![process]);
+
+    crate::kprintln!(
+        "[feox] milestone 16: libOS + app delivery (feox-hello exit {} expected {}, yields={}, ok={}).",
+        value,
+        expected,
+        yields,
+        ok
+    );
 }
