@@ -306,6 +306,19 @@ Still required before it can boot on the RV:
     exiting with a gateway-MAC checksum the kernel predicts from its own M8
     resolution.
 
+21. **User-space TCP** ✅ — hand-rolled TCP client in `feox-netapp` role 1,
+    entirely in U-mode over the M20 lanes: every Ethernet/IPv4/TCP frame is
+    built and parsed by the app (RFC 1071 checksums incl. the TCP
+    pseudo-header). Full lifecycle against the CI echo peer (QEMU
+    `guestfwd=tcp:10.0.2.100:7777-cmd:cat`): ARP the gateway, three-way
+    handshake (SYN -> SYN-ACK validation -> ACK), 8 bytes sent PSH+ACK,
+    echo collected across arbitrary segmentation with cumulative ACKs (and
+    duplicate/out-of-order re-ACK), active close (FIN -> FIN-ack or peer
+    FIN + final ACK). Exits `0x4000 | (sum of echoed bytes & 0xFFF)`,
+    predicted by the kernel. No retransmission (park timeouts surface
+    failures as distinct 0xbNN exits) — flow/congestion control arrive with
+    the real network-service app.
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
@@ -315,9 +328,10 @@ scheduler ✅ -> M15 ELF loader + per-process address spaces ✅ -> M16 libOS +
 app delivery ✅ -> M17 first real U-mode app (mem lane over capabilities) ✅
 -> M18 IPC events (EventSlot + ThreadPark) ✅ -> M19 external interrupts
 (PLIC + IrqAttach -> EventSlot) ✅ -> M20 user-space NIC lanes (NetDevice
-capability + NetSubmitTx/NetPollRx/NetGetInfo) ✅; next: M21 hand-rolled TCP
-in user space (against a QEMU guestfwd echo peer), then the RV2 hardware
-tail.
+capability + NetSubmitTx/NetPollRx/NetGetInfo) ✅ -> M21 hand-rolled TCP in
+user space ✅. The Route-B ladder is complete on QEMU; next: grow the
+network-service app (retransmission, multiple connections, a real service)
+and the RV2 hardware tail (DT-derived PLIC/net, JH7110 dwmac).
 
 ## Other follow-ups
 

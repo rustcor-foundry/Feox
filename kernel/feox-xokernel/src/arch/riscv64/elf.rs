@@ -629,3 +629,55 @@ pub fn net_demo(timebase_hz: u64, on_qemu: bool) {
         ok
     );
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 21: hand-rolled TCP in user space.
+// ---------------------------------------------------------------------------
+
+/// Milestone 21 demo (QEMU only; the CI harness exposes an echo service via
+/// `guestfwd=tcp:10.0.2.100:7777-cmd:cat`): netapp role 1 performs a full
+/// TCP client lifecycle from U-mode — handshake, 8 bytes echoed, active
+/// close — building every Ethernet/IPv4/TCP frame itself over the M20
+/// lanes. It exits `0x4000 | (sum of echoed bytes & 0xFFF)`; the payload is
+/// fixed (b"FEOXTCP!", kept in sync with the app), so the kernel predicts
+/// the value.
+pub fn tcp_demo(timebase_hz: u64, on_qemu: bool) {
+    if !on_qemu {
+        crate::kprintln!("[feox] tcp: skipped (non-QEMU)");
+        return;
+    }
+    if super::net::gateway_mac().is_none() {
+        crate::kprintln!("[feox] tcp: no live net device; skipping");
+        return;
+    }
+    let process = match Process::launch(NETAPP_ELF, 1) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] tcp: launch failed: {}", error);
+            return;
+        }
+    };
+
+    super::net::drain_rx();
+    super::syscall::reset_net_rx();
+    let payload_sum: usize = b"FEOXTCP!".iter().map(|&b| b as usize).sum();
+    let expected = 0x4000 | (payload_sum & 0xFFF);
+    crate::kprintln!("[feox] tcp: U-mode TCP client -> 10.0.2.100:7777 (echo)...");
+
+    sched::run_with_budget(timebase_hz, 96);
+
+    let (exited, value, _, _, parks) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
+    let events = super::syscall::net_rx_events();
+    super::syscall::reset_net_rx();
+    let ok = exited && value == expected;
+    teardown(alloc::vec![process]);
+
+    crate::kprintln!(
+        "[feox] milestone 21: user-space TCP (handshake + 8-byte echo + close: exit {:#x} expected {:#x}, rx events={}, parks={}, ok={}).",
+        value,
+        expected,
+        events,
+        parks,
+        ok
+    );
+}

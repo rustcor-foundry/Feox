@@ -160,6 +160,9 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // over NetSubmitTx/NetPollRx with a NetDevice capability.
     elf::net_demo(timebase, on_qemu);
 
+    // Milestone 21: hand-rolled TCP in user space against the CI echo peer.
+    elf::tcp_demo(timebase, on_qemu);
+
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
     cpu::hlt_loop()
