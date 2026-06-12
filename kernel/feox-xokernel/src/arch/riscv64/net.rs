@@ -662,17 +662,19 @@ pub fn on_interrupt() -> bool {
 
 /// Sends one ICMP echo request to the gateway WITHOUT polling for the reply
 /// — the reply arrives as an RX interrupt (the M19 demo's wake stimulus).
+///
+/// The RX used-index shadow is deliberately NOT touched here: slirp can
+/// answer the echo before send() even finishes reaping the TX completion,
+/// and refreshing the shadow at that point would absorb the reply — the
+/// exact event the caller is waiting for. TX completions never move the RX
+/// used index, so the existing shadow remains the correct baseline.
 pub fn send_test_ping() -> bool {
     let Some(active) = active() else {
         return false;
     };
     let mut pkt = [0u8; 42];
     build_icmp_echo(active.dev.mac(), active.gw_mac, GATEWAY_IP, &mut pkt);
-    // send() reaps the TX completion synchronously; refresh the RX shadow
-    // afterwards so only the reply counts as RX progress.
-    let sent = active.dev.send(&pkt);
-    active.rx_seen = active.dev.rx.used_idx();
-    sent
+    active.dev.send(&pkt)
 }
 
 /// Brings up virtio-net and exercises the stack: ARP (link, 8a), ICMP ping
