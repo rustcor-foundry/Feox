@@ -286,16 +286,26 @@ fn init_memory(dtb: usize) -> bool {
     // Usable RAM starts just past the kernel image. The DTB sits high in RAM
     // on QEMU virt, so cap the window below it (everything at/above the DTB is
     // left reserved for now); otherwise run to the end of RAM. Everything is
-    // additionally clamped below 4 GiB: the bootstrap identity map covers
-    // exactly four gigapages, and VisionFive 2 boards can carry 8 GB.
-    const IDENTITY_MAP_END: u64 = 4 << 30;
+    // additionally clamped to the bootstrap identity map's reach: page-table
+    // frames carved during build_kernel_address_space are zeroed/written
+    // through that map before the satp switch, so the pool must stay within
+    // it. 8 GB boards (base 0x4000_0000) reach ~9 GiB, under the 16 GiB map.
     let kernel_end = addr_of!(__kernel_end) as usize;
-    let ram_end = ram_end.min(IDENTITY_MAP_END);
-    let usable_end = if (dtb as u64) > kernel_end as u64 && (dtb as u64) < ram_end {
+    let identity_map_end = (paging::MAPPED_GIGAPAGES as u64) << 30;
+    let ram_end = ram_end.min(identity_map_end);
+    let mut usable_end = if (dtb as u64) > kernel_end as u64 && (dtb as u64) < ram_end {
         dtb
     } else {
         ram_end as usize
     };
+    // Never hand out a firmware-reserved (PMP-protected) frame: cap the pool
+    // below the lowest reserved range that falls within it. (No-op on QEMU
+    // virt, which has no /reserved-memory; load-bearing on the boards.)
+    let reserved = tree.reserved_min_in(kernel_end as u64, usable_end as u64) as usize;
+    if reserved < usable_end {
+        crate::kprintln!("[feox] frames: capped at reserved range {:#x}", reserved);
+        usable_end = reserved;
+    }
 
     frame::init(kernel_end, usable_end);
     crate::kprintln!(
