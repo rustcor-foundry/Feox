@@ -28,7 +28,7 @@ fn main() {
     // -Tlink.ld resolves relative to the linker cwd, each app dir.
     let app_rustflags = "-Clink-arg=-Tlink.ld -Clink-arg=-zmax-page-size=4096 \
                          -Crelocation-model=static -Ccode-model=medium";
-    for app in ["feox-hello", "feox-pingpong"] {
+    for app in ["feox-hello", "feox-pingpong", "feox-netapp"] {
         let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
             .current_dir(apps.join(app))
             .env_remove("CARGO_ENCODED_RUSTFLAGS")

@@ -590,6 +590,17 @@ pub fn register_bootstrap_storage_device_resource(
     register_resource(CapType::StorageDevice, bar_base, bar_size, false)
 }
 
+/// Registers one network device as a resource so the net ABI lane can mint a
+/// `CapType::NetDevice` root capability over it. The base/size pair records
+/// the transport's MMIO window for introspection; dispatch only checks the
+/// `cap_type` tag.
+pub fn register_bootstrap_net_device_resource(
+    mmio_base: PhysicalAddress,
+    mmio_size: u64,
+) -> Result<ResourceId, CapError> {
+    register_resource(CapType::NetDevice, mmio_base, mmio_size, false)
+}
+
 /// Seeds the registry from the boot memory map and returns the number of registered resources.
 pub fn seed_bootstrap_resources_from_handoff(
     regions: &[crate::bootabi::MemoryRegion],

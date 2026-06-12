@@ -22,16 +22,20 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::sync::atomic::AtomicU64;
 
 use feox_asi::{
-    AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapPermissions, CapRequest, EventSlot,
+    AsiOp, CapDelegateArgs, CapHandle, CapInfo, CapPermissions, CapRequest, CapType, EventSlot,
     IRQ_SOURCE_NET_RX, IrqAttachArgs, IrqDetachArgs, MapFlags, MappedRegion, MemError,
-    MemMapArgs, MemVtoPArgs, PhysicalAddress, SYSCALL_CAP_ERROR_BASE, SYSCALL_ERR_INVALID_ARGS,
+    MemMapArgs, MemVtoPArgs, NetDeviceInfo, NetError, NetGetInfoArgs, NetRxArgs, NetTxArgs,
+    PhysicalAddress, SYSCALL_CAP_ERROR_BASE, SYSCALL_ERR_INVALID_ARGS,
     SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY, SYSCALL_ERR_UNSUPPORTED,
-    SYSCALL_MEM_ERROR_BASE, SYSCALL_OK, ThreadParkArgs,
+    SYSCALL_MEM_ERROR_BASE, SYSCALL_NET_ERROR_BASE, SYSCALL_OK, ThreadParkArgs,
 };
 
 use super::trap::{REG_A0, REG_A1, TrapFrame};
-use super::{frame, paging, sched, umode};
+use super::{frame, net, paging, sched, umode};
 use crate::capability;
+
+/// Maximum Ethernet frame the net lane accepts (no jumbo frames).
+const NET_MAX_FRAME: usize = 1514;
 
 /// User mmap window: kernel-chosen VAs for `MemMap`, inside sv39 root slot 8
 /// (the process VA window, private per process space) and above any app
@@ -84,6 +88,25 @@ pub fn init() {
         );
     }
 
+    // The live net device (if the QEMU bring-up found one) becomes a
+    // CapType::NetDevice capability — apps discover it via CapList and drive
+    // the net lane with it.
+    if let Some(mmio) = net::mmio_base() {
+        if let Ok(resource) = capability::register_bootstrap_net_device_resource(
+            feox_asi::PhysicalAddress(mmio as u64),
+            0x1000,
+        ) {
+            if capability::mint_bootstrap_root_capability(
+                resource,
+                CapPermissions::READ | CapPermissions::WRITE,
+            )
+            .is_ok()
+            {
+                minted += 1;
+            }
+        }
+    }
+
     INITIALIZED.store(true, Ordering::Release);
     crate::kprintln!(
         "[feox] asi: ecall lane ready ({} resources, {} root cap{})",
@@ -116,6 +139,9 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
         AsiOp::MemVtoP => dispatch_mem_vtop(args_ptr, args_len, out_value),
         AsiOp::IrqAttach => dispatch_irq_attach(args_ptr, args_len, out_value),
         AsiOp::IrqDetach => dispatch_irq_detach(args_ptr, args_len, out_value),
+        AsiOp::NetSubmitTx => dispatch_net_tx(args_ptr, args_len, out_value),
+        AsiOp::NetPollRx => dispatch_net_rx(args_ptr, args_len, out_value),
+        AsiOp::NetGetInfo => dispatch_net_get_info(args_ptr, args_len, out_value),
         AsiOp::ProcYield => SYSCALL_OK,
         // ProcExit is consumed at the trap boundary; reaching here means a
         // kernel-side caller used it, which the transport does not support.
@@ -125,6 +151,120 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
 
 fn mem_error(error: MemError) -> u64 {
     SYSCALL_MEM_ERROR_BASE + error as u64
+}
+
+// ---- net lane (milestone 20) ----------------------------------------------
+
+fn net_error(error: NetError) -> u64 {
+    SYSCALL_NET_ERROR_BASE + error as u64
+}
+
+/// Verifies a `CapType::NetDevice` capability with READ + WRITE.
+fn verify_net_device(handle: CapHandle) -> Result<(), u64> {
+    match capability::verify_bootstrap_handle(
+        handle,
+        CapPermissions::READ | CapPermissions::WRITE,
+    ) {
+        Ok(view) if view.cap_type == CapType::NetDevice => Ok(()),
+        _ => Err(net_error(NetError::InvalidCapability)),
+    }
+}
+
+/// Resolves a buffer capability to an identity-mapped byte range with at
+/// least `needed` bytes past `offset`.
+fn net_buffer(handle: CapHandle, offset: u64, needed: usize, write: bool) -> Result<usize, u64> {
+    let mut required = CapPermissions::READ;
+    if write {
+        required |= CapPermissions::WRITE;
+    }
+    let Ok((base, size)) = capability::cap_to_phys_base(handle, required) else {
+        return Err(net_error(NetError::InvalidCapability));
+    };
+    if offset.saturating_add(needed as u64) > size {
+        return Err(net_error(NetError::InvalidLength));
+    }
+    Ok(base.0 as usize + offset as usize)
+}
+
+/// `NetSubmitTx`: transmit one frame from capability-backed memory.
+fn dispatch_net_tx(args_ptr: *const u8, args_len: u64, _out_value: &mut u64) -> u64 {
+    if args_len != size_of::<NetTxArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<NetTxArgs>())
+    };
+    if let Err(code) = verify_net_device(args.device) {
+        return code;
+    }
+    let length = args.length as usize;
+    if !(14..=NET_MAX_FRAME).contains(&length) {
+        return net_error(NetError::InvalidLength);
+    }
+    let pa = match net_buffer(args.buffer, args.offset, length, false) {
+        Ok(pa) => pa,
+        Err(code) => return code,
+    };
+    // SAFETY: the range was bounds-checked against the capability resource
+    // and is identity-mapped RAM.
+    let frame_bytes = unsafe { core::slice::from_raw_parts(pa as *const u8, length) };
+    if net::tx_frame(frame_bytes) {
+        SYSCALL_OK
+    } else {
+        net_error(NetError::SubmitFailed)
+    }
+}
+
+/// `NetPollRx`: receive one pending frame into capability-backed memory.
+/// Value register = frame length (0 = nothing pending).
+fn dispatch_net_rx(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {
+    if args_len != size_of::<NetRxArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<NetRxArgs>())
+    };
+    if let Err(code) = verify_net_device(args.device) {
+        return code;
+    }
+    let pa = match net_buffer(args.buffer, args.offset, NET_MAX_FRAME, true) {
+        Ok(pa) => pa,
+        Err(code) => return code,
+    };
+    // SAFETY: bounds-checked capability memory, identity-mapped.
+    let out = unsafe { core::slice::from_raw_parts_mut(pa as *mut u8, NET_MAX_FRAME) };
+    *out_value = net::rx_frame(out).unwrap_or(0) as u64;
+    SYSCALL_OK
+}
+
+/// `NetGetInfo`: report the device MAC and MTU through a caller pointer.
+fn dispatch_net_get_info(args_ptr: *const u8, args_len: u64, _out_value: &mut u64) -> u64 {
+    if args_len != size_of::<NetGetInfoArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<NetGetInfoArgs>())
+    };
+    if let Err(code) = verify_net_device(args.device) {
+        return code;
+    }
+    let Some(mac) = net::mac() else {
+        return net_error(NetError::NotInitialized);
+    };
+    let info = NetDeviceInfo {
+        mac,
+        _reserved: [0; 2],
+        mtu: NET_MAX_FRAME as u32,
+        _reserved2: 0,
+    };
+    if !args.out_info.is_null() {
+        // SAFETY: caller-owned output slot (written under SUM for U-mode).
+        unsafe { *args.out_info = info };
+    }
+    SYSCALL_OK
 }
 
 // ---- IRQ lane (milestone 19) ----------------------------------------------

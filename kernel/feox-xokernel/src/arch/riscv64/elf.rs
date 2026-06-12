@@ -571,3 +571,61 @@ pub fn irq_demo(timebase_hz: u64, on_qemu: bool) {
         ok
     );
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 20: user-space NIC lanes — ARP round trip from U-mode.
+// ---------------------------------------------------------------------------
+
+/// `apps/feox-netapp`: user-space networking over the capability lanes.
+static NETAPP_ELF: &[u8] = include_bytes!(env!("FEOX_NETAPP_ELF"));
+
+/// Milestone 20 demo (QEMU only): the app discovers the `NetDevice`
+/// capability via CapList, maps a capability-backed packet buffer, builds an
+/// ARP who-has for the gateway itself, transmits with NetSubmitTx, and
+/// receives the reply with NetPollRx (parking on the RX interrupt between
+/// polls). It exits with a gateway-MAC-derived value the kernel predicts
+/// from its own M8 ARP resolution.
+pub fn net_demo(timebase_hz: u64, on_qemu: bool) {
+    if !on_qemu {
+        crate::kprintln!("[feox] net-lane: skipped (non-QEMU)");
+        return;
+    }
+    let Some(gw_mac) = super::net::gateway_mac() else {
+        crate::kprintln!("[feox] net-lane: no live net device; skipping");
+        return;
+    };
+    let process = match Process::launch(NETAPP_ELF, 0) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] net-lane: launch failed: {}", error);
+            return;
+        }
+    };
+
+    // Quiet ring + fresh IRQ-lane state, so the app sees only its own reply.
+    super::net::drain_rx();
+    super::syscall::reset_net_rx();
+    let mac_sum: usize = gw_mac.iter().map(|&b| b as usize).sum();
+    let expected = 0x3000 | (mac_sum & 0xFFF);
+    crate::kprintln!(
+        "[feox] net-lane: U-mode ARP for the gateway ({} byte image)...",
+        NETAPP_ELF.len()
+    );
+
+    sched::run_with_budget(timebase_hz, 64);
+
+    let (exited, value, _, _, parks) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
+    let events = super::syscall::net_rx_events();
+    super::syscall::reset_net_rx();
+    let ok = exited && value == expected;
+    teardown(alloc::vec![process]);
+
+    crate::kprintln!(
+        "[feox] milestone 20: user-space NIC lanes (U-mode ARP round trip: exit {:#x} expected {:#x}, rx events={}, parks={}, ok={}).",
+        value,
+        expected,
+        events,
+        parks,
+        ok
+    );
+}
