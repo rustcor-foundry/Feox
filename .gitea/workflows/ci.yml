@@ -67,7 +67,8 @@ jobs:
             -drive file="$nvme_img",if=none,id=nvm0,format=raw \
             -device nvme,serial=feox0,drive=nvm0 \
             -global virtio-mmio.force-legacy=false \
-            -netdev user,id=net0 -device virtio-net-device,netdev=net0 \
+            -netdev user,id=net0,guestfwd=tcp:10.0.2.100:7777-cmd:cat \
+            -device virtio-net-device,netdev=net0 \
             -bios default -kernel "$elf" -no-reboot </dev/null >/dev/null 2>&1 || true
           echo "----- serial log -----"; cat "$log"; echo "----------------------"
           grep -q 'breakpoint trap handled' "$log" \
@@ -124,6 +125,8 @@ jobs:
             || { echo "::error::Feox riscv64 PLIC/IRQ marker not found (or irq-wake check failed)"; exit 1; }
           grep -q 'user-space NIC lanes.*ok=true' "$log" \
             || { echo "::error::Feox riscv64 net-lane marker not found (or U-mode ARP check failed)"; exit 1; }
+          grep -q 'user-space TCP.*ok=true' "$log" \
+            || { echo "::error::Feox riscv64 TCP marker not found (or handshake/echo check failed)"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
           echo "riscv64 smoke-boot markers observed (boot..smp + net + timer irq)."
