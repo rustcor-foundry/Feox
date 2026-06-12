@@ -72,17 +72,45 @@ static mut BOOT_STACK: [u8; BOOT_STACK_SIZE] = [0; BOOT_STACK_SIZE];
 global_asm!(
     ".section .text.boot,\"ax\"",
     ".global _start",
+    // RISC-V Linux boot image header (64 bytes): lets U-Boot's `booti` load
+    // the objcopy'd flat Image on real hardware (Orange Pi RV / RV2) and
+    // enter at code0 with a0=hartid, a1=dtb. QEMU's ELF loader jumps
+    // straight to the `_start` entry symbol instead, skipping the header —
+    // both paths work from one source.
+    "feox_image_header:",
+    "j _start",                            // code0: jump over the header
+    ".word 0",                             // code1
+    ".quad 0x200000",                      // text_offset: RAM base + 2 MiB
+    ".quad __kernel_end - __kernel_start", // image_size (incl. bss footprint)
+    ".quad 0",                             // flags (little-endian kernel)
+    ".word 2",                             // header version 0.2
+    ".word 0",                             // res1
+    ".quad 0",                             // res2
+    ".quad 0x5643534952",                  // magic: 'RISCV'
+    ".word 0x05435352",                    // magic2
+    ".word 0",                             // res3
     "_start:",
-    // OpenSBI enters S-mode with a0=hartid, a1=dtb; preserve both across the
-    // stack setup so they reach `feox_entry` as its two arguments.
+    // Zero bss FIRST (registers only; no stack yet): ELF loaders do this for
+    // us, but `booti` copies a raw image and leaves bss as whatever was in
+    // RAM. a0/a1 (hartid, dtb) are untouched throughout.
+    "la t0, __sbss",
+    "la t1, __ebss",
+    "1:",
+    "bgeu t0, t1, 2f",
+    "sd zero, 0(t0)",
+    "addi t0, t0, 8",
+    "j 1b",
+    "2:",
+    // OpenSBI/U-Boot enter S-mode with a0=hartid, a1=dtb; preserve both
+    // across the stack setup so they reach `feox_entry` as its two arguments.
     "la sp, {boot_stack}",
     "li t0, {boot_stack_size}",
     "add sp, sp, t0",
     "mv fp, zero",
     "call {entry}",
-    "2:",
+    "3:",
     "wfi",
-    "j 2b",
+    "j 3b",
     boot_stack = sym BOOT_STACK,
     boot_stack_size = const BOOT_STACK_SIZE,
     entry = sym feox_entry,
