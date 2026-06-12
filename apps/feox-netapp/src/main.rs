@@ -116,8 +116,49 @@ extern "C" fn _start(role: usize) -> ! {
     match role {
         0 => arp_round_trip(),
         1 => tcp_echo(),
+        2 => disk_read(),
         _ => libos::exit(0xb3f),
     }
+}
+
+/// Role 2 (M27): read disk LBA 0 through the storage lane — find the
+/// StorageDevice capability, request a buffer page, submit a one-block read,
+/// poll (yielding between polls) until complete, and exit with a checksum of
+/// the first four bytes (the kernel's M6 self-test pattern, "FEOX").
+fn disk_read() -> ! {
+    let Some(device) = libos::find_capability(CapType::StorageDevice) else {
+        libos::exit(0xb50);
+    };
+    let Some(buffer) = libos::cap_request_pages(1, true) else {
+        libos::exit(0xb51);
+    };
+    let Some(region) = libos::mem_map(buffer, 0, 4096, MapFlags::READ | MapFlags::WRITE) else {
+        libos::exit(0xb52);
+    };
+    let Some(token) = libos::storage_submit_read(device, 1, 0, buffer, 0) else {
+        libos::exit(0xb53);
+    };
+    let mut polls = 0u32;
+    let completion = loop {
+        match libos::storage_poll(token) {
+            Some(Some(completion)) => break completion,
+            Some(None) => {
+                polls += 1;
+                if polls > 100_000 {
+                    libos::exit(0xb54);
+                }
+                libos::yield_now();
+            }
+            None => libos::exit(0xb55),
+        }
+    };
+    if completion.nvme_sct != 0 || completion.nvme_sc != 0 {
+        libos::exit(0xb56);
+    }
+    let base = region.base as *const u8;
+    // SAFETY: the kernel DMA'd one block into our mapped capability page.
+    let sum: usize = (0..4).map(|i| unsafe { base.add(i).read_volatile() } as usize).sum();
+    libos::exit(0x5000 | (sum & 0xFFF))
 }
 
 /// Resolves the gateway MAC via ARP (the dest MAC for everything routed).

@@ -631,6 +631,45 @@ pub fn net_demo(timebase_hz: u64, on_qemu: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Milestone 27: the U-mode storage lane — an app reads the disk.
+// ---------------------------------------------------------------------------
+
+/// Milestone 27 demo (QEMU only; must run BEFORE the RFS demo reformats the
+/// disk): netapp role 2 finds the StorageDevice capability, maps a buffer
+/// page, submits a one-block read of LBA 0 over the storage lane, polls to
+/// completion, and exits with a checksum of the first four bytes — which the
+/// M6 self-test stamped with "FEOX", so the kernel predicts the value.
+pub fn storage_demo(timebase_hz: u64, on_qemu: bool) {
+    if !on_qemu {
+        crate::kprintln!("[feox] storage-lane: skipped (non-QEMU)");
+        return;
+    }
+    let process = match Process::launch(NETAPP_ELF, 2) {
+        Ok(process) => process,
+        Err(error) => {
+            crate::kprintln!("[feox] storage-lane: launch failed: {}", error);
+            return;
+        }
+    };
+    let sig_sum: usize = b"FEOX".iter().map(|&b| b as usize).sum();
+    let expected = 0x5000 | (sig_sum & 0xFFF);
+    crate::kprintln!("[feox] storage-lane: U-mode read of LBA 0...");
+
+    sched::run_with_budget(timebase_hz, 64);
+
+    let (exited, value, _, _, _) = sched::stats(process.slot).unwrap_or((false, 0, 0, 0, 0));
+    let ok = exited && value == expected;
+    teardown(alloc::vec![process]);
+
+    crate::kprintln!(
+        "[feox] milestone 27: U-mode storage lane (LBA 0 read via StorageDevice cap: exit {:#x} expected {:#x}, ok={}).",
+        value,
+        expected,
+        ok
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Milestone 21: hand-rolled TCP in user space.
 // ---------------------------------------------------------------------------
 

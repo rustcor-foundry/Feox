@@ -182,6 +182,50 @@ pub fn net_rx(device: CapHandle, buffer: CapHandle, offset: u64) -> Option<u32> 
     (code == SYSCALL_OK).then_some(length as u32)
 }
 
+/// Submits a one-block storage read: `lba` of namespace `nsid` lands in
+/// `buffer`'s capability memory at `offset`. Returns the poll token.
+pub fn storage_submit_read(
+    device: CapHandle,
+    nsid: u32,
+    lba: u64,
+    buffer: CapHandle,
+    buffer_offset: u64,
+) -> Option<feox_asi::StorageToken> {
+    let args = feox_asi::StorageSubmitReadArgs {
+        device,
+        nsid,
+        lba,
+        block_count: 1,
+        _reserved: 0,
+        buffer,
+        buffer_offset,
+    };
+    let (code, token) = syscall(
+        AsiOp::StorageSubmitRead,
+        (&raw const args).cast(),
+        size_of::<feox_asi::StorageSubmitReadArgs>(),
+    );
+    (code == SYSCALL_OK).then_some(feox_asi::StorageToken(token))
+}
+
+/// Polls a storage submission. `Some(Some(c))` = done with completion `c`,
+/// `Some(None)` = still in flight, `None` = error.
+pub fn storage_poll(
+    token: feox_asi::StorageToken,
+) -> Option<Option<feox_asi::StorageCompletion>> {
+    let mut completion = feox_asi::StorageCompletion::default();
+    let args = feox_asi::StoragePollArgs {
+        token,
+        out_completion: &mut completion,
+    };
+    let (code, ready) = syscall(
+        AsiOp::StoragePoll,
+        (&raw const args).cast(),
+        size_of::<feox_asi::StoragePollArgs>(),
+    );
+    (code == SYSCALL_OK).then(|| (ready == 1).then_some(completion))
+}
+
 /// Parks (repeatedly, tolerating spurious wakes) until `slot`'s counter
 /// reaches `target`. False on error or timeout.
 pub fn park_until(slot: &EventSlot, target: u64, timeout: Duration) -> bool {

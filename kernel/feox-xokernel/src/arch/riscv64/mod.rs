@@ -124,7 +124,14 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // RAM on other SoCs), so only do this on QEMU; real-hardware PCIe is a
     // device-tree-derived driver for later.
     let nvme_controller = if on_qemu {
-        let controller = discover_pci();
+        let mut controller = discover_pci();
+        // Milestone 27: a dedicated I/O queue pair for the U-mode storage
+        // lane (StorageSubmitRead/StoragePoll over a StorageDevice cap).
+        if let Some(controller) = controller.as_mut() {
+            if let Some(ring) = controller.create_extra_io_ring(3) {
+                syscall::init_storage_lane(ring, controller.geometry());
+            }
+        }
         // Milestone 8a: bring up virtio-net and prove the link with an ARP
         // round-trip. On real hardware this is the JH7110 dwmac driver behind
         // the same NetDevice interface.
@@ -227,6 +234,10 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
     // Milestone 21: hand-rolled TCP in user space against the CI echo peer.
     elf::tcp_demo(timebase, on_qemu);
+
+    // Milestone 27: an app reads disk LBA 0 through the storage lane — MUST
+    // run before the RFS demo reformats the disk (it checks the M6 pattern).
+    elf::storage_demo(timebase, on_qemu);
 
     // Milestone 23: an RFS volume on the NVMe disk — format, write through
     // the CoW tree, commit, remount on a second queue pair, read back.

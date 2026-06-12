@@ -27,7 +27,9 @@ use feox_asi::{
     MemMapArgs, MemVtoPArgs, NetDeviceInfo, NetError, NetGetInfoArgs, NetRxArgs, NetTxArgs,
     PhysicalAddress, SYSCALL_CAP_ERROR_BASE, SYSCALL_ERR_INVALID_ARGS,
     SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY, SYSCALL_ERR_UNSUPPORTED,
-    SYSCALL_MEM_ERROR_BASE, SYSCALL_NET_ERROR_BASE, SYSCALL_OK, ThreadParkArgs,
+    SYSCALL_MEM_ERROR_BASE, SYSCALL_NET_ERROR_BASE, SYSCALL_OK, SYSCALL_STORAGE_ERROR_BASE,
+    StorageCompletion, StorageError, StoragePollArgs, StoragePollResult, StorageSubmitReadArgs,
+    ThreadParkArgs,
 };
 
 use super::trap::{REG_A0, REG_A1, TrapFrame};
@@ -88,6 +90,24 @@ pub fn init() {
         );
     }
 
+    // The storage lane's device (if bring-up created one) becomes a
+    // CapType::StorageDevice capability — apps discover it via CapList.
+    if let Some(lane) = storage_lane() {
+        if let Ok(resource) = capability::register_bootstrap_storage_device_resource(
+            PhysicalAddress(0),
+            lane.disk_bytes,
+        ) {
+            if capability::mint_bootstrap_root_capability(
+                resource,
+                CapPermissions::READ | CapPermissions::WRITE,
+            )
+            .is_ok()
+            {
+                minted += 1;
+            }
+        }
+    }
+
     // The live net device (if the QEMU bring-up found one) becomes a
     // CapType::NetDevice capability — apps discover it via CapList and drive
     // the net lane with it.
@@ -142,6 +162,8 @@ pub fn dispatch(opcode_raw: u64, args_ptr: *const u8, args_len: u64, out_value: 
         AsiOp::NetSubmitTx => dispatch_net_tx(args_ptr, args_len, out_value),
         AsiOp::NetPollRx => dispatch_net_rx(args_ptr, args_len, out_value),
         AsiOp::NetGetInfo => dispatch_net_get_info(args_ptr, args_len, out_value),
+        AsiOp::StorageSubmitRead => dispatch_storage_submit_read(args_ptr, args_len, out_value),
+        AsiOp::StoragePoll => dispatch_storage_poll(args_ptr, args_len, out_value),
         AsiOp::ProcYield => SYSCALL_OK,
         // ProcExit is consumed at the trap boundary; reaching here means a
         // kernel-side caller used it, which the transport does not support.
@@ -265,6 +287,163 @@ fn dispatch_net_get_info(args_ptr: *const u8, args_len: u64, _out_value: &mut u6
         unsafe { *args.out_info = info };
     }
     SYSCALL_OK
+}
+
+// ---- storage lane (milestone 27) ------------------------------------------
+
+/// The storage lane's dedicated I/O queue ring + namespace geometry, plus the
+/// single in-flight submission. Set once by [`init_storage_lane`] and never
+/// moved afterwards (the `NvmeIoFuture` points into the ring's inflight map).
+struct StorageLane {
+    ring: feox_nvme::QueueRing<8>,
+    block_size: usize,
+    disk_bytes: u64,
+    pending: Option<(u64, feox_nvme::NvmeIoFuture<8>)>,
+    next_token: u64,
+}
+
+/// Boot-hart-only, same invariant as `frame.rs`.
+static mut STORAGE_LANE: Option<StorageLane> = None;
+
+#[allow(static_mut_refs)]
+fn storage_lane() -> Option<&'static mut StorageLane> {
+    // SAFETY: only the boot hart touches the storage lane (init at bring-up,
+    // dispatch from the trap path with interrupts masked).
+    unsafe { STORAGE_LANE.as_mut() }
+}
+
+/// Binds the storage lane to a dedicated NVMe I/O ring. The
+/// `CapType::StorageDevice` capability itself is minted later by [`init`]
+/// (which resets the bootstrap capability table — minting here would be
+/// wiped).
+pub fn init_storage_lane(ring: feox_nvme::QueueRing<8>, geometry: feox_nvme::NamespaceGeometry) {
+    let block_size = geometry.block_size;
+    // SAFETY: boot-hart-only static (see `storage_lane`).
+    unsafe {
+        STORAGE_LANE = Some(StorageLane {
+            ring,
+            block_size,
+            disk_bytes: geometry.block_count * block_size as u64,
+            pending: None,
+            next_token: 1,
+        });
+    }
+    crate::kprintln!(
+        "[feox] asi: storage lane ready (queue 3, {}-byte blocks)",
+        block_size
+    );
+}
+
+fn storage_error(error: StorageError) -> u64 {
+    SYSCALL_STORAGE_ERROR_BASE + error as u64
+}
+
+/// `StorageSubmitRead`: one-block read into capability-backed memory; value
+/// register returns the poll token.
+fn dispatch_storage_submit_read(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {
+    if args_len != size_of::<StorageSubmitReadArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<StorageSubmitReadArgs>())
+    };
+    match capability::verify_bootstrap_handle(
+        args.device,
+        CapPermissions::READ | CapPermissions::WRITE,
+    ) {
+        Ok(view) if view.cap_type == CapType::StorageDevice => {}
+        _ => return storage_error(StorageError::InvalidCapability),
+    }
+    if args.block_count != 1 {
+        return storage_error(StorageError::UnsupportedBlockCount);
+    }
+    let Some(lane) = storage_lane() else {
+        return storage_error(StorageError::NotInitialized);
+    };
+    if lane.pending.is_some() {
+        return storage_error(StorageError::InflightTableFull);
+    }
+    // The buffer must hold one block past the offset.
+    let needed = lane.block_size.max(1);
+    let Ok((base, size)) = capability::cap_to_phys_base(
+        args.buffer,
+        CapPermissions::READ | CapPermissions::WRITE,
+    ) else {
+        return storage_error(StorageError::InvalidCapability);
+    };
+    if args.buffer_offset.saturating_add(needed as u64) > size {
+        return storage_error(StorageError::InvalidCapability);
+    }
+    let buffer_pa = base.0 + args.buffer_offset;
+
+    let command =
+        feox_nvme::SubmissionQueueEntry::nvm_read(args.nsid, args.lba, 0, buffer_pa, 0);
+    match lane.ring.submit(command) {
+        Ok((_cid, future)) => {
+            let token = lane.next_token;
+            lane.next_token += 1;
+            lane.pending = Some((token, future));
+            *out_value = token;
+            SYSCALL_OK
+        }
+        Err(_) => storage_error(StorageError::SubmitFailed),
+    }
+}
+
+/// `StoragePoll`: drains completions and reports whether the token's
+/// submission resolved (value = `StoragePollResult`; the completion record is
+/// written through the caller pointer when Ready).
+fn dispatch_storage_poll(args_ptr: *const u8, args_len: u64, out_value: &mut u64) -> u64 {
+    if args_len != size_of::<StoragePollArgs>() as u64 || args_ptr.is_null() {
+        return SYSCALL_ERR_INVALID_ARGS;
+    }
+    let args = unsafe {
+        // SAFETY: length checked, pointer non-null, read under sstatus.SUM.
+        *(args_ptr.cast::<StoragePollArgs>())
+    };
+    let Some(lane) = storage_lane() else {
+        return storage_error(StorageError::NotInitialized);
+    };
+    let Some((token, future)) = lane.pending.as_mut() else {
+        return storage_error(StorageError::InvalidToken);
+    };
+    if *token != args.token.0 {
+        return storage_error(StorageError::InvalidToken);
+    }
+    lane.ring.process_completions();
+    let waker = core::task::Waker::noop();
+    let mut cx = core::task::Context::from_waker(waker);
+    match core::future::Future::poll(core::pin::Pin::new(future), &mut cx) {
+        core::task::Poll::Pending => {
+            *out_value = StoragePollResult::NotReady as u64;
+            SYSCALL_OK
+        }
+        core::task::Poll::Ready(outcome) => {
+            lane.pending = None;
+            let completion = match outcome {
+                Ok(completion) => StorageCompletion {
+                    nvme_sct: completion.status.sct,
+                    nvme_sc: completion.status.sc,
+                    dnr: u8::from(completion.status.dnr),
+                    _reserved: 0,
+                },
+                Err(feox_nvme::NvmeError::CommandFailed(status)) => StorageCompletion {
+                    nvme_sct: status.sct,
+                    nvme_sc: status.sc,
+                    dnr: u8::from(status.dnr),
+                    _reserved: 0,
+                },
+                Err(_) => return storage_error(StorageError::SubmitFailed),
+            };
+            if !args.out_completion.is_null() {
+                // SAFETY: caller-owned output slot (written under SUM).
+                unsafe { *args.out_completion = completion };
+            }
+            *out_value = StoragePollResult::Ready as u64;
+            SYSCALL_OK
+        }
+    }
 }
 
 // ---- IRQ lane (milestone 19) ----------------------------------------------
