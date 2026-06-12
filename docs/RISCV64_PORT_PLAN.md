@@ -195,14 +195,29 @@ Still required before it can boot on the RV:
     matches the kernel's count). Mem/storage lanes and dispatcher unification
     with x86_64 are follow-ups.
 
+14. **Threads + preemptive scheduler** ✅ — `sched.rs`: a fixed TCB table of
+    U-mode threads, context-switched at trap level (a thread's whole register
+    state is a `TrapFrame`; a switch swaps the live frame, and the stub's
+    restore path resumes whatever context the frame describes). Preemption is
+    the M9 timer (100 Hz slices); `ProcYield`/`ProcExit` are thread-lifecycle
+    events under the scheduler; entry/exit reuses the M12 longjmp. Prerequisite
+    landed with it: the `sscratch` kernel trap-stack swap (traps from U-mode now
+    run on a dedicated stack, with `sscratch` = trap-stack top in U / 0 in S and
+    re-armed by destination mode on restore), plus a latent stub bug fixed (`t0`
+    was clobbered before being saved, corrupting it in every interrupted
+    context). Proven by 2 yielders (exit 100/101) + 1 spinner preempted until a
+    12-tick budget stops the run; CI asserts the stats line. Threads still share
+    the kernel address space — per-process isolated spaces arrive with the ELF
+    loader.
+
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
 Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
-M13 ASI syscall dispatch + capability table ✅ -> M14 process/thread +
-preemptive scheduler (m9 timer) -> M15 ELF loader -> M16 libOS + app delivery
--> M17 first U-mode app; then NIC-as-capability + hand-rolled TCP in the
-network-service app, then the RV2 hardware tail.
+M13 ASI syscall dispatch + capability table ✅ -> M14 threads + preemptive
+scheduler ✅ -> M15 ELF loader (+ per-process address spaces) -> M16 libOS +
+app delivery -> M17 first U-mode app; then NIC-as-capability + hand-rolled TCP
+in the network-service app, then the RV2 hardware tail.
 
 ## Other follow-ups
 

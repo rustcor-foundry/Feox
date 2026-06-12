@@ -15,9 +15,6 @@ const SIE_STIE: u64 = 1 << 5;
 /// `sstatus.SIE` — supervisor global interrupt enable (bit 1).
 const SSTATUS_SIE: u64 = 1 << 1;
 
-/// Timer tick rate (Hz) for the bring-up demo.
-const TICK_HZ: u64 = 10;
-
 static TICKS: AtomicU64 = AtomicU64::new(0);
 /// Timebase ticks between interrupts (timebase_hz / TICK_HZ).
 static INTERVAL: AtomicU64 = AtomicU64::new(0);
@@ -45,9 +42,10 @@ fn arm_next() {
     }
 }
 
-/// Arms the periodic timer and unmasks supervisor timer interrupts.
-pub fn enable(timebase_hz: u64) {
-    INTERVAL.store(timebase_hz / TICK_HZ, Ordering::Relaxed);
+/// Arms the periodic timer at `tick_hz` and unmasks supervisor timer
+/// interrupts.
+pub fn enable(timebase_hz: u64, tick_hz: u64) {
+    INTERVAL.store(timebase_hz / tick_hz, Ordering::Relaxed);
     arm_next();
     // SAFETY: setting sie.STIE then sstatus.SIE permits timer-interrupt
     // delivery; stvec already points at the trap vector (trap::init).
