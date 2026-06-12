@@ -165,6 +165,8 @@ jobs:
             || { echo "::error::Feox riscv64 native-UART console marker not found"; exit 1; }
           grep -q 'plic @ .*(DT' "$log" \
             || { echo "::error::Feox riscv64 DT-PLIC marker not found"; exit 1; }
+          grep -q 'U-mode storage lane.*ok=true' "$log" \
+            || { echo "::error::Feox riscv64 storage-lane marker not found (or LBA-0 read check failed)"; exit 1; }
           grep -q 'riscv64 bring-up alive' "$log" \
             || { echo "::error::Feox riscv64 boot marker not found"; exit 1; }
           echo "riscv64 smoke-boot markers observed (boot..smp + net + timer irq)."

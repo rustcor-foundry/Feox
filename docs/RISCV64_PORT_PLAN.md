@@ -421,6 +421,21 @@ snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
     can't be a constant) now share one interrupt bring-up path, proven by
     the existing M19 interrupt-wake demo + a new DT-PLIC CI marker.
 
+27. **U-mode storage lane** ✅ — `StorageSubmitRead`/`StoragePoll` (the
+    feox-asi storage ops, previously x86_64-only) land in the riscv64 ecall
+    dispatcher over a dedicated NVMe queue pair (qid 3), gated by a
+    `CapType::StorageDevice` capability minted at lane init (apps find it
+    via CapList). Submit verifies device + buffer capabilities and bounds,
+    issues `nvm_read` on the lane's `QueueRing`, and returns a token; poll
+    drains completions and resolves the (single, for now) in-flight future
+    into a `StorageCompletion`. libOS grows `storage_submit_read`/
+    `storage_poll`; netapp role 2 is the proof: find the cap, map a buffer
+    page, read LBA 0, poll-with-yields to completion, and exit with a
+    checksum of the first four bytes — the M6 self-test's "FEOX" stamp
+    (the demo runs before RFS reformats the disk). One in-flight op and
+    read-only for now; multi-token tables and writes come with the storage
+    service.
+
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.
