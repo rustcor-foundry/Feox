@@ -799,6 +799,23 @@ impl ControllerRegisters {
     }
 }
 
+/// Orders prior memory writes before a following device (MMIO) store — used
+/// between publishing an SQE and ringing the tail doorbell. A plain atomic
+/// `fence` only orders main-memory accesses; the doorbell is an I/O store, so
+/// on riscv64 the fence must name the device-output set. Invisible under
+/// QEMU/TCG (no reordering) but real on hardware.
+#[inline]
+fn io_write_barrier() {
+    #[cfg(target_arch = "riscv64")]
+    // SAFETY: `fence ow, ow` is a barrier-only instruction (the Linux `wmb`)
+    // ordering prior outputs+writes before subsequent outputs+writes.
+    unsafe {
+        core::arch::asm!("fence ow, ow", options(nostack, preserves_flags));
+    }
+    #[cfg(not(target_arch = "riscv64"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 /// A live submission/completion ring pair: the NVMe data path.
 ///
 /// This is the piece the inflight model alone could not provide: `submit`
@@ -875,6 +892,15 @@ impl<const N: usize> QueueRing<N> {
         if let Some(error) = self.failed {
             return Err(error);
         }
+        // A size-N NVMe submission queue holds at most N-1 entries: tail==head
+        // means *empty*, so letting N commands occupy the ring would make a
+        // full SQ indistinguishable from an empty one (and could overwrite an
+        // unfetched SQE). The inflight map has N CIDs; refuse the last one so
+        // outstanding commands never exceed N-1 — keeping `sq_tail` from
+        // lapping the controller's `sq_head`.
+        if self.inflight.available() <= 1 {
+            return Err(NvmeError::QueueFull);
+        }
         let (cid, future) = self.inflight.register()?;
         let sqe = command.with_cid(cid);
         // SAFETY: `new` guarantees `sq` holds N entries; sq_tail < N.
@@ -884,8 +910,10 @@ impl<const N: usize> QueueRing<N> {
                 .add(usize::from(self.sq_tail))
                 .write_volatile(sqe);
         }
-        // Publish the SQE before the doorbell makes it visible.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        // Publish the SQE to memory before the doorbell MMIO store makes it
+        // visible to the controller (write-before-device-output ordering;
+        // a plain atomic fence orders memory only, not the I/O store).
+        io_write_barrier();
         self.sq_tail = (self.sq_tail + 1) % (N as u16);
         self.regs
             .ring_sq_tail_doorbell_strided(self.qid, self.sq_tail, self.dstrd);
@@ -909,10 +937,17 @@ impl<const N: usize> QueueRing<N> {
                 break;
             }
             core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-            self.inflight.complete(NvmeCompletion {
-                cid: cqe.command_id(),
-                status: cqe.status(),
-            });
+            // A controller bug or a torn CQE read could carry a CID outside
+            // the ring; `complete` would index `entries[cid]` and panic. Only
+            // dispatch in-range CIDs (a stale/foreign CID is harmlessly
+            // dropped — the slot's generation guards its future anyway), but
+            // still consume the CQE so the head advances.
+            if usize::from(cqe.command_id()) < N {
+                self.inflight.complete(NvmeCompletion {
+                    cid: cqe.command_id(),
+                    status: cqe.status(),
+                });
+            }
             self.cq_head += 1;
             if usize::from(self.cq_head) == N {
                 self.cq_head = 0;
@@ -1083,6 +1118,41 @@ mod tests {
             Poll::Ready(Ok(completion)) => assert!(completion.succeeded()),
             other => panic!("expected success, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn queue_ring_caps_outstanding_at_n_minus_one() {
+        use super::{
+            CompletionQueueEntry, ControllerRegisters, QueueRing, SubmissionQueueEntry,
+        };
+        use core::ptr::NonNull;
+
+        let mut bar = std::vec![0u8; 0x1100];
+        let mut sq = [SubmissionQueueEntry::default(); 4];
+        let mut cq = [CompletionQueueEntry::default(); 4];
+        // SAFETY (test): bar covers the register bank; rings hold 4 entries.
+        let regs = unsafe { ControllerRegisters::new(bar.as_mut_ptr()) };
+        let mut ring: QueueRing<4> = unsafe {
+            QueueRing::new(
+                regs,
+                1,
+                0,
+                NonNull::new(sq.as_mut_ptr()).unwrap(),
+                NonNull::new(cq.as_mut_ptr()).unwrap(),
+            )
+        };
+
+        // A size-4 SQ holds at most 3 entries: the 4th uncompleted submit must
+        // be refused, so `sq_tail` never laps `sq_head`.
+        let cmd = || SubmissionQueueEntry::nvm_read(1, 0, 0, 0xD000, 0xFFFF);
+        let mut held = std::vec::Vec::new();
+        held.push(ring.submit(cmd()).expect("1st fits"));
+        held.push(ring.submit(cmd()).expect("2nd fits"));
+        held.push(ring.submit(cmd()).expect("3rd fits"));
+        assert!(matches!(ring.submit(cmd()), Err(NvmeError::QueueFull)));
+        // sq_tail wrapped 1→2→3 but never to 0 (== head): 3 entries occupied.
+        let sq_doorbell = u32::from_le_bytes(bar[0x1008..0x100C].try_into().unwrap());
+        assert_eq!(sq_doorbell, 3);
     }
 
     #[test]
