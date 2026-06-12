@@ -9,6 +9,10 @@ authors.workspace = true
 default = ["runtime", "storage"]
 runtime = ["dep:feox-async"]
 storage = ["runtime", "dep:feox-nvme"]
+# The RFS filesystem on the NVMe disk (riscv64 bring-up): rfs-core's testkit
+# feature supplies the poll-loop block_on the boot demo drives the async
+# engine with.
+rfs = ["storage", "dep:rfs-core", "dep:rfs-feox"]
 
 [[bin]]
 name = "feox-xokernel"
@@ -21,6 +25,8 @@ feox-asi = { path = "../../crates/feox-asi" }
 feox-async = { path = "../../crates/feox-async", optional = true }
 feox-boot = { path = "../../crates/feox-boot" }
 feox-nvme = { path = "../../crates/feox-nvme", optional = true }
+rfs-core = { git = "https://gitea.w-sky.net/rustcor/RFS.git", optional = true, features = ["testkit"] }
+rfs-feox = { git = "https://gitea.w-sky.net/rustcor/RFS.git", optional = true }
 
 [lints]
 workspace = true

@@ -353,6 +353,22 @@ snapshots) whose first target is Feox via an `rfs-feox` `BlockDevice` adapter
     gap list items (1)-(3) + (5); next: the `rfs-feox` adapter in the RFS
     repo, then mount an RFS volume on the CI NVMe disk.
 
+23. **An RFS volume on the NVMe disk** ✅ — the cross-repo payoff. RFS M5
+    shipped `rfs-feox` (`NvmeBlockDevice`: `BlockDevice` over `QueueRing`
+    with a self-waking pump future + a page-aligned PRP1 bounce; always
+    presents 4 KiB blocks by aggregating LBAs). The kernel pulls `rfs-core`
+    (+`testkit` for the poll-loop `block_on`) and `rfs-feox` as git deps
+    behind the new `rfs` feature, with a `[patch]` redirecting their
+    `feox-nvme` git dep to the local path crate so the ring types unify.
+    `rfs.rs`: format a filesystem on the QEMU NVMe namespace (16 MiB -> 4096
+    4 KiB blocks, 1 MiB segments), create `/feox.txt`, write through the CoW
+    tree, `sync` (txg commit), DROP the handle — then remount via
+    `Filesystem::open` on a SECOND I/O queue pair (a fresh device handle
+    sharing only the media) and read the payload back. CI asserts the
+    marker. The riscv64 NVMe driver grew `create_extra_io_ring`/
+    `into_io_ring`/`geometry` for this. Follow-ups: zero-copy registered
+    buffers; expose the volume to U-mode via a storage service.
+
 ## Other follow-ups
 
 - Coalesce freed heap regions + reclaim alignment padding in `heap.rs`.

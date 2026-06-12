@@ -16,6 +16,8 @@ pub mod paging;
 pub mod panic;
 pub mod pci;
 pub mod plic;
+#[cfg(feature = "rfs")]
+pub mod rfs;
 #[cfg(feature = "runtime")]
 pub mod runtime;
 pub mod sched;
@@ -92,8 +94,8 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
     // The ECAM/MMIO windows are QEMU-virt-specific (and the MMIO window overlaps
     // RAM on other SoCs), so only do this on QEMU; real-hardware PCIe is a
     // device-tree-derived driver for later.
-    if on_qemu {
-        discover_pci();
+    let nvme_controller = if on_qemu {
+        let controller = discover_pci();
         // Milestone 8a: bring up virtio-net and prove the link with an ARP
         // round-trip. On real hardware this is the JH7110 dwmac driver behind
         // the same NetDevice interface.
@@ -106,9 +108,11 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
             plic::enable_external();
             crate::kprintln!("[feox] plic: net irq {} routed to hart {} (S-mode)", irq, hartid);
         }
+        controller
     } else {
         crate::kprintln!("[feox] pcie/net: skipped (non-QEMU; DT-derived drivers TODO)");
-    }
+        None
+    };
 
     // Milestone 7: bring up the secondary harts via the SBI HSM extension.
     smp::bring_up_secondary_harts(hartid);
@@ -162,6 +166,15 @@ pub fn riscv_main(hartid: usize, dtb: usize) -> ! {
 
     // Milestone 21: hand-rolled TCP in user space against the CI echo peer.
     elf::tcp_demo(timebase, on_qemu);
+
+    // Milestone 23: an RFS volume on the NVMe disk — format, write through
+    // the CoW tree, commit, remount on a second queue pair, read back.
+    #[cfg(feature = "rfs")]
+    if let Some(controller) = nvme_controller {
+        rfs::demo(controller);
+    }
+    #[cfg(not(feature = "rfs"))]
+    drop(nvme_controller);
 
     crate::kprintln!("[feox] riscv64 bring-up alive; parking boot hart.");
 
@@ -376,7 +389,9 @@ fn verify_translations() {
 /// Milestone 6a: proves memory-mapped device access works on riscv64 (the first
 /// non-SBI hardware access) and surfaces the raw BAR0 so the controller-init
 /// pass (6b) knows whether the firmware assigned it.
-fn discover_pci() {
+/// Returns the fully brought-up controller (if a healthy NVMe device was
+/// found) so later milestones — the RFS volume — can keep driving it.
+fn discover_pci() -> Option<nvme::Controller> {
     match pci::scan_for_class(pci::CLASS_NVME) {
         Some(dev) => {
             crate::kprintln!(
@@ -395,17 +410,20 @@ fn discover_pci() {
             // Milestone 6c: admin Identify round-trip.
             // Milestone 6d: identify namespace, create an I/O queue, and verify
             // block I/O by writing a pattern to LBA 0 and reading it back.
-            if let Some(mut controller) = nvme::init(&dev) {
-                if controller.identify_controller()
-                    && controller.identify_namespace()
-                    && controller.create_io_queues()
-                {
-                    let _ = controller.block_io_selftest();
-                }
+            let mut controller = nvme::init(&dev)?;
+            if controller.identify_controller()
+                && controller.identify_namespace()
+                && controller.create_io_queues()
+                && controller.block_io_selftest()
+            {
+                Some(controller)
+            } else {
+                None
             }
         }
         None => {
             crate::kprintln!("[feox] pcie: no NVMe controller found on the root bus");
+            None
         }
     }
 }
