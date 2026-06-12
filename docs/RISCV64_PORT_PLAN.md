@@ -179,16 +179,30 @@ Still required before it can boot on the RV:
     longjmps back via `resume_kernel`. Proves the S↔U round trip; the longjmp is
     the context-switch primitive for the scheduler (M14). (Uses SUM for now; a
     per-thread `sscratch` kernel-stack swap arrives with multiple processes.)
+    M13 generalized this into `umode::run_user_program` (run raw instruction
+    words until `ProcExit`, returning the exit value).
+
+13. **ASI syscall dispatch + capability table** ✅ — the shared `capability.rs`
+    is un-gated (its `MemoryRegionKind`/`PAGE_SIZE` imports now come from the
+    portable `feox-boot` via `bootabi`), and `syscall.rs` adds the riscv64 ecall
+    lane: `a7` = `AsiOp`, `a0`/`a1` = args pointer/length in, result code /
+    value out; the trap dispatcher routes ecall-from-U into it (`ProcExit` tears
+    down the excursion via `umode::exit_to_kernel`). Serves the capability ops
+    (`CapRequest`/`CapRelease`/`CapDelegate`/`CapList`) + `ProcYield`; transport
+    result codes moved into `feox-asi` so both arch lanes share one ABI. Proven
+    by a kernel-side `cap_request` self-test plus a U-mode program that calls
+    `CapList` over the real ABI and exits with the reported total (CI asserts it
+    matches the kernel's count). Mem/storage lanes and dispatcher unification
+    with x86_64 are follow-ups.
 
 ## Toward apps (Route B — capability-based U-mode, hand-rolled)
 
 Goal: a network OS on the RV2, as isolated U-mode capability apps over the ASI.
 Ladder: M10 heap ✅ -> M11 VM abstraction ✅ -> M12 U-mode execution ✅ ->
-M13 ASI syscall dispatch + capability table
-(un-gate `capability.rs`, wire `feox-asi`) -> M14 process/thread + preemptive
-scheduler (m9 timer) -> M15 ELF loader -> M16 libOS + app delivery -> M17 first
-U-mode app; then NIC-as-capability + hand-rolled TCP in the network-service app,
-then the RV2 hardware tail.
+M13 ASI syscall dispatch + capability table ✅ -> M14 process/thread +
+preemptive scheduler (m9 timer) -> M15 ELF loader -> M16 libOS + app delivery
+-> M17 first U-mode app; then NIC-as-capability + hand-rolled TCP in the
+network-service app, then the RV2 hardware tail.
 
 ## Other follow-ups
 
@@ -197,7 +211,9 @@ then the RV2 hardware tail.
   (virtio-net/UART) so RX/completions are interrupt-driven instead of polled.
 - Integrate `feox-nvme` (enable the `storage` feature) to replace the
   hand-rolled NVMe queue logic.
-- Un-gate the shared `memory` / `capability` modules for riscv64.
+- Un-gate the shared `memory` module for riscv64 (`capability` un-gated in M13).
+- Unify the x86_64 SYSCALL and riscv64 ecall dispatchers over one portable core
+  (today the riscv64 lane mirrors the cap-op subset; mem/storage are x86-only).
 
 ## QA-identified hardening (deferred — none fire on current QEMU paths)
 

@@ -29,15 +29,13 @@ const EFER_SCE: u64 = 1 << 0;
 #[cfg(target_os = "none")]
 const SYSCALL_RFLAGS_MASK: u64 = (1 << 9) | (1 << 10);
 
-const SYSCALL_OK: u64 = 0;
-const SYSCALL_ERR_UNSUPPORTED: u64 = 0xFFFF_0001;
-const SYSCALL_ERR_INVALID_OPCODE: u64 = 0xFFFF_0002;
-const SYSCALL_ERR_INVALID_ARGS: u64 = 0xFFFF_0003;
-const SYSCALL_ERR_BATCH_FAILED: u64 = 0xFFFF_0004;
-const SYSCALL_ERR_NOT_READY: u64 = 0xFFFF_0005;
-const SYSCALL_CAP_ERROR_BASE: u64 = 0x100;
-const SYSCALL_MEM_ERROR_BASE: u64 = 0x200;
-const SYSCALL_STORAGE_ERROR_BASE: u64 = 0xFFFF_0500;
+// The transport result codes are shared ABI, defined once in `feox-asi` so the
+// riscv64 ecall lane returns identical codes.
+pub(crate) use feox_asi::{
+    SYSCALL_CAP_ERROR_BASE, SYSCALL_ERR_BATCH_FAILED, SYSCALL_ERR_INVALID_ARGS,
+    SYSCALL_ERR_INVALID_OPCODE, SYSCALL_ERR_NOT_READY, SYSCALL_ERR_UNSUPPORTED,
+    SYSCALL_MEM_ERROR_BASE, SYSCALL_OK, SYSCALL_STORAGE_ERROR_BASE,
+};
 
 const SYSCALL_STACK_SIZE: usize = 16 * 1024;
 

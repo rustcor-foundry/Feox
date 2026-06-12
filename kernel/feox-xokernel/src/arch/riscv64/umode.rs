@@ -2,22 +2,28 @@
 //!
 //! `enter_user` saves the kernel's callee-saved context (a setjmp-style buffer),
 //! switches `sstatus` to return to U-mode (SPP=0) with `sstatus.SUM` set (so the
-//! S-mode trap path may save the trap frame on the user stack), and `sret`s to
-//! the user entry. When the user traps (here, via `ecall`), the trap dispatcher
-//! calls `resume_kernel`, which restores the saved context and `ret`s — so
-//! `enter_user` appears to return to its caller. This longjmp is the
-//! context-switch primitive the scheduler (M14) will build on.
+//! S-mode trap path may access user memory), and `sret`s to the user entry.
+//! When the user requests exit (an `ecall` with `AsiOp::ProcExit`), the trap
+//! dispatcher calls [`exit_to_kernel`], which records the exit value, restores
+//! the saved context, and `ret`s — so `enter_user` appears to return to its
+//! caller. This longjmp is the context-switch primitive the scheduler (M14)
+//! will build on.
 //!
 //! Single-hart only: `KERNEL_CONTEXT` is one global buffer. A per-thread context
 //! arrives with the process/scheduler milestone.
 
 use core::arch::global_asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{frame, paging};
 
 /// setjmp-style buffer: ra, sp, s0..s11 (14 registers), saved by `enter_user`
 /// and restored by `resume_kernel`.
 static mut KERNEL_CONTEXT: [usize; 14] = [0; 14];
+
+/// Exit value passed by the user program through `AsiOp::ProcExit` (its `a0`),
+/// recorded by [`exit_to_kernel`] before the longjmp.
+static EXIT_VALUE: AtomicUsize = AtomicUsize::new(0);
 
 global_asm!(
     ".section .text,\"ax\"",
@@ -43,7 +49,7 @@ global_asm!(
     // so interrupts stay masked in U-mode for this demo.
     "li t1, 0x120",
     "csrc sstatus, t1",
-    // set SUM (bit 18) so S-mode trap code may access the user stack.
+    // set SUM (bit 18) so S-mode trap code may access user memory.
     "li t1, 0x40000",
     "csrs sstatus, t1",
     "csrw sepc, a0",
@@ -76,42 +82,50 @@ global_asm!(
 
 unsafe extern "C" {
     /// Enters U-mode at `entry` with stack `user_sp`; returns (via the trap
-    /// dispatcher's `resume_kernel`) once the user traps.
+    /// dispatcher's `resume_kernel`) once the user exits.
     fn enter_user(entry: usize, user_sp: usize);
     /// Longjmp back into the kernel at the point `enter_user` was called.
     fn resume_kernel() -> !;
 }
 
-/// Returns control to the kernel from a U-mode trap. Called by the dispatcher.
+/// Returns control to the kernel from a U-mode `ProcExit`, recording the exit
+/// value the user passed in `a0`. Called by the trap dispatcher.
 ///
 /// # Safety
 /// Must only be called while a corresponding `enter_user` is on the stack
-/// (i.e. from the trap taken during that U-mode excursion).
-pub unsafe fn resume_to_kernel() -> ! {
-    // SAFETY: upheld by the caller (the U-mode ecall trap path).
+/// (i.e. from a trap taken during that U-mode excursion).
+pub unsafe fn exit_to_kernel(value: usize) -> ! {
+    EXIT_VALUE.store(value, Ordering::Release);
+    // SAFETY: upheld by the caller (the U-mode trap path).
     unsafe { resume_kernel() }
 }
 
-/// User VAs for the demo, in an otherwise-unused sv39 gigapage (4 GiB) so they
-/// never collide with the kernel's mappings.
+/// User VAs for U-mode excursions, in an otherwise-unused sv39 gigapage
+/// (4 GiB) so they never collide with the kernel's mappings.
 const USER_CODE_VA: usize = 0x1_0000_0000;
 const USER_STACK_VA: usize = 0x1_0000_4000;
 
-/// Enters U-mode running a tiny program (`ecall; 1: j 1b`), handles the ecall
-/// (in the trap dispatcher), and returns — proving the S↔U round trip.
-pub fn demo() {
-    let (Some(code), Some(stack)) = (frame::alloc(), frame::alloc()) else {
-        crate::kprintln!("[feox] umode: out of frames for the U-mode demo");
-        return;
+/// Runs a tiny user program (raw instruction words copied into a fresh U-mode
+/// code page, with a fresh U-mode stack page) until it exits via
+/// `AsiOp::ProcExit`, and returns the exit value the user passed in `a0`.
+/// Returns `None` if no frames are available.
+pub fn run_user_program(words: &[u32]) -> Option<usize> {
+    debug_assert!(words.len() * 4 <= frame::FRAME_SIZE);
+    let code = frame::alloc()?;
+    let Some(stack) = frame::alloc() else {
+        frame::free(code);
+        return None;
     };
 
     // Write the user program into the code frame (via its identity mapping),
     // then make it visible to instruction fetch.
-    // SAFETY: `code` is a fresh, identity-mapped, writable frame.
+    // SAFETY: `code` is a fresh, identity-mapped, writable frame and the
+    // program fits in it (asserted above).
     unsafe {
         let p = code as *mut u32;
-        p.write_volatile(0x0000_0073); // ecall
-        p.add(1).write_volatile(0x0000_006f); // 1: j 1b
+        for (i, word) in words.iter().enumerate() {
+            p.add(i).write_volatile(*word);
+        }
         core::arch::asm!("fence.i", options(nostack));
     }
 
@@ -120,9 +134,8 @@ pub fn demo() {
     space.map(USER_STACK_VA, stack, 4096, paging::PTE_U | paging::PTE_R | paging::PTE_W);
     paging::flush_tlb_all();
 
-    crate::kprintln!("[feox] umode: sret to U-mode at {:#x}...", USER_CODE_VA);
-    // SAFETY: the user pages are mapped U-accessible; on the user's ecall the
-    // dispatcher longjmps back here via resume_kernel.
+    // SAFETY: the user pages are mapped U-accessible; on the user's ProcExit
+    // the trap dispatcher longjmps back here via exit_to_kernel.
     unsafe { enter_user(USER_CODE_VA, USER_STACK_VA + 4096) };
 
     space.unmap(USER_CODE_VA, 4096);
@@ -131,5 +144,24 @@ pub fn demo() {
     frame::free(code);
     frame::free(stack);
 
-    crate::kprintln!("[feox] milestone 12: U-mode execution (entered U-mode, ecall, returned).");
+    Some(EXIT_VALUE.load(Ordering::Acquire))
+}
+
+/// Enters U-mode running a tiny program that immediately exits
+/// (`li a0, 0; li a7, ProcExit; ecall`), proving the S↔U round trip.
+pub fn demo() {
+    let program = [
+        0x0000_0513, // li a0, 0       (exit value)
+        0x3010_0893, // li a7, 0x301   (AsiOp::ProcExit)
+        0x0000_0073, // ecall          (traps to S; the dispatcher longjmps back)
+        0x0000_006f, // 1: j 1b        (unreached)
+    ];
+    crate::kprintln!("[feox] umode: sret to U-mode at {:#x}...", USER_CODE_VA);
+    match run_user_program(&program) {
+        Some(value) => crate::kprintln!(
+            "[feox] milestone 12: U-mode execution (entered U-mode, exit({}), returned).",
+            value
+        ),
+        None => crate::kprintln!("[feox] umode: out of frames for the U-mode demo"),
+    }
 }
