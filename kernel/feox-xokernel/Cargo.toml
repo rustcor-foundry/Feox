@@ -25,8 +25,8 @@ feox-asi = { path = "../../crates/feox-asi" }
 feox-async = { path = "../../crates/feox-async", optional = true }
 feox-boot = { path = "../../crates/feox-boot" }
 feox-nvme = { path = "../../crates/feox-nvme", optional = true }
-rfs-core = { git = "https://gitea.w-sky.net/rustcor/RFS.git", optional = true, features = ["testkit"] }
-rfs-feox = { git = "https://gitea.w-sky.net/rustcor/RFS.git", optional = true }
+rfs-core = { git = "https://gitea.w-sky.net/rustcor/RFS.git", tag = "v0.1.2-feox", optional = true, features = ["testkit"] }
+rfs-feox = { git = "https://gitea.w-sky.net/rustcor/RFS.git", tag = "v0.1.2-feox", optional = true }
 
 [lints]
 workspace = true

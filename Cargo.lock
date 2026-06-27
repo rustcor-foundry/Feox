@@ -117,12 +117,12 @@ dependencies = [
 [[package]]
 name = "rfs-core"
 version = "0.1.0"
-source = "git+https://gitea.w-sky.net/rustcor/RFS.git#7c16bef613ace0eabe43516e205da36f399e358f"
+source = "git+https://gitea.w-sky.net/rustcor/RFS.git?tag=v0.1.2-feox#7c16bef613ace0eabe43516e205da36f399e358f"
 
 [[package]]
 name = "rfs-feox"
 version = "0.1.0"
-source = "git+https://gitea.w-sky.net/rustcor/RFS.git#7c16bef613ace0eabe43516e205da36f399e358f"
+source = "git+https://gitea.w-sky.net/rustcor/RFS.git?tag=v0.1.2-feox#7c16bef613ace0eabe43516e205da36f399e358f"
 dependencies = [
  "feox-nvme",
  "rfs-core",
