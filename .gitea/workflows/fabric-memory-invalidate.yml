@@ -4,21 +4,21 @@ name: fabric-memory-invalidate
 # edges anchored to the files that changed — so verification recipes that
 # depended on that code stop being recalled (invalidate, don't discard). Pushes
 # to non-default branches are IGNORED: a feature/throwaway branch must not drop
-# recipes verified against the default branch. Runs on the lx-ai1 host runner,
+# recipes verified against the default branch. Runs on the ai-control host runner,
 # where the edge store lives (~/.conductor/fabric-memory-edges.jsonl); the bin
 # parses the push payload itself, so no checkout/jq is needed.
 #
 # Two steps: (1) re-index the pushed repo in GitNexus so blast-radius reflects
 # current code — skipped for repos with no fabric-memory edges yet (nothing to
 # invalidate, so blast-radius isn't needed) — then (2) expand each changed path
-# to its dependents via the lx-ai1 gitnexus-eval service and invalidate edges
+# to its dependents via the fabric gitnexus-eval service and invalidate edges
 # anchored to that blast radius.
 
 on: [push]
 
 jobs:
   invalidate:
-    runs-on: lx-ai1
+    runs-on: [self-hosted, ai-control]
     steps:
       - name: Refresh GitNexus index for the pushed repo (re-index on push)
         # Re-analyze the canonical clone at the pushed commit so blast-radius
@@ -26,9 +26,9 @@ jobs:
         # (no restart needed). Skips cleanly if no canonical clone exists yet
         # for this repo (org rollout pre-creates them).
         env:
-          GITNEXUS_BIN: /opt/node22/bin/gitnexus
-          INDEX_ROOT: /home/rssvc/.fabric/index
-          EDGES: /home/rssvc/.conductor/fabric-memory-edges.jsonl
+          GITNEXUS_BIN: ${{ vars.FABRIC_GITNEXUS_BIN }}
+          INDEX_ROOT: ${{ vars.FABRIC_INDEX_ROOT }}
+          EDGES: ${{ vars.FABRIC_MEMORY_EDGES }}
         run: |
           # Default-branch only: a push to a feature/throwaway branch must not
           # invalidate recipes verified against the default branch.
@@ -65,11 +65,11 @@ jobs:
             echo "no canonical clone for $repo (clone failed); direct-hit only"
           fi
       - name: Invalidate edges for changed files (+ GitNexus blast-radius)
-        # GITNEXUS_URL points at the lx-ai1 gitnexus-eval service, so changed
+        # GITNEXUS_URL points at the fabric gitnexus-eval service, so changed
         # paths are expanded to their dependents before invalidating. Unset it
         # to fall back to direct-hit only.
         env:
-          GITNEXUS_URL: http://127.0.0.1:4848
+          GITNEXUS_URL: ${{ vars.FABRIC_GITNEXUS_URL }}
         run: |
           # Default-branch only (mirror of the guard above).
           if [ "${{ github.ref }}" != "refs/heads/${{ github.event.repository.default_branch }}" ]; then
