@@ -1,6 +1,6 @@
 # Feox CI Triage
 
-This is the first-response checklist for Feox CI failures on `lx-ws01`.
+This is the first-response checklist for Feox CI failures on the Linux runner.
 
 ## 1. Identify The Lane
 
@@ -82,20 +82,20 @@ pwsh -File ./tools/run-qemu-smoke.ps1 -Architecture x86_64 -TimeoutSeconds 20
 
 Fix:
 
-- install PowerShell on `lx-ws01`
+- install PowerShell on the Linux runner
 
 ### `qemu-system-x86_64` missing
 
 Fix:
 
-- install QEMU on `lx-ws01`
+- install QEMU on the Linux runner
 - or set `FEOX_QEMU` to the real binary path
 
 ### OVMF code or vars file missing
 
 Fix:
 
-- install OVMF on `lx-ws01`
+- install OVMF on the Linux runner
 - or set `FEOX_OVMF_CODE` and `FEOX_OVMF_VARS`
 
 ### QEMU launches but success marker is missing
@@ -129,5 +129,5 @@ Use these docs together:
 - `.gitea/workflows/ci.yml`
 
 The goal is to keep the same PowerShell harnesses working on both the Windows
-workstation and the Linux Gitea runner, with `lx-ws01` treated as part of the
+workstation and the Linux Gitea runner, with that runner treated as part of the
 normal Feox validation rail rather than a special-case environment.

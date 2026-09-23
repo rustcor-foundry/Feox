@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: workspace host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64 kernel
+            target: x86_64-unknown-none
+            cmd: cargo kernel
+          - name: UEFI loader
+            target: x86_64-unknown-uefi
+            cmd: cargo loader
+          # Deliberately NOT `cargo kernel-riscv`, which enables the `rfs`
+          # feature and so pulls rfs-core/rfs-feox from a private repository.
+          # This builds the same target with the default feature set, which
+          # proves the riscv64 port still compiles. Switch to `cargo
+          # kernel-riscv` once RFS is public.
+          - name: riscv64 kernel (no rfs feature)
+            target: riscv64gc-unknown-none-elf
+            cmd: >-
+              cargo build -p feox-xokernel --bin feox-xokernel
+              --target riscv64gc-unknown-none-elf
+              --no-default-features --features runtime,storage
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - run: ${{ matrix.cmd }}
+
+  smoke:
+    name: x86_64 smoke-boot under QEMU
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,x86_64-unknown-uefi
+      - uses: Swatinem/rust-cache@v2
+
+      # tools/run-qemu-smoke.sh boots the UEFI loader under OVMF and asserts a
+      # marker reaches the serial console. It probes several distro paths for
+      # the firmware; Ubuntu's `ovmf` package installs to /usr/share/OVMF,
+      # which is the first one it checks.
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      - name: Bounded smoke boot
+        run: |
+          chmod +x tools/run-qemu-smoke.sh
+          tools/run-qemu-smoke.sh

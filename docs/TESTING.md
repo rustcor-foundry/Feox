@@ -18,7 +18,7 @@ build path, and host readiness for the x86 boot rail.
 
 ## Gitea CI Rail
 
-The normal Feox CI runner is `lx-ws01`.
+The normal Feox CI runner is the `build-linux` host.
 
 The Gitea workflow now validates four lanes on that runner:
 
@@ -27,7 +27,7 @@ The Gitea workflow now validates four lanes on that runner:
 - `cargo loader`
 - bounded `x86_64` QEMU smoke boot through `pwsh -File ./tools/run-qemu-smoke.ps1`
 
-For `lx-ws01` to stay green, it must provide:
+For that runner to stay green, it must provide:
 
 - `pwsh`
 - `qemu-system-x86_64`
@@ -38,7 +38,7 @@ The PowerShell harnesses now search common Linux paths for QEMU and OVMF in
 addition to the existing Windows paths, so the same scripts are used on both
 the workstation and the CI runner.
 
-See `docs/CI_RUNNER_SETUP.md` for the explicit `lx-ws01` runner contract and
+See `docs/CI_RUNNER_SETUP.md` for the explicit runner contract and
 expected Linux package/tool posture.
 Use `docs/CI_TRIAGE.md` as the first-response checklist when a Feox CI lane
 fails on that runner.

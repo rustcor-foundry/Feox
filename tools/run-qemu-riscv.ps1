@@ -16,7 +16,7 @@ param(
 
     # When set, build the ELF locally, ship it to this RustyKey host, and run
     # QEMU there instead of on the local machine. The canonical loop on Paul's
-    # setup: dev/build here (Windows), boot on lx-ws01 (has qemu-system-riscv64).
+    # setup: dev/build here (Windows), boot on a Linux host with qemu-system-riscv64.
     [string]$Remote,
 
     [string]$RemotePath = '/home/rustykey/feox-riscv64.elf',
