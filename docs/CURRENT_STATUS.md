@@ -16,7 +16,7 @@ Last updated: 2026-05-22
 - `cargo loader` passes
 - `tools/stage-efi.ps1` succeeds and produces a staged EFI tree under `target/feox-efi`
 - the x86 host boot rail is working on this workstation end-to-end (QEMU launch, OVMF, loader, kernel handoff, retained runtime-active loop)
-- the Gitea CI rail now targets `lx-ws01` for host tests, target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
+- the Gitea CI rail now targets the Linux runner for host tests, target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
 - the full code review pass from `docs/CODE_REVIEW.md` is complete — all findings are now either resolved in code or intentionally deferred as later architecture work
 
 ### Security and correctness hardening (from code review)

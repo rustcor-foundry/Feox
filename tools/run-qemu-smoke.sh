@@ -3,7 +3,7 @@
 #
 # Mirrors tools/run-qemu-smoke.ps1 closely enough to validate locally on
 # Linux without pwsh. The PowerShell harness is still the authoritative
-# entry point for CI; this script exists so contributors on lx-ws01 (or
+# entry point for CI; this script exists so contributors on the CI runner (or
 # any other Linux host with qemu-system-x86_64 + OVMF + rustup) can run a
 # bounded smoke locally without a PowerShell install.
 

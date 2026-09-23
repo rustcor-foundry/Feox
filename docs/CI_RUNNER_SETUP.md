@@ -4,7 +4,7 @@ This document defines the expected Feox runner posture for Gitea CI.
 
 ## Primary Runner
 
-- runner label: `lx-ws01`
+- runner label: `build-linux`
 - role: normal Feox CI runner for host tests, target builds, lint/check, and
   bounded x86_64 QEMU smoke boot
 
@@ -56,7 +56,7 @@ at the runner or job environment level.
 
 ## Current CI Lanes
 
-The normal Feox workflow on `lx-ws01` runs:
+The normal Feox workflow on the Linux runner runs:
 
 - `cargo test`
 - `cargo kernel`
@@ -91,6 +91,6 @@ alternatives.
 
 ## Triage
 
-If a Feox CI lane fails on `lx-ws01`, start with:
+If a Feox CI lane fails on the Linux runner, start with:
 
 - `docs/CI_TRIAGE.md`

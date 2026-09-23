@@ -100,6 +100,6 @@ arbitrary memory.
 If the asm gets too fiddly to maintain inline, the cleanest path is a
 `build.rs` that invokes `nasm -f bin` on a separate `.asm` file and
 includes the resulting flat binary via `include_bytes!`. Adds nasm as
-a build dependency (CI runner `lx-ws01` would need it installed) but
+a build dependency (the Linux CI runner would need it installed) but
 sidesteps every LLVM MC quirk. Decide once the inline approach proves
 genuinely unworkable, not pre-emptively.

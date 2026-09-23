@@ -40,11 +40,11 @@ and the arch-boundary contract in `arch/mod.rs`. RISC-V slots in as
 cargo kernel-riscv                       # build (riscv64gc-unknown-none-elf, --no-default-features)
 tools\run-qemu-riscv.ps1                 # build + boot under local QEMU virt (needs qemu-system-riscv64)
 tools\run-qemu-riscv.ps1 -TimeoutSeconds 20   # bounded smoke run, checks for the banner marker
-tools\run-qemu-riscv.ps1 -Remote lx-ws01      # build here, ship the ELF, boot on a RustyKey host
+tools\run-qemu-riscv.ps1 -Remote <linux-host>      # build here, ship the ELF, boot on a RustyKey host
 ```
 
 On Paul's setup the build host (Windows) has the Rust toolchain and repo while
-the boot host (lx-ws01, Debian) has `qemu-system-riscv64`. `-Remote <host>`
+the boot host (Debian) has `qemu-system-riscv64`. `-Remote <host>`
 builds locally, `rusk cp`s the self-contained ELF to the host, and runs QEMU
 there (time-bounded, since the boot hart parks in `wfi`), then checks the
 serial log for the banner marker. No Rust or repo checkout is needed remotely.

@@ -231,7 +231,7 @@ This document is the running development record for Feox.
   Bounded smoke now reports `storage-abi-probe: ready sct=0 sc=0
   dnr=0 polls=1` and confirms the same `'FEOX-NVME-SMOKE-LBA0'` data
 - 91 host tests pass (was 90; +1 for `storage_abi_types_keep_expected_sizes`);
-  `cargo kernel` and `cargo loader` clean; CI green on `lx-ws01`
+  `cargo kernel` and `cargo loader` clean; CI green on the Linux runner
 
 ### 2026-05-21 (background drainer task)
 
@@ -602,7 +602,7 @@ This document is the running development record for Feox.
 - extended the shared ASI memory ABI with `MemVtoPArgs` and `MemVtoPBatchArgs`
 - added retained bootstrap mapping lookup by handle and virtual address, then wired bootstrap `mem_vtop` / `mem_vtop_batch` helpers and x86_64 syscall dispatch support
 - added host-safe positive tests for bootstrap virtual-to-physical translation and exposed the retained-runtime test reset path so shared bootstrap state stays isolated
-- expanded `.gitea/workflows/ci.yml` so `lx-ws01` now runs host tests, real target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
+- expanded `.gitea/workflows/ci.yml` so the Linux runner now runs host tests, real target builds, target lint/check coverage, and a bounded x86_64 QEMU smoke boot
 - taught `tools/check-host.ps1` and `tools/run-qemu.ps1` to discover common Linux QEMU and OVMF paths, then added `tools/run-qemu-smoke.ps1` as the normal bounded CI boot wrapper
 - attempted a live bootstrap VM self-test in the higher-half runtime path and confirmed the current VM helpers still rely on page-table-access assumptions that are safe in host tests but not yet hardened for live post-handoff use; reverted that probe and documented the limitation explicitly
 - added `docs/PAGE_TABLE_ACCESS_PLAN.md` to define the next narrow design step: a bootstrap page-table access window for live higher-half paging operations without committing to a permanent direct map yet
