@@ -1,5 +1,6 @@
 target/
 *.log
+tools/host/7zip/
 tools/host/choco-cache/
 tools/host/msys64/
 tools/host/msys2-base-x86_64-*.tar
