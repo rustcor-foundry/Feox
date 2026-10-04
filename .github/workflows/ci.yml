@@ -37,17 +37,13 @@ jobs:
           - name: UEFI loader
             target: x86_64-unknown-uefi
             cmd: cargo loader
-          # Deliberately NOT `cargo kernel-riscv`, which enables the `rfs`
-          # feature and so pulls rfs-core/rfs-feox from a private repository.
-          # This builds the same target with the default feature set, which
-          # proves the riscv64 port still compiles. Switch to `cargo
-          # kernel-riscv` once RFS is public.
-          - name: riscv64 kernel (no rfs feature)
+          # RFS is public now, so this can be the real alias: `rfs` pulls
+          # rfs-core/rfs-feox from github.com/rustcor-foundry/RFS and builds
+          # the riscv64 kernel with the filesystem on NVMe, matching what the
+          # self-hosted smoke boot actually exercises.
+          - name: riscv64 kernel
             target: riscv64gc-unknown-none-elf
-            cmd: >-
-              cargo build -p feox-xokernel --bin feox-xokernel
-              --target riscv64gc-unknown-none-elf
-              --no-default-features --features runtime,storage
+            cmd: cargo kernel-riscv
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
